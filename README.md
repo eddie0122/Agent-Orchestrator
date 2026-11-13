@@ -122,6 +122,8 @@ Opus runs these itself. They are also useful for you:
 | `aaagent wait <task>` | reattach to a running job |
 | `aaagent abandon <task>` | drop a task (its uncommitted changes stay) |
 | `aaagent stop` | stop this project's workers |
+| `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner and worker models |
+| `aaagent --model <name>` | start the chat with another planner model for this chat only |
 | `aaagent doctor` | check the installation |
 
 Task numbers can be short: `aaagent diff 3` means `003-…`.
@@ -142,7 +144,7 @@ These are permission rules, not a sandbox. Workers run as your user, so treat th
 
 ## Configuration
 
-Put overrides in `~/.config/aaagent/config.toml`, or in `<project>/.aaagent/config.toml` for one project. All options and their defaults are in [config.default.toml](config.default.toml).
+Put overrides in `~/.config/aaagent/config.toml`, or in `<project>/.aaagent/config.toml` for one project. All options and their defaults are in [config.default.toml](config.default.toml). `aaagent model` edits these files for you: `aaagent model planner sonnet`, and `--project` for the project config.
 
 ```toml
 [orchestrator]

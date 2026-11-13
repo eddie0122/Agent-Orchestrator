@@ -10,14 +10,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, dispatch, gitutil, session, status, tasks, tui, worker
+from . import __version__, dispatch, gitutil, models, session, status, tasks, tui, worker
 from .config import ROOT, USER_CONFIG, Config
 from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "new", "dispatch", "wait", "status", "diff", "logs", "stop",
-            "abandon", "doctor", "version", "help"}
+            "abandon", "doctor", "version", "help", "model"}
 # Options of `start` that also work without the word: `aaagent -c`.
-START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers"}
+START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model"}
 
 
 def project_root() -> Path:
@@ -35,7 +35,54 @@ def project_root() -> Path:
 def cmd_start(args) -> int:
     prompt = " ".join(args.prompt) if args.prompt else None
     return session.launch(Path.cwd(), prompt, use_tmux=not (args.no_tmux or args.no_workers),
-                          manage_workers=not args.no_workers, resume=args.resume)
+                          manage_workers=not args.no_workers, resume=args.resume,
+                          model=args.model)
+
+
+def cmd_model(args) -> int:
+    project = project_root()
+    cfg = Config.load(project)
+    if args.json:
+        print(json.dumps({
+            "planner": {"model": cfg.planner_model, "choices": models.choices(cfg, models.PLANNER)},
+            "workers": {name: {"model": cfg.worker_model(name)} for name in cfg.worker_names()},
+            "worker_choices": models.worker_choices(cfg),
+        }, indent=1))
+        return 0
+    if args.list:
+        if not args.target:
+            raise FlowError("--list needs a target: use `aaagent model --list planner|worker`")
+        for name in models.choices(cfg, models.resolve_target(cfg, args.target)):
+            print(name)
+        return 0
+    if args.target:
+        return _set_or_pick(args, project, cfg, models.resolve_target(cfg, args.target))
+    rows = [(models.PLANNER, cfg.planner_model)]
+    rows += [(name, cfg.worker_model(name)) for name in cfg.worker_names()]
+    width = max(len(name) for name, _ in rows)
+    for name, model in rows:
+        print(f"{name:<{width}}  {model}")
+    if sys.stdin.isatty():
+        answer = input(f"change which? (planner/{'/'.join(cfg.worker_names())}, enter = none): ")
+        if answer.strip():
+            target = models.resolve_target(cfg, answer.strip())
+            return _set_or_pick(args, project, cfg, target)
+    return 0
+
+
+def _set_or_pick(args, project: Path, cfg, target: str) -> int:
+    """With a model, set it; otherwise pick one from a list on a terminal."""
+    if args.model:
+        print("\n".join(models.set_model(project, args.project, target, args.model)))
+        return 0
+    if not sys.stdin.isatty():
+        raise FlowError("no model given; use `aaagent model <target> <model>`")
+    chosen = models.pick_interactive(cfg, target)
+    if chosen is None:
+        print("unchanged")
+        return 0
+    print("\n".join(models.set_model(project, args.project, target, chosen)))
+    return 0
 
 
 def cmd_ui(args) -> int:
@@ -199,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only open the chat; workers run elsewhere (used by the VSCode extension)")
     s.add_argument("-c", "--continue", "--resume", dest="resume", action="store_true",
                    help="reopen this project's last aaagent chat instead of starting a new one")
+    s.add_argument("--model", help="planner model for this chat only")
     s.set_defaults(func=cmd_start)
 
     s = sub.add_parser("ui", help="dashboard: workers, tasks and live worker output")
@@ -252,6 +300,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("doctor", help="check the installation")
     s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("model", help="show or change the planner and worker models")
+    s.add_argument("target", nargs="?", help="planner or a worker name")
+    s.add_argument("model", nargs="?", help="model name (any name; not checked)")
+    s.add_argument("--list", action="store_true", help="print the choices for <target>")
+    s.add_argument("--json", action="store_true", help="machine-readable models and choices")
+    s.add_argument("--project", action="store_true",
+                   help="write <project>/.aaagent/config.toml instead of the user config")
+    s.set_defaults(func=cmd_model)
 
     s = sub.add_parser("version")
     s.set_defaults(func=lambda a: print(__version__) or 0)

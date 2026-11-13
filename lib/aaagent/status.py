@@ -69,7 +69,8 @@ def status_data(project: Path, cfg: Config) -> dict:
             "updated": task.state_file.stat().st_mtime if task.state_file.exists() else None,
             "path": str(task.path), "files": files,
         })
-    return {"version": __version__, "project": str(project), "workers": workers,
+    return {"version": __version__, "project": str(project),
+            "planner": {"model": cfg.planner_model}, "workers": workers,
             "tasks": out_tasks, "active_task": tasks.active_task(project)}
 
 

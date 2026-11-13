@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Stand-in for `opencode run` used by the tests.
+"""Stand-in for `opencode` used by the tests.
+
+`models` prints a short list of model ids for `aaagent model`; `run` behaves like a job.
 
 Env:
   FAKE_OC_FAIL      comma-separated models that fail (error event, exit 1)
@@ -24,6 +26,11 @@ def main():
     if os.environ.get("FAKE_OC_ARGS_LOG"):
         with open(os.environ["FAKE_OC_ARGS_LOG"], "a") as fh:
             fh.write(json.dumps(args) + "\n")
+    if args and args[0] == "models":
+        for name in ("opencode-go/deepseek-v4.1-flash", "opencode-go/glm-5.3-flash",
+                     "opencode-go/kimi-k3"):
+            print(name)
+        return 0
     if not args or args[0] != "run":
         return 0
     model = args[args.index("-m") + 1]

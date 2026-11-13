@@ -87,8 +87,8 @@ def claude_settings(project: Path) -> dict:
 
 
 def claude_command(project: Path, cfg: Config, claude: str, first_prompt: str | None,
-                   resume_id: str | None = None) -> list[str]:
-    cmd = [claude, "--model", cfg.orchestrator.get("model", "opus"),
+                   resume_id: str | None = None, model: str | None = None) -> list[str]:
+    cmd = [claude, "--model", model or cfg.planner_model,
            "--permission-mode", "acceptEdits",
            "--settings", json.dumps(claude_settings(project)),
            "--append-system-prompt", orchestrator_prompt(cfg, project),
@@ -163,12 +163,13 @@ def init_project(project: Path, cfg: Config) -> None:
 
 
 def launch(start: Path, first_prompt: str | None = None, use_tmux: bool = True,
-           manage_workers: bool = True, resume: bool = False) -> int:
+           manage_workers: bool = True, resume: bool = False, model: str | None = None) -> int:
     """Open the orchestrator chat.
 
     manage_workers=False: only run the chat; something else (the VSCode extension's worker
     terminals) runs the workers.
     resume=True: reopen the last aaagent chat of this project instead of starting a new one.
+    model: planner model for this chat only (default: the configured one).
     """
     project = ensure_repo(start)
     if project is None:
@@ -184,7 +185,7 @@ def launch(start: Path, first_prompt: str | None = None, use_tmux: bool = True,
     resume_id = last_chat(project) if resume else None
     if resume and not resume_id:
         print("no earlier aaagent chat for this project; starting a new one.")
-    cmd = claude_command(project, cfg, claude, first_prompt, resume_id)
+    cmd = claude_command(project, cfg, claude, first_prompt, resume_id, model)
     names = cfg.worker_names()
 
     if not manage_workers:
