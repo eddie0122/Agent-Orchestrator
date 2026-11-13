@@ -73,7 +73,7 @@ function activate(context) {
         if (level === "all") vscode.window.setStatusBarMessage(ev.message, 8000);
       } else if (ev.level === "warning") {
         vscode.window.showWarningMessage(ev.message, "Open Chat").then((pick) => {
-          if (pick) vscode.commands.executeCommand("aaagent.startChat");
+          if (pick) vscode.commands.executeCommand("aaagent.openChat");
         });
       } else {
         vscode.window.showInformationMessage(ev.message, "Show Changes").then((pick) => {
@@ -87,6 +87,9 @@ function activate(context) {
   function render() {
     workers.refresh();
     tasks.refresh();
+    workersView.description = store.data && store.data.planner && store.data.planner.model
+      ? `planner: ${store.data.planner.model}`
+      : undefined;
     const sb = model.statusBar(store.data);
     statusItem.text = sb.text;
     statusItem.tooltip = store.data ? sb.tooltip : (STATE_MESSAGES[store.state] || sb.tooltip);
@@ -197,6 +200,60 @@ function activate(context) {
   const taskOf = (node) => (node && node.task) || null;
   const workerOf = (node) => (node && node.name ? node : null);
 
+  /**
+   * Pick a model for the planner or a worker (from a list or typed) and save it
+   * user-wide or for this project. `node` is a worker tree item, which skips the
+   * target step.
+   */
+  async function selectModel(node) {
+    const p = project();
+    if (!p) return;
+    let info;
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: "aaagent: loading models…" },
+      async () => { info = JSON.parse(await cli.exec(p, ["model", "--json"], { timeout: 70000 })); });
+    let target = node && node.name;
+    if (!target) {
+      const pick = await vscode.window.showQuickPick(model.modelTargets(info), { placeHolder: "Change which model?" });
+      if (!pick) return;
+      target = pick.target;
+    }
+    const current = target === "planner"
+      ? (info.planner || {}).model
+      : ((info.workers || {})[target] || {}).model;
+    const choice = await vscode.window.showQuickPick(model.modelChoices(info, target), {
+      placeHolder: `Model for ${target} (current: ${current})`,
+      matchOnDescription: true,
+    });
+    if (!choice) return;
+    let chosen;
+    if (choice.typed) {
+      const answer = await vscode.window.showInputBox({
+        prompt: target === "planner" ? "Model name" : "Model name (opencode model id, e.g. opencode-go/kimi-k3)",
+        value: current,
+        ignoreFocusOut: true,
+      });
+      chosen = (answer || "").trim();
+      if (!chosen || chosen === current) return;
+    } else {
+      chosen = choice.model;
+    }
+    if (!chosen) return;
+    const scope = await vscode.window.showQuickPick([
+      { label: "All projects", description: "~/.config/aaagent/config.toml", project: false },
+      { label: "This project only", description: ".aaagent/config.toml", project: true },
+    ], { placeHolder: "Save where?" });
+    if (!scope) return;
+    const out = await cli.exec(p, ["model", target, chosen, ...(scope.project ? ["--project"] : [])]);
+    const text = model.short(out, 300);
+    const notable = out.split("\n").some((line) => /^(warning|note):/.test(line.trim()));
+    const buttons = target === "planner" && terminals.chat() ? ["Apply to Current Chat"] : [];
+    const answer = notable
+      ? await vscode.window.showWarningMessage(text, ...buttons)
+      : await vscode.window.showInformationMessage(text, ...buttons);
+    if (answer === "Apply to Current Chat") await terminals.send(`/model ${chosen}`, { submit: true });
+  }
+
   function command(id, fn) {
     sub(vscode.commands.registerCommand(id, async (...args) => {
       try {
@@ -213,9 +270,32 @@ function activate(context) {
 
   command("aaagent.refresh", () => refresh());
 
-  command("aaagent.startChat", async () => {
+  command("aaagent.newChat", async () => {
+    const p = project();
+    if (!p) return;
+    if (terminals.chat() && model.isBusy(store.data)) {
+      const ok = await vscode.window.showWarningMessage(
+        "Start a new chat? The current chat closes.",
+        {
+          modal: true,
+          detail: "A worker is still running. Its job keeps going, and the new chat lists the unfinished task so Opus can pick it up.",
+        },
+        "New Chat");
+      if (ok !== "New Chat") return;
+    }
+    await terminals.newChat(p);
+  });
+
+  command("aaagent.openChat", async () => {
     const p = project();
     if (p) await terminals.startChat(p);
+  });
+
+  command("aaagent.selectModel", (node) => selectModel(node));
+
+  command("aaagent.changeWorkerModel", async (node) => {
+    const w = workerOf(node) || await pickWorker("Change the model of which worker?");
+    if (w) await selectModel(w);
   });
 
   command("aaagent.resumeChat", async () => {

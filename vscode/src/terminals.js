@@ -7,8 +7,12 @@ const model = require("./model");
 const CHAT_NAME = "aaagent: chat";
 const workerName = (name) => `aaagent: ${name}`;
 
+// Terminals we disposed ourselves. VSCode can keep a disposed terminal in `window.terminals`
+// for a moment, so a "new chat" must not mistake it for the open one.
+const closing = new WeakSet();
+
 function findTerminal(name) {
-  return vscode.window.terminals.find((t) => t.name === name && t.exitStatus === undefined);
+  return vscode.window.terminals.find((t) => t.name === name && t.exitStatus === undefined && !closing.has(t));
 }
 
 function sleep(ms) {
@@ -103,6 +107,27 @@ class Terminals {
     });
     term.show(false);
     return term;
+  }
+
+  /** Close the chat, if one is open. True when a chat was closed. */
+  async closeChat() {
+    const existing = this.chat();
+    if (!existing) return false;
+    closing.add(existing);
+    existing.dispose();
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      if (existing.exitStatus !== undefined) break;
+      if (!vscode.window.terminals.includes(existing)) break;
+      await sleep(100);
+    }
+    return true;
+  }
+
+  /** Close the current chat and open a fresh one (a running worker job keeps going). */
+  async newChat(project, firstPrompt) {
+    await this.closeChat();
+    return this.startChat(project, firstPrompt);
   }
 
   /** Type text into the running chat. Multi-line text arrives as one paste. */

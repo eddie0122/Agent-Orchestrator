@@ -6,6 +6,7 @@ const path = require("path");
 const record = {
   commands: new Map(), executed: [], terminals: [], messages: [], context: {}, treeViews: {},
   statusItems: [], contentProviders: {}, watchers: [], config: {}, opened: [],
+  quickPicks: [], inputBoxes: [],
 };
 
 class EventEmitter {
@@ -41,6 +42,7 @@ const vscode = {
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
   StatusBarAlignment: { Left: 1, Right: 2 },
   TerminalLocation: { Panel: 1, Editor: 2 },
+  ProgressLocation: { SourceControl: 1, Window: 10, Notification: 15 },
   ViewColumn: { Active: -1, Beside: -2 },
   commands: {
     registerCommand(id, fn) { record.commands.set(id, fn); return { dispose() {} }; },
@@ -57,12 +59,13 @@ const vscode = {
     createTreeView(id, opts) { const v = { id, ...opts, dispose() {} }; record.treeViews[id] = v; return v; },
     createStatusBarItem() { const s = { show() { this.visible = true; }, dispose() {} }; record.statusItems.push(s); return s; },
     createTerminal: makeTerminal,
-    showInformationMessage: async (m) => { record.messages.push(["info", m]); },
+    withProgress: async (opts, fn) => fn({ report() {} }),
+    showInformationMessage: async (m) => { record.messages.push(["info", m]); return record.answer; },
     showWarningMessage: async (m) => { record.messages.push(["warning", m]); return record.answer; },
     showErrorMessage: async (m) => { record.messages.push(["error", m]); },
     setStatusBarMessage: (m) => { record.messages.push(["status", m]); return { dispose() {} }; },
-    showInputBox: async () => record.inputBox,
-    showQuickPick: async (items) => items[0],
+    showInputBox: async () => (record.inputBoxes.length ? record.inputBoxes.shift() : record.inputBox),
+    showQuickPick: async (items) => (record.quickPicks.length ? record.quickPicks.shift()(items) : items[0]),
     showTextDocument: async (doc) => { record.opened.push(doc); },
     onDidChangeActiveTextEditor: () => ({ dispose() {} }),
   },

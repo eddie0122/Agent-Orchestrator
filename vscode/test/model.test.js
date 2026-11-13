@@ -40,12 +40,50 @@ test("taskItem marks final and active tasks for menus", () => {
   assert.match(item.tooltip, /next: fix round 2 → glm/);
 });
 
-test("workerItem shows the job a worker is running", () => {
-  const w = model.workerItem({ name: "deepseek", model: "m", pid: 9, state: "running", queued: 1,
-    job: { task: "004-health", phase: "fix", round: 2 } });
-  assert.strictEqual(w.description, "fixing 004 r2 · 1 queued");
+test("workerItem shows the job a worker is running and its model", () => {
+  const w = model.workerItem({ name: "deepseek", model: "opencode-go/deepseek-v4.1-flash", pid: 9, state: "running",
+    queued: 1, job: { task: "004-health", phase: "fix", round: 2 } });
+  assert.strictEqual(w.description, "fixing 004 r2 · deepseek-v4.1-flash · 1 queued");
   assert.strictEqual(w.contextValue, "worker.running");
-  assert.strictEqual(model.workerItem({ name: "glm", state: "stopped", queued: 0 }).description, "stopped");
+  assert.strictEqual(model.workerItem({ name: "glm", model: "opencode-go/glm-5.3-flash", state: "idle", queued: 0 }).description,
+    "waiting for a plan · glm-5.3-flash");
+  assert.strictEqual(model.workerItem({ name: "glm", model: "opencode-go/glm-5.3-flash", state: "stopped", queued: 0 }).description,
+    "stopped");
+});
+
+const modelInfo = () => ({
+  planner: { model: "opus", choices: ["sonnet", "opus", "haiku"] },
+  workers: {
+    deepseek: { model: "opencode-go/deepseek-v4.1-flash" },
+    glm: { model: "opencode-go/glm-5.3-flash" },
+  },
+  worker_choices: ["opencode-go/kimi-k3", "opencode-go/glm-5.3-flash"],
+});
+
+test("modelTargets lists the planner first, then the workers", () => {
+  assert.deepStrictEqual(model.modelTargets(modelInfo()), [
+    { label: "Planner (Claude)", description: "opus", target: "planner" },
+    { label: "Worker: deepseek", description: "opencode-go/deepseek-v4.1-flash", target: "deepseek" },
+    { label: "Worker: glm", description: "opencode-go/glm-5.3-flash", target: "glm" },
+  ]);
+});
+
+test("modelChoices offers typing first, then the current model first and marked", () => {
+  const info = modelInfo();
+  const planner = model.modelChoices(info, "planner");
+  assert.strictEqual(planner[0].typed, true);
+  assert.deepStrictEqual(planner.slice(1), [
+    { label: "opus", model: "opus", description: "current" },
+    { label: "sonnet", model: "sonnet" },
+    { label: "haiku", model: "haiku" },
+  ]);
+  // the worker's current model is not in `opencode models`: it is added first
+  assert.deepStrictEqual(model.modelChoices(info, "deepseek"), [
+    { label: "$(edit) Type a model name…", typed: true },
+    { label: "opencode-go/deepseek-v4.1-flash", model: "opencode-go/deepseek-v4.1-flash", description: "current" },
+    { label: "opencode-go/kimi-k3", model: "opencode-go/kimi-k3" },
+    { label: "opencode-go/glm-5.3-flash", model: "opencode-go/glm-5.3-flash" },
+  ]);
 });
 
 test("statusBar prefers running work, then tasks needing the user", () => {
@@ -54,8 +92,10 @@ test("statusBar prefers running work, then tasks needing the user", () => {
   const running = { workers, active_task: "004-health",
     tasks: [task({ status: "running", job: { phase: "commit", worker: "glm" } })] };
   assert.strictEqual(model.statusBar(running).text, "$(sync~spin) aaagent: 004 committing · glm");
-  const needs = { workers, active_task: null, tasks: [task({ status: "failed", attention: "failed" })] };
+  const needs = { workers, planner: { model: "opus" }, active_task: null,
+    tasks: [task({ status: "failed", attention: "failed" })] };
   assert.strictEqual(model.statusBar(needs).text, "$(warning) aaagent: 004 needs you");
+  assert.match(model.statusBar(needs).tooltip, /^planner: opus\n/);
   assert.match(model.statusBar(needs).tooltip, /workers up: deepseek/);
 });
 

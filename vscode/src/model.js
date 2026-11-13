@@ -102,6 +102,43 @@ function fileItem(task, file) {
     contextValue: `file.${file.kind}` };
 }
 
+/** `aaagent model --json` → the quick-pick list of things whose model can be changed. */
+function modelTargets(info) {
+  const planner = (info && info.planner) || {};
+  const workers = (info && info.workers) || {};
+  const out = [{ label: "Planner (Claude)", description: planner.model, target: "planner" }];
+  for (const [name, w] of Object.entries(workers)) {
+    out.push({ label: `Worker: ${name}`, description: w.model, target: name });
+  }
+  return out;
+}
+
+/** Model ids without the provider prefix: `opencode-go/kimi-k3` → `kimi-k3`. */
+function shortModel(id) {
+  const s = String(id || "");
+  const slash = s.lastIndexOf("/");
+  return slash >= 0 ? s.slice(slash + 1) : s;
+}
+
+/** Quick-pick entries for a target's models: a "type a name" entry, then current first. */
+function modelChoices(info, target) {
+  const planner = (info && info.planner) || {};
+  const workers = (info && info.workers) || {};
+  const current = target === "planner" ? planner.model : (workers[target] || {}).model;
+  const list = target === "planner" ? (planner.choices || []) : ((info && info.worker_choices) || []);
+  const names = [];
+  for (const name of list) if (name && !names.includes(name)) names.push(name);
+  if (current) {
+    const i = names.indexOf(current);
+    if (i >= 0) names.splice(i, 1);
+    names.unshift(current);
+  }
+  const entries = names.map((name) => (name === current
+    ? { label: name, model: name, description: "current" }
+    : { label: name, model: name }));
+  return [{ label: "$(edit) Type a model name…", typed: true }, ...entries];
+}
+
 function workerItem(w) {
   let description;
   let icon;
@@ -115,6 +152,7 @@ function workerItem(w) {
     description = "stopped";
     icon = { id: "circle-outline" };
   }
+  if (description !== "stopped" && w.model) description += ` · ${shortModel(w.model)}`;
   if (w.queued) description += ` · ${w.queued} queued`;
   return {
     id: `worker:${w.name}`,
@@ -142,7 +180,8 @@ function statusBar(data) {
     text = `$(hubot) aaagent: ${String(active.number).padStart(3, "0")} ${taskSummary(active)}`;
   }
   const up = (data.workers || []).filter((w) => w.state !== "stopped").map((w) => w.name);
-  const tooltip = `aaagent: ${up.length ? `workers up: ${up.join(", ")}` : "workers stopped"}\nClick to open the aaagent view`;
+  const planner = data.planner && data.planner.model ? `planner: ${data.planner.model}\n` : "";
+  const tooltip = `${planner}aaagent: ${up.length ? `workers up: ${up.join(", ")}` : "workers stopped"}\nClick to open the aaagent view`;
   return { text, tooltip };
 }
 
@@ -189,5 +228,5 @@ function mention(relPath, startLine, endLine) {
 
 module.exports = {
   visibleTasks, taskSummary, taskIcon, taskItem, fileItem, workerItem, statusBar, transitions,
-  isBusy, bracketedPaste, mention, short, isFinal,
+  isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
 };

@@ -46,7 +46,7 @@ It also cleans up an install from before the rename (the `aa` command, `aa-*` ag
 After installing, run **Developer: Reload Window** once. Then:
 
 1. Open a project folder (a git repository) and click the **aaagent** icon in the activity bar.
-2. Click **Start Chat** (or run `aaagent: Ask Opus…` from the command palette and type the request). **Resume Last Chat** (in the Tasks view's `…` menu) reopens the previous conversation instead.
+2. Click **New Chat** (or run `aaagent: Ask Opus…` from the command palette and type the request). **New Chat** closes the open chat and starts a fresh one; **Open Chat** and **Resume Last Chat** are in the Tasks view's `…` menu.
    The Opus chat opens as an editor tab, and the DeepSeek and GLM workers open as split terminals in the panel.
 3. Talk to Opus. The sidebar follows along:
    - **Workers**: who is running what. Inline buttons show a worker's output or stop it.
@@ -55,6 +55,7 @@ After installing, run **Developer: Reload Window** once. Then:
 
 Other handy commands:
 
+- **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
 - **Show Task Changes**, **Abandon Task…**, **Stop All Workers**, **Check Installation**, **Open Configuration**.
 

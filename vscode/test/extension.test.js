@@ -76,6 +76,7 @@ test("activate() against a real project", async (t) => {
   assert.strictEqual(workersTree.getTreeItem(workersTree.getChildren()[0]).description, "stopped");
   assert.deepStrictEqual(tasksTree.getChildren(), []);
   assert.strictEqual(rec.watchers.length, 1);
+  assert.match(rec.treeViews["aaagent.workers"].description, /^planner: /);
 
   // a task with a plan, a (hand-written) report and a review
   sh(project, AAAGENT, ["new", "health endpoint"]);
@@ -106,8 +107,8 @@ test("activate() against a real project", async (t) => {
   // status bar
   assert.match(rec.statusItems[0].text, /aaagent/);
 
-  // Start Chat: one terminal per worker (split), then the chat as an editor tab
-  await rec.commands.get("aaagent.startChat")();
+  // Open Chat: one terminal per worker (split), then the chat as an editor tab
+  await rec.commands.get("aaagent.openChat")();
   const names = rec.terminals.map((x) => x.name);
   assert.deepStrictEqual(names, ["aaagent: deepseek", "aaagent: glm", "aaagent: chat"]);
   const [ds, glm, chat] = rec.terminals;
@@ -118,18 +119,36 @@ test("activate() against a real project", async (t) => {
   assert.strictEqual(chat.creationOptions.location.viewColumn, stub.ViewColumn.Active);
   assert.strictEqual(chat.creationOptions.cwd, api.store.data.project);
 
-  // Start Chat again reuses terminals
-  await rec.commands.get("aaagent.startChat")();
+  // Open Chat again reuses terminals
+  await rec.commands.get("aaagent.openChat")();
   assert.strictEqual(rec.terminals.length, 3);
+
+  // New Chat while busy asks first; Cancel keeps the current chat
+  api.store.data.tasks.push({ id: "999-busy", status: "running" });
+  rec.answer = undefined;
+  await rec.commands.get("aaagent.newChat")();
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "warning" && /new chat/i.test(m)), JSON.stringify(rec.messages));
+  assert.strictEqual(chat.exitStatus, undefined);
+  api.store.data.tasks.pop();
+
+  // New Chat: the open chat is closed and a fresh one takes its place
+  await rec.commands.get("aaagent.newChat")();
+  assert.ok(chat.exitStatus !== undefined, "the old chat is disposed");
+  const liveChats = rec.terminals.filter((x) => x.name === "aaagent: chat" && x.exitStatus === undefined);
+  assert.strictEqual(liveChats.length, 1);
+  const newChat = liveChats[0];
+  assert.notStrictEqual(newChat, chat);
+  assert.deepStrictEqual(newChat.creationOptions.shellArgs, ["start", "--no-workers"]);
+  assert.strictEqual(rec.terminals.length, 4);
 
   // Ask with a running chat: pasted, then Enter
   rec.inputBox = "add tests\nfor app.py";
   await rec.commands.get("aaagent.ask")();
   await tick(200);
-  assert.deepStrictEqual(chat.sent, [["\x1b[200~add tests\nfor app.py\x1b[201~", false], ["\r", false]]);
+  assert.deepStrictEqual(newChat.sent, [["\x1b[200~add tests\nfor app.py\x1b[201~", false], ["\r", false]]);
 
   // Ask with no chat: the request becomes the chat's first prompt
-  chat.dispose();
+  newChat.dispose();
   rec.inputBox = "explain app.py";
   await rec.commands.get("aaagent.ask")();
   const chat2 = rec.terminals.at(-1);
@@ -140,7 +159,46 @@ test("activate() against a real project", async (t) => {
   assert.strictEqual(rec.terminals.at(-1), chat2);
   chat2.dispose();
   await rec.commands.get("aaagent.resumeChat")();
-  assert.deepStrictEqual(rec.terminals.at(-1).creationOptions.shellArgs, ["start", "--no-workers", "--continue"]);
+  const chat3 = rec.terminals.at(-1);
+  assert.deepStrictEqual(chat3.creationOptions.shellArgs, ["start", "--no-workers", "--continue"]);
+
+  // Select Model: the planner from the list, saved to the user config, applied to the open chat.
+  const userConfig = path.join(tmp, "user-config.toml");
+  const oldUserConfig = process.env.AAAGENT_USER_CONFIG;
+  const oldOpencode = process.env.AAAGENT_OPENCODE_BIN;
+  process.env.AAAGENT_USER_CONFIG = userConfig;
+  process.env.AAAGENT_OPENCODE_BIN = path.join(REPO, "tests", "fake_opencode.py");
+  t.after(() => {
+    if (oldUserConfig === undefined) delete process.env.AAAGENT_USER_CONFIG;
+    else process.env.AAAGENT_USER_CONFIG = oldUserConfig;
+    if (oldOpencode === undefined) delete process.env.AAAGENT_OPENCODE_BIN;
+    else process.env.AAAGENT_OPENCODE_BIN = oldOpencode;
+  });
+  rec.answer = "Apply to Current Chat";
+  rec.quickPicks = [
+    (items) => items.find((i) => i.target === "planner"),
+    (items) => items.find((i) => i.model === "sonnet"),
+    (items) => items.find((i) => i.project === false),
+  ];
+  await rec.commands.get("aaagent.selectModel")();
+  assert.match(fs.readFileSync(userConfig, "utf8"), /model = "sonnet"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /planner model: sonnet/.test(m)),
+    JSON.stringify(rec.messages));
+  assert.deepStrictEqual(chat3.sent.at(-2), ["\x1b[200~/model sonnet\x1b[201~", false]);
+
+  // Select Model: a worker's model typed by hand, saved to this project only.
+  rec.answer = undefined;
+  rec.quickPicks = [
+    (items) => items.find((i) => i.target === "deepseek"),
+    (items) => items.find((i) => i.typed),
+    (items) => items.find((i) => i.project === true),
+  ];
+  rec.inputBoxes = ["opencode-go/kimi-k3"];
+  await rec.commands.get("aaagent.selectModel")();
+  assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
+    /model = "opencode-go\/kimi-k3"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /deepseek model: opencode-go\/kimi-k3/.test(m)),
+    JSON.stringify(rec.messages));
 
   // abandon (confirmed)
   rec.answer = "Abandon";
