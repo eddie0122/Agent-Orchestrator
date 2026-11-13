@@ -1,0 +1,88 @@
+"use strict";
+const test = require("node:test");
+const assert = require("node:assert");
+const model = require("../src/model");
+
+const task = (over) => ({
+  id: "004-health", number: 4, title: "health", status: "planning", round: 0, worker: null,
+  verdict: null, plan_written: true, job: null, next: null, blocked: null, attention: null,
+  commit: null, files: [], ...over,
+});
+
+test("visibleTasks keeps unfinished tasks and the newest finished ones", () => {
+  const tasks = [
+    task({ id: "001-a", number: 1, status: "committed" }),
+    task({ id: "002-b", number: 2, status: "committed" }),
+    task({ id: "003-c", number: 3, status: "abandoned" }),
+    task({ id: "004-d", number: 4, status: "awaiting_review" }),
+  ];
+  assert.deepStrictEqual(model.visibleTasks(tasks, 1).map((t) => t.number), [4, 3]);
+  assert.deepStrictEqual(model.visibleTasks(tasks).map((t) => t.number), [4, 3, 2, 1]);
+});
+
+test("taskSummary describes each stage", () => {
+  assert.strictEqual(model.taskSummary(task({ plan_written: false })), "planning");
+  assert.strictEqual(model.taskSummary(task({ next: { phase: "implement" } })), "plan ready");
+  assert.strictEqual(model.taskSummary(task({ status: "running", job: { phase: "implement", worker: "deepseek" } })),
+    "implementing · deepseek");
+  assert.strictEqual(model.taskSummary(task({ status: "awaiting_review", round: 2 })), "in review (round 2)");
+  assert.strictEqual(model.taskSummary(task({ status: "awaiting_review", round: 1, next: { phase: "commit" } })),
+    "in review (round 1)");
+  assert.strictEqual(model.taskSummary(task({ status: "committed", commit: "abcdef123456" })), "committed abcdef1");
+  assert.strictEqual(model.taskSummary(task({ status: "failed", attention: "failed" })), "failed: needs you");
+});
+
+test("taskItem marks final and active tasks for menus", () => {
+  assert.strictEqual(model.taskItem(task({ status: "committed" })).contextValue, "task.final");
+  const item = model.taskItem(task({ next: { phase: "fix", round: 2, worker: "glm" } }));
+  assert.strictEqual(item.contextValue, "task.active");
+  assert.strictEqual(item.label, "004 health");
+  assert.match(item.tooltip, /next: fix round 2 → glm/);
+});
+
+test("workerItem shows the job a worker is running", () => {
+  const w = model.workerItem({ name: "deepseek", model: "m", pid: 9, state: "running", queued: 1,
+    job: { task: "004-health", phase: "fix", round: 2 } });
+  assert.strictEqual(w.description, "fixing 004 r2 · 1 queued");
+  assert.strictEqual(w.contextValue, "worker.running");
+  assert.strictEqual(model.workerItem({ name: "glm", state: "stopped", queued: 0 }).description, "stopped");
+});
+
+test("statusBar prefers running work, then tasks needing the user", () => {
+  const workers = [{ name: "deepseek", state: "idle" }, { name: "glm", state: "stopped" }];
+  assert.match(model.statusBar(null).text, /aaagent$/);
+  const running = { workers, active_task: "004-health",
+    tasks: [task({ status: "running", job: { phase: "commit", worker: "glm" } })] };
+  assert.strictEqual(model.statusBar(running).text, "$(sync~spin) aaagent: 004 committing · glm");
+  const needs = { workers, active_task: null, tasks: [task({ status: "failed", attention: "failed" })] };
+  assert.strictEqual(model.statusBar(needs).text, "$(warning) aaagent: 004 needs you");
+  assert.match(model.statusBar(needs).tooltip, /workers up: deepseek/);
+});
+
+test("transitions notify on commit, attention, and finished rounds; first load is silent", () => {
+  const before = { tasks: [task({ status: "running" }), task({ id: "005-x", number: 5, status: "running" })] };
+  const after = { tasks: [
+    task({ status: "committed", commit: "1234567890" }),
+    task({ id: "005-x", number: 5, status: "awaiting_review", round: 1 }),
+  ] };
+  assert.deepStrictEqual(model.transitions(null, after), []);
+  const ev = model.transitions(before, after);
+  assert.deepStrictEqual(ev.map((e) => e.level), ["info", "status"]);
+  assert.match(ev[0].message, /committed \(1234567\)/);
+  const failed = { tasks: [task({ status: "failed", attention: "failed" }), after.tasks[1]] };
+  assert.strictEqual(model.transitions(before, failed)[0].level, "warning");
+  assert.deepStrictEqual(model.transitions(failed, failed), []);
+});
+
+test("isBusy follows running jobs and queues", () => {
+  assert.strictEqual(model.isBusy({ tasks: [task({})], workers: [{ state: "idle", queued: 0 }] }), false);
+  assert.strictEqual(model.isBusy({ tasks: [task({ status: "running" })], workers: [] }), true);
+  assert.strictEqual(model.isBusy({ tasks: [], workers: [{ state: "idle", queued: 1 }] }), true);
+});
+
+test("mention and bracketed paste", () => {
+  assert.strictEqual(model.mention("src/app.py", 10, 20), "@src/app.py#L10-20 ");
+  assert.strictEqual(model.mention("src/app.py", 7, 7), "@src/app.py#L7 ");
+  assert.strictEqual(model.mention("a b.py"), '@"a b.py" ');
+  assert.strictEqual(model.bracketedPaste("x\ny"), "\x1b[200~x\ny\x1b[201~");
+});

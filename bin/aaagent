@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""aaagent launcher. Symlinked into ~/.local/bin by install.sh."""
+
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+
+from aaagent.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

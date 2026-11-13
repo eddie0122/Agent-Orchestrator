@@ -1,0 +1,40 @@
+# aaagent default configuration.
+# Override any value in ~/.config/aaagent/config.toml (user-wide)
+# or <project>/.aaagent/config.toml (one project). Later files win.
+
+[orchestrator]
+# Claude Code model alias or full model id used for planning and review.
+model = "opus"
+# Path to the claude binary. Empty = auto-detect (PATH, ~/.local/bin, VSCode extension).
+claude_bin = ""
+# Extra arguments passed to claude, e.g. ["--effort", "high"].
+extra_args = []
+
+[workers]
+# Path to the opencode binary. Empty = "opencode" on PATH.
+opencode_bin = ""
+# opencode agents installed by install.sh
+implement_agent = "aaagent-worker"
+commit_agent = "aaagent-committer"
+
+[workers.deepseek]
+model = "opencode-go/deepseek-v4.1-flash"
+
+[workers.glm]
+model = "opencode-go/glm-5.3-flash"
+
+[flow]
+# Worker that implements plans unless the plan or --worker says otherwise.
+default_worker = "deepseek"
+# Worker that takes over when the default one fails or keeps failing review.
+fallback_worker = "glm"
+# Stop and ask the user after this many implement/fix rounds without approval.
+max_review_rounds = 3
+# Hand the task to the fallback worker after this many rejected reviews in a row.
+fallback_after_failed_reviews = 2
+# Kill a worker job that runs longer than this.
+job_timeout_minutes = 30
+
+[git]
+# false = .aaagent/ is listed in .git/info/exclude and never committed.
+track_agent_dir = false

@@ -1,0 +1,149 @@
+{
+  "name": "aaagent",
+  "publisher": "local",
+  "displayName": "aaagent",
+  "description": "Chat with Claude Opus as planner and reviewer while opencode workers (DeepSeek, GLM) implement and commit.",
+  "version": "0.1.0",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "categories": [
+    "Other",
+    "AI"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aaagent",
+          "title": "aaagent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "aaagent": [
+        {
+          "id": "aaagent.workers",
+          "name": "Workers"
+        },
+        {
+          "id": "aaagent.tasks",
+          "name": "Tasks"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "aaagent.tasks",
+        "contents": "No tasks yet. Start a chat and ask Opus for a change: it writes a plan, a worker implements it, Opus reviews, and a worker commits.\n[Start Chat](command:aaagent.startChat)\n[Ask Opus…](command:aaagent.ask)\n[Resume Last Chat](command:aaagent.resumeChat)",
+        "when": "aaagent.state == ready"
+      },
+      {
+        "view": "aaagent.tasks",
+        "contents": "This folder is not a git repository. aaagent needs git to diff and commit the workers' changes.\n[Initialize Repository](command:git.init)",
+        "when": "aaagent.state == noRepo"
+      },
+      {
+        "view": "aaagent.tasks",
+        "contents": "The aaagent command was not found. Run install.sh in the aaagent folder, or set its path in the settings.\n[Open Settings](command:workbench.action.openSettings?%5B%22aaagent.path%22%5D)",
+        "when": "aaagent.state == noCli"
+      },
+      {
+        "view": "aaagent.tasks",
+        "contents": "Open a folder to use aaagent.\n[Open Folder](command:workbench.action.files.openFolder)",
+        "when": "aaagent.state == noFolder"
+      },
+      {
+        "view": "aaagent.tasks",
+        "contents": "aaagent could not read this project's status.\n[Check Installation](command:aaagent.doctor)\n[Retry](command:aaagent.refresh)",
+        "when": "aaagent.state == error"
+      }
+    ],
+    "commands": [
+      { "command": "aaagent.startChat", "title": "Start Chat", "category": "aaagent", "icon": "$(comment-discussion)" },
+      { "command": "aaagent.resumeChat", "title": "Resume Last Chat", "category": "aaagent", "icon": "$(history)" },
+      { "command": "aaagent.ask", "title": "Ask Opus…", "category": "aaagent", "icon": "$(sparkle)" },
+      { "command": "aaagent.sendSelection", "title": "Send Selection to Chat", "category": "aaagent" },
+      { "command": "aaagent.refresh", "title": "Refresh", "category": "aaagent", "icon": "$(refresh)" },
+      { "command": "aaagent.showDiff", "title": "Show Task Changes", "category": "aaagent", "icon": "$(diff)" },
+      { "command": "aaagent.openTaskFolder", "title": "Reveal Task Folder", "category": "aaagent", "icon": "$(folder-opened)" },
+      { "command": "aaagent.abandonTask", "title": "Abandon Task…", "category": "aaagent", "icon": "$(trash)" },
+      { "command": "aaagent.startWorkers", "title": "Start Workers", "category": "aaagent", "icon": "$(play)" },
+      { "command": "aaagent.showWorker", "title": "Show Worker Output", "category": "aaagent", "icon": "$(terminal)" },
+      { "command": "aaagent.stopWorker", "title": "Stop Worker", "category": "aaagent", "icon": "$(debug-stop)" },
+      { "command": "aaagent.stopWorkers", "title": "Stop All Workers", "category": "aaagent", "icon": "$(debug-stop)" },
+      { "command": "aaagent.doctor", "title": "Check Installation", "category": "aaagent", "icon": "$(checklist)" },
+      { "command": "aaagent.openConfig", "title": "Open Configuration", "category": "aaagent", "icon": "$(gear)" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "aaagent.startChat", "when": "view == aaagent.tasks", "group": "navigation@1" },
+        { "command": "aaagent.ask", "when": "view == aaagent.tasks", "group": "navigation@2" },
+        { "command": "aaagent.refresh", "when": "view == aaagent.tasks", "group": "navigation@3" },
+        { "command": "aaagent.resumeChat", "when": "view == aaagent.tasks", "group": "1_more@1" },
+        { "command": "aaagent.startWorkers", "when": "view == aaagent.workers", "group": "navigation@1" },
+        { "command": "aaagent.stopWorkers", "when": "view == aaagent.workers", "group": "navigation@2" },
+        { "command": "aaagent.doctor", "when": "view == aaagent.workers", "group": "1_more@1" },
+        { "command": "aaagent.openConfig", "when": "view == aaagent.workers", "group": "1_more@2" }
+      ],
+      "view/item/context": [
+        { "command": "aaagent.showDiff", "when": "view == aaagent.tasks && viewItem =~ /^task\\./", "group": "inline@1" },
+        { "command": "aaagent.showDiff", "when": "view == aaagent.tasks && viewItem =~ /^task\\./", "group": "1_view@1" },
+        { "command": "aaagent.openTaskFolder", "when": "view == aaagent.tasks && viewItem =~ /^task\\./", "group": "1_view@2" },
+        { "command": "aaagent.abandonTask", "when": "view == aaagent.tasks && viewItem == task.active", "group": "2_manage@1" },
+        { "command": "aaagent.showWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\./", "group": "inline@1" },
+        { "command": "aaagent.stopWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\.(idle|running)$/", "group": "inline@2" }
+      ],
+      "editor/context": [
+        { "command": "aaagent.sendSelection", "when": "resourceScheme == file && aaagent.state == ready", "group": "aaagent@1" }
+      ],
+      "commandPalette": [
+        { "command": "aaagent.sendSelection", "when": "editorIsOpen && aaagent.state == ready" }
+      ]
+    },
+    "configuration": {
+      "title": "aaagent",
+      "properties": {
+        "aaagent.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `aaagent` command. Empty = `~/.local/bin/aaagent`, then `PATH`."
+        },
+        "aaagent.chatLocation": {
+          "type": "string",
+          "enum": ["editor", "panel"],
+          "enumDescriptions": ["Open the chat as an editor tab", "Open the chat in the terminal panel"],
+          "default": "editor",
+          "description": "Where the Opus chat terminal opens."
+        },
+        "aaagent.notifications": {
+          "type": "string",
+          "enum": ["all", "important", "off"],
+          "enumDescriptions": [
+            "Commits and problems as notifications; progress in the status bar",
+            "Only commits and problems",
+            "None"
+          ],
+          "default": "all",
+          "description": "Which task events to show."
+        },
+        "aaagent.finishedTasksShown": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "description": "How many committed or abandoned tasks to keep in the Tasks view."
+        }
+      }
+    }
+  }
+}
