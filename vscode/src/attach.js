@@ -112,7 +112,7 @@ function html(webview, nonce) {
 <h1>Attach Image</h1>
 <div class="drop" id="drop" tabindex="0">
   <p>Paste a screenshot here (Ctrl+V / ⌘V), or hold Shift and drop image files</p>
-  <p class="hint">Hold <kbd>Shift</kbd> while dropping from your computer, otherwise VSCode opens the file. Up to 5 MB: PNG, JPEG, GIF or WebP.</p>
+  <p class="hint">Hold <kbd>Shift</kbd> while dropping from your computer, otherwise VSCode opens the file. Dropping an image on the chat terminal with Shift also works: aaagent copies it from your computer. Up to 5 MB: PNG, JPEG, GIF or WebP.</p>
   <button id="choose" type="button">Choose files…</button>
 </div>
 <input id="picker" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>

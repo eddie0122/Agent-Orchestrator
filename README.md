@@ -57,7 +57,7 @@ Other handy commands:
 
 - **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
-- **Attach Image…** (Tasks view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
+- **Attach Image…** (Tasks view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
 - **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.
 - **Show Task Changes**, **Abandon Task…**, **Stop All Workers**, **Check Installation**, **Open Configuration**.
 
@@ -137,7 +137,7 @@ Task numbers can be short: `aaagent diff 3` means `003-…`.
 
 ### Images
 
-The chat runs on the machine where aaagent runs, so an image has to be on that machine first: copy it with `scp`, or drag it into VSCode's Explorer. Then run `aaagent attach shot.png`; it types `@.aaagent/attachments/…` into the chat, and Opus reads the image. You can also type `@path/to/image.png` in the chat yourself. On a desktop Linux session, `xclip -selection clipboard -t image/png -o | aaagent attach -` attaches the clipboard. Attachments live in `.aaagent/attachments/`: they are never committed, and you can delete them at any time.
+The chat runs on the machine where aaagent runs, so an image has to be on that machine first: copy it with `scp`, or drag it into VSCode's Explorer. Then run `aaagent attach shot.png`; it types `@.aaagent/attachments/…` into the chat, and Opus reads the image. You can also type `@path/to/image.png` in the chat yourself. A path from another computer (for example `/Users/me/Downloads/band.jpg` over Remote-SSH) is not a file on the server, so Opus cannot open it: it tells you to attach the image instead, and in VSCode dropping it on the chat with Shift copies it for you. On a desktop Linux session, `xclip -selection clipboard -t image/png -o | aaagent attach -` attaches the clipboard. Attachments live in `.aaagent/attachments/`: they are never committed, and you can delete them at any time.
 
 ## Safety rules
 
@@ -191,6 +191,7 @@ commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@examp
   queue/<worker>/   pending and running jobs
   workers/          worker pids and logs
   attachments/      images from `aaagent attach`
+  fetch/            image copy requests between the chat and VSCode
   chat.json         the last chat's session id, for `aaagent -c`
   chat-pane         the tmux pane of the chat, for `aaagent attach`
 ```
@@ -218,3 +219,4 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | `opencode/agents/` | worker agent definitions and permissions |
 | `claude/hooks/guard_edit.py` | blocks Opus edits outside `.aaagent/` |
 | `claude/hooks/record_session.py` | records the chat's session id for `aaagent -c` |
+| `claude/hooks/local_images.py` | copies images from the user's computer that a prompt mentions (VSCode) |

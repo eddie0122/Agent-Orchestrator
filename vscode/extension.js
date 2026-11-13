@@ -9,6 +9,7 @@ const vscode = require("vscode");
 const { AttachPanel } = require("./src/attach");
 const { Cli } = require("./src/cli");
 const { DiffProvider, SCHEME } = require("./src/diff");
+const { LocalFetcher } = require("./src/fetch");
 const model = require("./src/model");
 const { Terminals } = require("./src/terminals");
 const { TasksProvider, WorkersProvider } = require("./src/tree");
@@ -54,17 +55,38 @@ function activate(context) {
   }
 
   let watcher = null;
+  let fetchWatcher = null;
+  let fetcher = null;
   let watchedProject = null;
   function watch(project) {
     if (project === watchedProject) return;
     if (watcher) watcher.dispose();
+    if (fetchWatcher) fetchWatcher.dispose();
     watchedProject = project;
     watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(project), ".aaagent/**"));
     watcher.onDidCreate(scheduleRefresh);
     watcher.onDidChange(scheduleRefresh);
     watcher.onDidDelete(scheduleRefresh);
+    watchFetches(project);
   }
-  sub({ dispose: () => watcher && watcher.dispose() });
+  sub({ dispose: () => { if (watcher) watcher.dispose(); if (fetchWatcher) fetchWatcher.dispose(); } });
+
+  // The chat hook asks us to copy an image that a prompt mentions from the user's computer.
+  function watchFetches(project) {
+    const local = new LocalFetcher({
+      project,
+      onSaved: (rel) => vscode.window.setStatusBarMessage(
+        `aaagent: copied ${path.basename(rel)} from your computer`, 8000),
+      onFailed: (from, message) => vscode.window.showWarningMessage(
+        `aaagent could not copy ${path.basename(from)} from your computer: ${message}`, "Attach Image…")
+        .then((pick) => { if (pick) vscode.commands.executeCommand("aaagent.attachImage"); }),
+    });
+    fetcher = local;
+    fetchWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(project), ".aaagent/fetch/*.request.json"));
+    fetchWatcher.onDidCreate((uri) => local.handle(uri.fsPath));
+    local.scan();
+  }
 
   function notify(events) {
     const level = config().get("notifications", "all");
@@ -140,6 +162,9 @@ function activate(context) {
       store.state = state;
       await vscode.commands.executeCommand("setContext", "aaagent.state", state);
       render();
+      // File watchers drop events under load: the poll and the `.aaagent/**` refresh also look
+      // for image requests still waiting for an answer. `LocalFetcher` skips handled ones.
+      if (fetcher) fetcher.scan();
     }
   }
 

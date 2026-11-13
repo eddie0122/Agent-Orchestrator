@@ -75,7 +75,8 @@ test("activate() against a real project", async (t) => {
   assert.deepStrictEqual(workersTree.getChildren().map((w) => w.name), ["deepseek", "glm"]);
   assert.strictEqual(workersTree.getTreeItem(workersTree.getChildren()[0]).description, "stopped");
   assert.deepStrictEqual(tasksTree.getChildren(), []);
-  assert.strictEqual(rec.watchers.length, 1);
+  // The `.aaagent/**` refresh watcher plus the image-fetch watcher.
+  assert.strictEqual(rec.watchers.length, 2);
   assert.match(rec.treeViews["aaagent.workers"].description, /^planner: /);
 
   // a task with a plan, a (hand-written) report and a review
@@ -118,6 +119,9 @@ test("activate() against a real project", async (t) => {
   assert.deepStrictEqual(chat.creationOptions.shellArgs, ["start", "--no-workers"]);
   assert.strictEqual(chat.creationOptions.location.viewColumn, stub.ViewColumn.Active);
   assert.strictEqual(chat.creationOptions.cwd, api.store.data.project);
+  // Only the chat asks the hook to copy the user's images; worker terminals are plain.
+  assert.strictEqual(chat.creationOptions.env.AAAGENT_VSCODE, "1");
+  assert.strictEqual(ds.creationOptions.env.AAAGENT_VSCODE, undefined);
 
   // Open Chat again reuses terminals
   await rec.commands.get("aaagent.openChat")();
@@ -278,6 +282,25 @@ test("activate() against a real project", async (t) => {
   // No uris array: the single uri is used.
   await rec.commands.get("aaagent.attachFile")(stub.Uri.file(two), []);
   assert.deepStrictEqual(chat3.sent.at(-1), ["\x1b[200~@two.jpg \x1b[201~", false]);
+
+  // An image request the file watcher missed is picked up by the refresh's scan(): the image is
+  // copied into .aaagent/attachments and the answer is written back for the chat hook.
+  const fetchDir = path.join(project, ".aaagent", "fetch");
+  fs.mkdirSync(fetchDir, { recursive: true });
+  const localImage = path.join(tmp, "band.png");
+  fs.writeFileSync(localImage, png);
+  fs.writeFileSync(path.join(fetchDir, "beef.request.json"),
+    JSON.stringify({ path: localImage, created: Date.now() / 1000 }));
+  await api.refresh();
+  // `scan()` runs alongside the refresh, not inside it.
+  const resultFile = path.join(fetchDir, "beef.result.json");
+  for (let i = 0; i < 100 && !fs.existsSync(resultFile); i++) await tick(20);
+  const fetched = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+  assert.strictEqual(fetched.ok, true);
+  assert.match(fetched.rel, /^\.aaagent\/attachments\/\d{8}-\d{6}-band\.png$/);
+  assert.deepStrictEqual(fs.readFileSync(path.join(project, fetched.rel)), png);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "status" && /copied \d{8}-\d{6}-band\.png from your computer/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
 
   // A closed panel is forgotten: the next call opens a fresh one.
   panel.dispose();

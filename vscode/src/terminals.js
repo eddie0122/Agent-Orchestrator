@@ -38,6 +38,15 @@ class Terminals {
   }
 
   /**
+   * The chat's own env: `AAAGENT_VSCODE` tells the UserPromptSubmit hook
+   * (`claude/hooks/local_images.py`) that the extension can copy the user's images here.
+   * Workers do not get it; only the chat can ask for a file.
+   */
+  chatEnv(project) {
+    return { AAAGENT_PROJECT: project, AAAGENT_VSCODE: "1" };
+  }
+
+  /**
    * One terminal per worker, side by side in the panel. A worker that is busy in the
    * background keeps running; its terminal follows the log instead.
    */
@@ -99,7 +108,7 @@ class Terminals {
       shellPath: bin,
       shellArgs: args,
       cwd: project,
-      env: this.env(project),
+      env: this.chatEnv(project),
       iconPath: new vscode.ThemeIcon("hubot"),
       location: where === "panel"
         ? vscode.TerminalLocation.Panel

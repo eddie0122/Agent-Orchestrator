@@ -2,6 +2,7 @@
 // Minimal stand-in for the `vscode` module: enough to run activate() and record what it does.
 
 const path = require("path");
+const fs = require("fs");
 
 const record = {
   commands: new Map(), executed: [], terminals: [], messages: [], context: {}, treeViews: {},
@@ -39,6 +40,7 @@ function makeTerminal(options) {
 const vscode = {
   _record: record,
   EventEmitter, Uri, TreeItem, ThemeIcon, ThemeColor, RelativePattern,
+  env: { remoteName: undefined },
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
   StatusBarAlignment: { Left: 1, Right: 2 },
   TerminalLocation: { Panel: 1, Editor: 2 },
@@ -98,6 +100,16 @@ const vscode = {
     openTextDocument: async (uri) => ({ uri, text: await record.contentProviders[uri.scheme].provideTextDocumentContent(uri) }),
     onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
     onDidChangeConfiguration: () => ({ dispose() {} }),
+    // A stand-in for the real file system: this machine's disk, whatever the scheme says.
+    fs: {
+      async stat(uri) {
+        const s = await fs.promises.stat(uri.fsPath);
+        return { size: s.size, mtime: s.mtimeMs, type: s.isDirectory() ? 2 : 1 };
+      },
+      async readFile(uri) {
+        return new Uint8Array(await fs.promises.readFile(uri.fsPath));
+      },
+    },
   },
   languages: { setTextDocumentLanguage: async (doc, lang) => { doc.languageId = lang; return doc; } },
   setFolder(p) { vscode.workspace.workspaceFolders = [{ uri: Uri.file(p), name: path.basename(p), index: 0 }]; },

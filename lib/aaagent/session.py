@@ -82,6 +82,10 @@ def claude_settings(project: Path) -> dict:
             }],
             # Remembers the chat's session id in .aaagent/chat.json for `aaagent -c`.
             "SessionStart": [{"hooks": [{"type": "command", "command": _hook("record_session.py")}]}],
+            # Copies images the prompt mentions from the user's computer (VSCode Remote-SSH).
+            "UserPromptSubmit": [{
+                "hooks": [{"type": "command", "command": _hook("local_images.py"), "timeout": 30}],
+            }],
         },
     }
 
@@ -156,7 +160,7 @@ def ensure_repo(start: Path) -> Path | None:
 
 
 def init_project(project: Path, cfg: Config) -> None:
-    for sub in ("tasks", "queue", "results", "workers", "attachments"):
+    for sub in ("tasks", "queue", "results", "workers", "attachments", "fetch"):
         (project / ".aaagent" / sub).mkdir(parents=True, exist_ok=True)
     if not cfg.track_agent_dir:
         gitutil.ensure_excluded(project)
