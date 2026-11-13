@@ -37,6 +37,10 @@
           "name": "Workers"
         },
         {
+          "id": "aaagent.sessions",
+          "name": "Sessions"
+        },
+        {
           "id": "aaagent.tasks",
           "name": "Tasks"
         }
@@ -44,8 +48,13 @@
     },
     "viewsWelcome": [
       {
+        "view": "aaagent.sessions",
+        "contents": "No chat sessions yet. Start one and ask Opus for a change or a question.\n[New Session](command:aaagent.newChat)\n[Ask Opus…](command:aaagent.ask)",
+        "when": "aaagent.state == ready"
+      },
+      {
         "view": "aaagent.tasks",
-        "contents": "No tasks yet. Start a chat and ask Opus for a change: it writes a plan, a worker implements it, Opus reviews, and a worker commits.\n[New Chat](command:aaagent.newChat)\n[Ask Opus…](command:aaagent.ask)\n[Resume Last Chat](command:aaagent.resumeChat)",
+        "contents": "No tasks yet. Ask Opus for a change in a chat session: it writes a plan, a worker implements it, Opus reviews, and a worker commits.\n[New Session](command:aaagent.newChat)",
         "when": "aaagent.state == ready"
       },
       {
@@ -70,13 +79,14 @@
       }
     ],
     "commands": [
-      { "command": "aaagent.newChat", "title": "New Chat", "category": "aaagent", "icon": "$(add)" },
+      { "command": "aaagent.newChat", "title": "New Session", "category": "aaagent", "icon": "$(add)" },
       { "command": "aaagent.openChat", "title": "Open Chat", "category": "aaagent", "icon": "$(comment-discussion)" },
+      { "command": "aaagent.openSession", "title": "Open Session", "category": "aaagent", "icon": "$(debug-restart)" },
       { "command": "aaagent.selectModel", "title": "Select Model…", "category": "aaagent", "icon": "$(settings)" },
       { "command": "aaagent.changeWorkerModel", "title": "Change Model…", "category": "aaagent", "icon": "$(settings)" },
       { "command": "aaagent.selectThinking", "title": "Select Thinking Level…", "category": "aaagent", "icon": "$(lightbulb)" },
       { "command": "aaagent.changeWorkerThinking", "title": "Change Thinking Level…", "category": "aaagent", "icon": "$(lightbulb)" },
-      { "command": "aaagent.resumeChat", "title": "Resume Last Chat", "category": "aaagent", "icon": "$(history)" },
+      { "command": "aaagent.resumeChat", "title": "Restore Previous Session…", "category": "aaagent", "icon": "$(history)" },
       { "command": "aaagent.ask", "title": "Ask Opus…", "category": "aaagent", "icon": "$(sparkle)" },
       { "command": "aaagent.sendSelection", "title": "Send Selection to Chat", "category": "aaagent" },
       { "command": "aaagent.attachImage", "title": "Attach Image…", "category": "aaagent", "icon": "$(file-media)" },
@@ -94,12 +104,13 @@
     ],
     "menus": {
       "view/title": [
-        { "command": "aaagent.newChat", "when": "view == aaagent.tasks", "group": "navigation@1" },
-        { "command": "aaagent.ask", "when": "view == aaagent.tasks", "group": "navigation@2" },
-        { "command": "aaagent.attachImage", "when": "view == aaagent.tasks", "group": "navigation@3" },
-        { "command": "aaagent.refresh", "when": "view == aaagent.tasks", "group": "navigation@4" },
-        { "command": "aaagent.openChat", "when": "view == aaagent.tasks", "group": "1_more@1" },
-        { "command": "aaagent.resumeChat", "when": "view == aaagent.tasks", "group": "1_more@2" },
+        { "command": "aaagent.newChat", "when": "view == aaagent.sessions", "group": "navigation@1" },
+        { "command": "aaagent.resumeChat", "when": "view == aaagent.sessions", "group": "navigation@2" },
+        { "command": "aaagent.ask", "when": "view == aaagent.sessions", "group": "navigation@3" },
+        { "command": "aaagent.attachImage", "when": "view == aaagent.sessions", "group": "navigation@4" },
+        { "command": "aaagent.refresh", "when": "view == aaagent.sessions", "group": "navigation@5" },
+        { "command": "aaagent.openChat", "when": "view == aaagent.sessions", "group": "1_more@1" },
+        { "command": "aaagent.refresh", "when": "view == aaagent.tasks", "group": "navigation@1" },
         { "command": "aaagent.selectModel", "when": "view == aaagent.workers", "group": "navigation@1" },
         { "command": "aaagent.selectThinking", "when": "view == aaagent.workers", "group": "navigation@2" },
         { "command": "aaagent.startWorkers", "when": "view == aaagent.workers", "group": "navigation@3" },
@@ -108,10 +119,12 @@
         { "command": "aaagent.openConfig", "when": "view == aaagent.workers", "group": "1_more@2" }
       ],
       "view/item/context": [
-        { "command": "aaagent.showDiff", "when": "view == aaagent.tasks && viewItem =~ /^task\\./", "group": "inline@1" },
-        { "command": "aaagent.showDiff", "when": "view == aaagent.tasks && viewItem =~ /^task\\./", "group": "1_view@1" },
-        { "command": "aaagent.openTaskFolder", "when": "view == aaagent.tasks && viewItem =~ /^task\\./", "group": "1_view@2" },
-        { "command": "aaagent.abandonTask", "when": "view == aaagent.tasks && viewItem == task.active", "group": "2_manage@1" },
+        { "command": "aaagent.openSession", "when": "view == aaagent.sessions && viewItem == session.available", "group": "inline@1" },
+        { "command": "aaagent.openSession", "when": "view == aaagent.sessions && viewItem == session.available", "group": "1_session@1" },
+        { "command": "aaagent.showDiff", "when": "(view == aaagent.tasks || view == aaagent.sessions) && viewItem =~ /^task\\./", "group": "inline@1" },
+        { "command": "aaagent.showDiff", "when": "(view == aaagent.tasks || view == aaagent.sessions) && viewItem =~ /^task\\./", "group": "1_view@1" },
+        { "command": "aaagent.openTaskFolder", "when": "(view == aaagent.tasks || view == aaagent.sessions) && viewItem =~ /^task\\./", "group": "1_view@2" },
+        { "command": "aaagent.abandonTask", "when": "(view == aaagent.tasks || view == aaagent.sessions) && viewItem == task.active", "group": "2_manage@1" },
         { "command": "aaagent.showWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\./", "group": "inline@1" },
         { "command": "aaagent.stopWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\.(idle|running)$/", "group": "inline@2" },
         { "command": "aaagent.changeWorkerModel", "when": "view == aaagent.workers && viewItem =~ /^worker\\./", "group": "1_manage@1" },

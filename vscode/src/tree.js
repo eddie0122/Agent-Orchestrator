@@ -1,5 +1,5 @@
 "use strict";
-// Tree views: Workers and Tasks.
+// Tree views: Workers, Sessions and Tasks.
 
 const vscode = require("vscode");
 const model = require("./model");
@@ -93,4 +93,50 @@ class TasksProvider {
   }
 }
 
-module.exports = { WorkersProvider, TasksProvider };
+class SessionsProvider {
+  constructor(store, { isOpen = () => false, tasks }) {
+    this.store = store;
+    this.isOpen = isOpen;
+    this.tasks = tasks;
+    this._onDidChange = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChange.event;
+  }
+
+  refresh() {
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(node) {
+    if (node.type === "session") {
+      const s = node.session;
+      const open = this.isOpen(s);
+      const hasTasks = !!(s.tasks && s.tasks.length);
+      const collapsible = !hasTasks
+        ? vscode.TreeItemCollapsibleState.None
+        : open ? vscode.TreeItemCollapsibleState.Expanded
+          : vscode.TreeItemCollapsibleState.Collapsed;
+      return toTreeItem(model.sessionItem(s, { open }), collapsible);
+    }
+    // A task (or its files and Changes) under a session: the Tasks view builds the item.
+    // A tree's ids must be unique, so the session id goes in front.
+    const item = this.tasks.getTreeItem(node);
+    item.id = `s:${node.sid}:${item.id}`;
+    return item;
+  }
+
+  getChildren(node) {
+    const data = this.store.data;
+    if (!data) return [];
+    if (!node) return (data.sessions || []).map((session) => ({ type: "session", session }));
+    if (node.type === "session") {
+      const byId = new Map((data.tasks || []).map((task) => [task.id, task]));
+      return (node.session.tasks || [])
+        .map((id) => byId.get(id))
+        .filter(Boolean)
+        .map((task) => ({ type: "task", task, sid: node.session.id }));
+    }
+    return this.tasks.getChildren(node).map((child) => ({ ...child, sid: node.sid }));
+  }
+}
+
+module.exports = { WorkersProvider, TasksProvider, SessionsProvider };

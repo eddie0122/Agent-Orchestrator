@@ -89,8 +89,9 @@ class Terminals {
   /**
    * Open (or show) the chat. A first prompt is passed as an argument, which is reliable at startup.
    * resume: reopen this project's last aaagent chat (`aaagent start --continue`).
+   * session: reopen one known session instead (`aaagent start --session <id>`).
    */
-  async startChat(project, firstPrompt, { resume = false } = {}) {
+  async startChat(project, firstPrompt, { resume = false, session = null } = {}) {
     const existing = this.chat();
     if (existing) {
       existing.show(false);
@@ -101,7 +102,8 @@ class Terminals {
     await this.ensureWorkers(project);
     const where = vscode.workspace.getConfiguration("aaagent").get("chatLocation", "editor");
     const args = ["start", "--no-workers"];
-    if (resume) args.push("--continue");
+    if (session) args.push("--session", session);
+    else if (resume) args.push("--continue");
     if (firstPrompt) args.push(firstPrompt);
     const term = vscode.window.createTerminal({
       name: CHAT_NAME,
@@ -137,6 +139,12 @@ class Terminals {
   async newChat(project, firstPrompt) {
     await this.closeChat();
     return this.startChat(project, firstPrompt);
+  }
+
+  /** Close the current chat and reopen the session `sessionId` (a running job keeps going). */
+  async openSession(project, sessionId) {
+    await this.closeChat();
+    return this.startChat(project, undefined, { session: sessionId });
   }
 
   /** Type text into the running chat. Multi-line text arrives as one paste. */

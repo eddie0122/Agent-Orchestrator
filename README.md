@@ -46,11 +46,12 @@ It also cleans up an install from before the rename (the `aa` command, `aa-*` ag
 After installing, run **Developer: Reload Window** once. Then:
 
 1. Open a project folder (a git repository) and click the **aaagent** icon in the activity bar.
-2. Click **New Chat** (or run `aaagent: Ask Opus…` from the command palette and type the request). **New Chat** closes the open chat and starts a fresh one; **Open Chat** and **Resume Last Chat** are in the Tasks view's `…` menu.
+2. Click **New Session** (or run `aaagent: Ask Opus…` from the command palette and type the request). **New Session** closes the open chat and starts a fresh one; **Restore Previous Session…** reopens an earlier one, and **Open Chat** is in the Sessions view's `…` menu.
    The Opus chat opens as an editor tab, and the DeepSeek and GLM workers open as split terminals in the panel.
 3. Talk to Opus. The sidebar follows along:
    - **Workers**: who is running what. Inline buttons show a worker's output or stop it.
-   - **Tasks**: newest first, with the current stage (planning, implementing, in review, committed…). Expand a task to open its `plan.md`, `report-N.md` and `review-N.md`, or **Changes** for the diff.
+   - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it. **New Session**, **Restore Previous Session…**, **Ask Opus…** and **Attach Image…** are in its title bar.
+   - **Tasks**: all tasks, newest first, with the current stage (planning, implementing, in review, committed…). Expand a task to open its `plan.md`, `report-N.md` and `review-N.md`, or **Changes** for the diff.
    - The **status bar** shows what is happening now. A notification appears when a task is committed or needs your decision.
 
 Other handy commands:
@@ -58,7 +59,7 @@ Other handy commands:
 - **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
 - **Select Thinking Level…** (Workers view title, or right-click a worker → **Change Thinking Level…**): set the planner's reasoning effort or a worker's model variant, for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
-- **Attach Image…** (Tasks view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
+- **Attach Image…** (Sessions view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
 - **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.
 - **Show Task Changes**, **Abandon Task…**, **Stop All Workers**, **Check Installation**, **Open Configuration**.
 

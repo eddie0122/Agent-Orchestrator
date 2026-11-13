@@ -12,7 +12,7 @@ const { DiffProvider, SCHEME } = require("./src/diff");
 const { LocalFetcher } = require("./src/fetch");
 const model = require("./src/model");
 const { Terminals } = require("./src/terminals");
-const { TasksProvider, WorkersProvider } = require("./src/tree");
+const { SessionsProvider, TasksProvider, WorkersProvider } = require("./src/tree");
 
 const STATE_MESSAGES = {
   noFolder: "Open a folder to use aaagent.",
@@ -31,9 +31,15 @@ function activate(context) {
   const diffs = new DiffProvider(cli);
   const sub = (d) => context.subscriptions.push(d);
 
+  // The chat terminal is open and this is the session it started.
+  const isOpen = (session) => !!terminals.chat() && !!session.current;
+  const sessions = new SessionsProvider(store, { isOpen, tasks });
+
   const workersView = vscode.window.createTreeView("aaagent.workers", { treeDataProvider: workers });
+  const sessionsView = vscode.window.createTreeView("aaagent.sessions", { treeDataProvider: sessions, showCollapseAll: true });
   const tasksView = vscode.window.createTreeView("aaagent.tasks", { treeDataProvider: tasks, showCollapseAll: true });
   sub(workersView);
+  sub(sessionsView);
   sub(tasksView);
   sub(vscode.workspace.registerTextDocumentContentProvider(SCHEME, diffs));
 
@@ -109,11 +115,13 @@ function activate(context) {
 
   function render() {
     workers.refresh();
+    sessions.refresh();
     tasks.refresh();
     const planner = store.data && store.data.planner;
     workersView.description = planner && planner.model
       ? `planner: ${planner.model}${planner.thinking ? ` · ${planner.thinking}` : ""}`
       : undefined;
+    sessionsView.description = terminals.chat() ? "open" : undefined;
     const sb = model.statusBar(store.data);
     statusItem.text = sb.text;
     statusItem.tooltip = store.data ? sb.tooltip : (STATE_MESSAGES[store.state] || sb.tooltip);
@@ -226,6 +234,41 @@ function activate(context) {
 
   const taskOf = (node) => (node && node.task) || null;
   const workerOf = (node) => (node && node.name ? node : null);
+
+  /** The session the open chat is running, if a chat is open. */
+  function openSessionId() {
+    return terminals.chat() && store.data ? store.data.current_session || null : null;
+  }
+
+  /** Quick-pick a session that can be reopened, leaving out the one the chat already runs. */
+  async function pickSession(placeHolder) {
+    const choices = model.sessionChoices((store.data && store.data.sessions) || [], openSessionId());
+    if (!choices.length) {
+      vscode.window.showInformationMessage("aaagent: no earlier session to restore.");
+      return null;
+    }
+    const pick = await vscode.window.showQuickPick(choices, { placeHolder, matchOnDescription: true });
+    return pick ? pick.session : null;
+  }
+
+  /** Close the chat and reopen `s`, after a warning when a worker is still busy. */
+  async function restoreSession(p, s) {
+    if (!s.available) {
+      vscode.window.showWarningMessage("this session's conversation is gone and cannot be reopened");
+      return;
+    }
+    if (terminals.chat() && model.isBusy(store.data)) {
+      const ok = await vscode.window.showWarningMessage(
+        "Switch to this session? The current chat closes.",
+        {
+          modal: true,
+          detail: "A worker is still running. Its job keeps going, and the new chat lists the unfinished task so Opus can pick it up.",
+        },
+        "Switch");
+      if (ok !== "Switch") return;
+    }
+    await terminals.openSession(p, s.id);
+  }
 
   /** Type `text` into the chat's input, starting a chat first if there is none. */
   async function sendToChat(p, text) {
@@ -380,7 +423,22 @@ function activate(context) {
 
   command("aaagent.resumeChat", async () => {
     const p = project();
-    if (p) await terminals.startChat(p, undefined, { resume: true });
+    if (!p) return;
+    const s = await pickSession("Restore which session?");
+    if (s) await restoreSession(p, s);
+  });
+
+  command("aaagent.openSession", async (node) => {
+    const p = project();
+    if (!p) return;
+    const s = (node && node.session) || await pickSession("Open which session?");
+    if (!s) return;
+    if (isOpen(s)) {
+      const chat = terminals.chat();
+      if (chat) chat.show(false);
+      return;
+    }
+    await restoreSession(p, s);
   });
 
   command("aaagent.ask", async () => {

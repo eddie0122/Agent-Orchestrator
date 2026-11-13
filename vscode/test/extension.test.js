@@ -29,6 +29,17 @@ function sh(cwd, cmd, args) {
 
 const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms));
 
+/** A timestamp the way `sessions.py` writes it: `%Y-%m-%dT%H:%M:%S%z`. */
+function stamp(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${sign}` +
+    `${p(Math.floor(Math.abs(off) / 60))}${p(Math.abs(off) % 60)}`;
+}
+
 test("manifest: every command in a menu is declared, and every declared command is registered", async () => {
   const declared = new Set(pkg.contributes.commands.map((c) => c.command));
   for (const [where, items] of Object.entries(pkg.contributes.menus)) {
@@ -38,7 +49,7 @@ test("manifest: every command in a menu is declared, and every declared command 
     for (const m of w.contents.matchAll(/command:(aaagent\.[A-Za-z]+)/g)) assert.ok(declared.has(m[1]), m[1]);
   }
   const views = pkg.contributes.views.aaagent.map((v) => v.id);
-  assert.deepStrictEqual(views, ["aaagent.workers", "aaagent.tasks"]);
+  assert.deepStrictEqual(views, ["aaagent.workers", "aaagent.sessions", "aaagent.tasks"]);
   assert.ok(fs.existsSync(path.join(__dirname, "..", pkg.contributes.viewsContainers.activitybar[0].icon)));
   // registration is checked after activation below
   test.declared = declared;
@@ -158,13 +169,22 @@ test("activate() against a real project", async (t) => {
   const chat2 = rec.terminals.at(-1);
   assert.deepStrictEqual(chat2.creationOptions.shellArgs, ["start", "--no-workers", "explain app.py"]);
 
-  // Resume Last Chat: shows an open chat; with none open, starts one with --continue
-  await rec.commands.get("aaagent.resumeChat")();
-  assert.strictEqual(rec.terminals.at(-1), chat2);
+  // Restore Previous Session…: picks a known session and reopens it with --session <id>.
+  const sessionsFile = path.join(project, ".aaagent", "sessions.json");
+  const writeSessions = (sessions, current) => fs.writeFileSync(sessionsFile,
+    JSON.stringify({ current, sessions }, null, 2) + "\n");
+  const resumeId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const resumeTranscript = path.join(tmp, "resume-transcript.jsonl");
+  fs.writeFileSync(resumeTranscript, "");
+  const resumeSession = { id: resumeId, transcript_path: resumeTranscript,
+    started: stamp(Date.now() - 3600 * 1000), last_active: stamp(Date.now() - 60 * 1000),
+    title: "health endpoint" };
+  writeSessions([resumeSession], null);
+  await api.refresh();
   chat2.dispose();
   await rec.commands.get("aaagent.resumeChat")();
   const chat3 = rec.terminals.at(-1);
-  assert.deepStrictEqual(chat3.creationOptions.shellArgs, ["start", "--no-workers", "--continue"]);
+  assert.deepStrictEqual(chat3.creationOptions.shellArgs, ["start", "--no-workers", "--session", resumeId]);
 
   // Select Model: the planner from the list, saved to the user config, applied to the open chat.
   const userConfig = path.join(tmp, "user-config.toml");
@@ -337,6 +357,68 @@ test("activate() against a real project", async (t) => {
   await api.refresh();
   assert.strictEqual(api.store.data.tasks[0].status, "abandoned");
   assert.strictEqual(tasksTree.getTreeItem(tasksTree.getChildren()[0]).contextValue, "task.final");
+  assert.ok(!rec.messages.some(([lvl]) => lvl === "error"), JSON.stringify(rec.messages));
+
+  // Sessions view: the session and the tasks it created, with their own plan/reports/Changes.
+  const otherId = "bbbbbbbb-1111-2222-3333-444444444444";
+  const otherTranscript = path.join(tmp, "other-transcript.jsonl");
+  fs.writeFileSync(otherTranscript, "");
+  const otherSession = { id: otherId, transcript_path: otherTranscript,
+    started: stamp(Date.now() - 7200 * 1000), last_active: stamp(Date.now() - 30 * 1000),
+    title: "" };
+  writeSessions([resumeSession, otherSession], resumeId);
+  sh(project, AAAGENT, ["new", "second thing"]);
+  await api.refresh();
+  assert.strictEqual(api.store.data.current_session, resumeId);
+
+  const sessionsTree = rec.treeViews["aaagent.sessions"].treeDataProvider;
+  const sessionNodes = sessionsTree.getChildren();
+  assert.deepStrictEqual(sessionNodes.map((n) => n.session.id), [otherId, resumeId]);
+  const resumeNode = sessionNodes.find((n) => n.session.id === resumeId);
+  const resumeItem = sessionsTree.getTreeItem(resumeNode);
+  assert.strictEqual(resumeItem.label, "health endpoint");
+  // chat3 is still open, and sessions.json says this is the session it started.
+  assert.strictEqual(resumeItem.contextValue, "session.open");
+  assert.strictEqual(resumeItem.collapsibleState, stub.TreeItemCollapsibleState.Expanded);
+  assert.strictEqual(resumeItem.description, "open · 1 task");
+  assert.strictEqual(rec.treeViews["aaagent.sessions"].description, "open");
+
+  const sessionTasks = sessionsTree.getChildren(resumeNode);
+  assert.deepStrictEqual(sessionTasks.map((n) => n.task.id), ["002-second-thing"]);
+  const sessionTaskItem = sessionsTree.getTreeItem(sessionTasks[0]);
+  assert.strictEqual(sessionTaskItem.id, `s:${resumeId}:task:002-second-thing`);
+  assert.match(sessionTaskItem.tooltip, /session: aaaaaaaa/);
+  assert.deepStrictEqual(sessionsTree.getChildren(sessionTasks[0]).map((n) => (n.file ? n.file.name : n.type)),
+    ["plan.md"]);
+  const otherItem = sessionsTree.getTreeItem(sessionNodes.find((n) => n.session.id === otherId));
+  assert.strictEqual(otherItem.label, "(no messages yet)");
+  assert.strictEqual(otherItem.contextValue, "session.available");
+  assert.strictEqual(otherItem.collapsibleState, stub.TreeItemCollapsibleState.None);
+
+  // Open Session: the chat restarts with --session <id>.
+  chat3.dispose();
+  await api.refresh();
+  assert.strictEqual(rec.treeViews["aaagent.sessions"].description, undefined);
+  const terminalsBefore = rec.terminals.length;
+  await rec.commands.get("aaagent.openSession")(resumeNode);
+  assert.strictEqual(rec.terminals.length, terminalsBefore + 1);
+  const chat4 = rec.terminals.at(-1);
+  assert.deepStrictEqual(chat4.creationOptions.shellArgs, ["start", "--no-workers", "--session", resumeId]);
+  await api.refresh();
+  assert.strictEqual(rec.treeViews["aaagent.sessions"].description, "open");
+  const openNode = sessionsTree.getChildren().find((n) => n.session.id === resumeId);
+  assert.strictEqual(sessionsTree.getTreeItem(openNode).contextValue, "session.open");
+
+  // Open Session on the open one just shows it; Restore Previous Session… picks another.
+  await rec.commands.get("aaagent.openSession")(openNode);
+  assert.strictEqual(rec.terminals.at(-1), chat4);
+  assert.strictEqual(chat4.shown, 2);
+  const beforeRestore = rec.terminals.length;
+  await rec.commands.get("aaagent.resumeChat")();
+  assert.strictEqual(rec.terminals.length, beforeRestore + 1);
+  const chat5 = rec.terminals.at(-1);
+  assert.deepStrictEqual(chat5.creationOptions.shellArgs, ["start", "--no-workers", "--session", otherId]);
+  assert.ok(chat4.exitStatus !== undefined, "the old chat is closed");
   assert.ok(!rec.messages.some(([lvl]) => lvl === "error"), JSON.stringify(rec.messages));
 });
 

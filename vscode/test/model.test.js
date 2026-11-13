@@ -40,6 +40,73 @@ test("taskItem marks final and active tasks for menus", () => {
   assert.match(item.tooltip, /next: fix round 2 → glm/);
 });
 
+test("taskItem shows the session that created the task", () => {
+  const item = model.taskItem(task({ session: "8d1a2b3c-1111-2222-3333-444455556666" }));
+  assert.match(item.tooltip, /^004-health\nstatus: planning\nsession: 8d1a2b3c($|\n)/);
+  assert.ok(!/session:/.test(model.taskItem(task({ session: null })).tooltip));
+});
+
+const session = (over) => ({
+  id: "8d1a2b3c-1111-2222-3333-444455556666", short: "8d1a2b3c", title: "add a health endpoint",
+  started: new Date(Date.now() - 3600 * 1000).toISOString(),
+  last_active: new Date(Date.now() - 5 * 60 * 1000 - 500).toISOString(),
+  available: true, current: false, tasks: [], ...over,
+});
+
+test("ago counts minutes, hours, days, then falls back to the date", () => {
+  const now = new Date(2026, 10, 13, 12, 0, 0).getTime();
+  const before = (ms) => new Date(now - ms).toISOString();
+  assert.strictEqual(model.ago(before(30 * 1000), now), "just now");
+  assert.strictEqual(model.ago(before(5 * 60 * 1000), now), "5 min ago");
+  assert.strictEqual(model.ago(before(3 * 3600 * 1000), now), "3 h ago");
+  assert.strictEqual(model.ago(before(24 * 3600 * 1000), now), "1 day ago");
+  assert.strictEqual(model.ago(before(2 * 24 * 3600 * 1000), now), "2 days ago");
+  assert.strictEqual(model.ago(before(30 * 24 * 3600 * 1000), now), "2026-10-14");
+  assert.strictEqual(model.ago("not a date", now), "");
+  assert.strictEqual(model.ago(null, now), "");
+  // Python writes the UTC offset without the colon Date.parse insists on.
+  assert.strictEqual(model.ago("2026-11-13T11:30:00+0000", Date.parse("2026-11-13T12:00:00Z")), "30 min ago");
+});
+
+test("sessionItem shows the title, its age and its tasks", () => {
+  const s = session({ tasks: ["001-a"] });
+  const item = model.sessionItem(s, { open: false });
+  assert.strictEqual(item.id, `session:${s.id}`);
+  assert.strictEqual(item.label, "add a health endpoint");
+  assert.strictEqual(item.description, "5 min ago · 1 task");
+  assert.strictEqual(item.contextValue, "session.available");
+  assert.deepStrictEqual(item.icon, { id: "history" });
+  assert.match(item.tooltip, /^add a health endpoint\nid: /);
+  assert.match(item.tooltip, /tasks: 001-a/);
+});
+
+test("sessionItem marks the open session and the gone ones", () => {
+  const open = model.sessionItem(session({ tasks: ["001-a", "002-b"] }), { open: true });
+  assert.strictEqual(open.description, "open · 2 tasks");
+  assert.strictEqual(open.contextValue, "session.open");
+  assert.deepStrictEqual(open.icon, { id: "comment-discussion", color: "testing.iconPassed" });
+  const gone = model.sessionItem(session({ available: false }), { open: false });
+  assert.strictEqual(gone.description, "5 min ago · gone");
+  assert.strictEqual(gone.contextValue, "session.gone");
+  assert.deepStrictEqual(gone.icon, { id: "circle-slash" });
+  const untitled = model.sessionItem(session({ title: "" }), { open: false });
+  assert.strictEqual(untitled.label, "(no messages yet)");
+  assert.strictEqual(untitled.description, "5 min ago");
+});
+
+test("sessionChoices leaves out the open session and the gone ones", () => {
+  const a = session({ id: "aaaa1111-0000-0000-0000-000000000000", short: "aaaa1111", title: "",
+    tasks: ["001-a", "002-b"] });
+  const b = session({ id: "bbbb2222-0000-0000-0000-000000000000", short: "bbbb2222",
+    title: "gone one", available: false });
+  const c = session({ id: "cccc3333-0000-0000-0000-000000000000", short: "cccc3333", title: "open one" });
+  const choices = model.sessionChoices([a, b, c], c.id);
+  assert.deepStrictEqual(choices.map((x) => x.label), ["(no messages yet)"]);
+  assert.strictEqual(choices[0].description, "5 min ago · 2 tasks");
+  assert.strictEqual(choices[0].detail, "aaaa1111");
+  assert.strictEqual(choices[0].session, a);
+});
+
 test("workerItem shows the job a worker is running and its model", () => {
   const w = model.workerItem({ name: "deepseek", model: "opencode-go/deepseek-v4.1-flash", pid: 9, state: "running",
     queued: 1, job: { task: "004-health", phase: "fix", round: 2 } });

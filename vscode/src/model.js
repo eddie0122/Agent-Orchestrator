@@ -67,8 +67,73 @@ function taskIcon(task) {
   return { id: "note" };
 }
 
+/** A timestamp in milliseconds from an ISO string (Python writes `+0100`; JS wants `+01:00`). */
+function parseWhen(iso) {
+  if (iso instanceof Date) return iso.getTime();
+  if (typeof iso === "number") return iso;
+  const s = String(iso == null ? "" : iso).trim();
+  if (!s) return NaN;
+  return Date.parse(s.replace(/([+-]\d{2})(\d{2})$/, "$1:$2"));
+}
+
+/** "just now", "5 min ago", "3 h ago", "2 days ago", else `YYYY-MM-DD`. Invalid → "". */
+function ago(iso, now = Date.now()) {
+  const when = parseWhen(iso);
+  if (!Number.isFinite(when)) return "";
+  const secs = Math.max(0, now - when) / 1000;
+  if (secs < 60) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+  const d = new Date(when);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** How many tasks a session created, as `"1 task"`, `"3 tasks"` or `""`. */
+function taskCount(tasks) {
+  const n = (tasks || []).length;
+  if (!n) return "";
+  return `${n} ${n === 1 ? "task" : "tasks"}`;
+}
+
+/** A chat session: an Opus conversation and the tasks it created. */
+function sessionItem(session, { open = false } = {}) {
+  const ids = session.tasks || [];
+  const description = [open ? "open" : ago(session.last_active), taskCount(ids)];
+  if (!session.available) description.push("gone");
+  const title = session.title || "(no messages yet)";
+  const lines = [title, `id: ${session.id}`, `started: ${session.started || ""}`,
+    `last active: ${session.last_active || ""}`];
+  if (ids.length) lines.push(`tasks: ${ids.join(", ")}`);
+  return {
+    id: `session:${session.id}`,
+    label: title,
+    description: description.filter(Boolean).join(" · "),
+    tooltip: lines.join("\n"),
+    icon: open ? { id: "comment-discussion", color: "testing.iconPassed" }
+      : session.available ? { id: "history" } : { id: "circle-slash" },
+    contextValue: open ? "session.open" : session.available ? "session.available" : "session.gone",
+  };
+}
+
+/** Quick-pick entries for Restore Previous Session: every reopenable session but the open one. */
+function sessionChoices(sessions, openId) {
+  return (sessions || [])
+    .filter((s) => s.available && s.id !== openId)
+    .map((s) => ({
+      label: s.title || "(no messages yet)",
+      description: [ago(s.last_active), taskCount(s.tasks)].filter(Boolean).join(" · "),
+      detail: s.short || String(s.id).slice(0, 8),
+      session: s,
+    }));
+}
+
 function taskItem(task) {
   const lines = [`${task.id}`, `status: ${task.status}`];
+  if (task.session) lines.push(`session: ${String(task.session).slice(0, 8)}`);
   if (task.worker) lines.push(`worker: ${task.worker}`);
   if (task.verdict) lines.push(`last review: ${task.verdict}`);
   if (task.next) lines.push(`next: ${task.next.phase} round ${task.next.round} → ${task.next.worker}`);
@@ -313,6 +378,6 @@ function isImagePath(p) {
 module.exports = {
   visibleTasks, taskSummary, taskIcon, taskItem, fileItem, workerItem, statusBar, transitions,
   isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
-  thinkingTargets, thinkingChoices,
+  thinkingTargets, thinkingChoices, ago, sessionItem, sessionChoices,
   IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
 };
