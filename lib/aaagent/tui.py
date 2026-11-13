@@ -34,6 +34,7 @@ HELP = [
     ("d", "everything the selected task changed (diff)"),
     ("l", "switch whose output is shown below"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
+    ("N", "close this chat and start a new one"),
     ("R", "reopen the previous chat in the chat pane"),
     ("r", "refresh now"),
     ("q", "close this view; from the list, quit the dashboard"),
@@ -96,10 +97,10 @@ def _move(ui: UI, rows: list[Row], delta: int) -> None:
 
 
 def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] = (),
-               can_resume: bool = False) -> tuple | None:
+               can_resume: bool = False, has_chat_pane: bool = False) -> tuple | None:
     """Apply one key press to the UI state. Returns an action for the caller to carry out:
     ("quit",) ("refresh",) ("open", path, title) ("diff", task_id) ("abandon", task_id)
-    ("resume",) ("help",), or None when the key only changed what is shown.
+    ("resume",) ("new_chat",) ("help",), or None when the key only changed what is shown.
     """
     if key in (-1, curses.KEY_RESIZE):
         return None
@@ -184,6 +185,12 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
         else:
             ui.confirm = Confirm(f"Abandon {status.task_label(task)}? Its changes stay. (y/n)",
                                  ("abandon", task["id"]))
+    elif key == ord("N"):
+        if has_chat_pane:
+            ui.confirm = Confirm("Close this chat and start a new one? (y/n)", ("new_chat",))
+        else:
+            ui.message = ("new chat works in aaagent's tmux layout; otherwise quit the chat and "
+                          "run `aaagent` again, or type /clear in the chat")
     elif key == ord("R"):
         if can_resume:
             ui.confirm = Confirm("Close this chat and reopen the previous one? (y/n)", ("resume",))
@@ -339,6 +346,13 @@ class Dashboard:
             elif name == "abandon":
                 self.ui.message = dispatch.abandon(self.project, action[1]).splitlines()[0]
                 self.load()
+            elif name == "new_chat":
+                if not self.chat_pane:
+                    self.ui.message = "new chat works in aaagent's tmux layout"
+                else:
+                    session.respawn_chat(self.project, self.chat_pane, None,
+                                         os.environ.get("AAAGENT_TMUX_CLOSE") or "tmux kill-window")
+                    self.ui.message = "started a new chat"
             elif name == "resume":
                 previous = session.previous_chat(self.project)
                 if not previous or not self.chat_pane:
@@ -467,6 +481,8 @@ class Dashboard:
             hints = "↑↓ scroll  space page  q back"
         else:
             hints = "enter open  d diff  l output  a abandon"
+            if self.chat_pane:
+                hints += "  N new chat"
             if self.can_resume():
                 hints += "  R prev chat"
             hints += "  ? keys"
@@ -497,7 +513,8 @@ class Dashboard:
                 continue
             rows = status.rows(self.data, self.ui.expanded)
             names = tuple(w["name"] for w in (self.data or {}).get("workers") or [])
-            action = handle_key(self.ui, key, rows, names, self.can_resume() if key == ord("R") else False)
+            action = handle_key(self.ui, key, rows, names,
+                                self.can_resume() if key == ord("R") else False, bool(self.chat_pane))
             if action and not self.act(action):
                 return 0
 

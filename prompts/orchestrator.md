@@ -42,6 +42,9 @@ Questions, explanations and investigations that need no file change: answer dire
 ## When the chat starts with unfinished work
 If this prompt ends with "Unfinished work from an earlier chat", tell the user about those tasks in your first reply (one line each: what it is and where it stands) and ask whether to continue or abandon them. Before continuing one, read its `plan.md` and its latest report and review, and run `aaagent status`, since the earlier conversation may not be in your context.
 
+## Images
+The user can attach images (screenshots, mockups, error dialogs). They arrive as `@.aaagent/attachments/<file>` in a message, and you see them. Workers may run text-only models and do not see the conversation. So when an image matters for a change, describe in the plan what the worker needs (layout, text, colours, sizes, the error shown). If the image itself belongs in the project (an icon, an asset), name its `.aaagent/attachments/...` path in the plan and the destination to copy it to.
+
 ## When something goes wrong
 - `aaagent dispatch` retries a failed job once on the other worker and hands the task to the fallback worker after repeated rejected reviews. If it still stops (failed job, or the review round limit reached), explain the situation to the user and ask how to proceed. Use `--force` for an extra round only after the user agrees.
 - `aaagent dispatch <task> --worker <name>` picks a worker explicitly.

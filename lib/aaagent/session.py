@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import dispatch, gitutil, tasks, worker
+from . import attach, dispatch, gitutil, tasks, worker
 from .config import ROOT, Config
 
 AAAGENT_BIN = ROOT / "bin" / "aaagent"
@@ -156,7 +156,7 @@ def ensure_repo(start: Path) -> Path | None:
 
 
 def init_project(project: Path, cfg: Config) -> None:
-    for sub in ("tasks", "queue", "results", "workers"):
+    for sub in ("tasks", "queue", "results", "workers", "attachments"):
         (project / ".aaagent" / sub).mkdir(parents=True, exist_ok=True)
     if not cfg.track_agent_dir:
         gitutil.ensure_excluded(project)
@@ -246,6 +246,7 @@ def _launch_tmux(project: Path, claude_cmd: list[str], names: list[str], env: di
         new = ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session, "-n", "aaagent",
                "-x", "220", "-y", "50", "-c", str(project), main]
     chat_pane = subprocess.run(["tmux", *new], capture_output=True, text=True, check=True).stdout.strip()
+    attach.chat_pane_file(project).write_text(chat_pane + "\n")
     subprocess.run(["tmux", "set-option", "-w", "-t", chat_pane, "remain-on-exit", "off"],
                    capture_output=True)
     if not inside:
@@ -262,8 +263,9 @@ def _launch_tmux(project: Path, claude_cmd: list[str], names: list[str], env: di
     return subprocess.call(["tmux", "attach", "-t", session])
 
 
-def respawn_chat(project: Path, chat_pane: str, resume_id: str, close: str) -> None:
-    """Restart the chat pane on an earlier conversation (the dashboard's `R` key)."""
+def respawn_chat(project: Path, chat_pane: str, resume_id: str | None, close: str) -> None:
+    """Restart the chat pane on an earlier conversation (the dashboard's `R` key), or on a
+    fresh chat when resume_id is None (the `N` key)."""
     cfg = Config.load(project)
     claude = find_claude(cfg)
     if not claude:

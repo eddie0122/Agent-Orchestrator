@@ -122,10 +122,10 @@ class KeysTest(unittest.TestCase):
                           task(id="003-old", number=3, title="old", status="committed", commit="abc1234")])
         self.ui = tui.UI()
 
-    def press(self, key, can_resume=False):
+    def press(self, key, can_resume=False, has_chat_pane=False):
         rows = status.rows(self.data, self.ui.expanded)
         k = ord(key) if isinstance(key, str) else key
-        return tui.handle_key(self.ui, k, rows, ("deepseek", "glm"), can_resume)
+        return tui.handle_key(self.ui, k, rows, ("deepseek", "glm"), can_resume, has_chat_pane)
 
     def test_starts_on_the_open_task_and_moves(self):
         rows = status.rows(self.data)
@@ -196,6 +196,20 @@ class KeysTest(unittest.TestCase):
         self.assertIn("no previous chat", self.ui.message)
         self.press("R", can_resume=True)
         self.assertEqual(self.press("y"), ("resume",))
+
+    def test_new_chat_needs_the_tmux_layout(self):
+        self.assertIsNone(self.press("N"))
+        self.assertIsNone(self.ui.confirm)
+        self.assertIn("tmux layout", self.ui.message)
+
+        self.press("N", has_chat_pane=True)
+        self.assertEqual(self.ui.confirm.action, ("new_chat",))
+        self.assertIsNone(self.press("n"))
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "cancelled")
+
+        self.press("N", has_chat_pane=True)
+        self.assertEqual(self.press("y"), ("new_chat",))
 
     def test_output_follows_the_running_worker(self):
         d = data(workers=[{"name": "deepseek", "state": "idle", "log": "/none"},

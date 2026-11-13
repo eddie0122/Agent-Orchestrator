@@ -10,12 +10,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, dispatch, gitutil, models, session, status, tasks, tui, worker
+from . import __version__, attach, dispatch, gitutil, models, session, status, tasks, tui, worker
 from .config import ROOT, USER_CONFIG, Config
 from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "new", "dispatch", "wait", "status", "diff", "logs", "stop",
-            "abandon", "doctor", "version", "help", "model"}
+            "abandon", "attach", "doctor", "version", "help", "model"}
 # Options of `start` that also work without the word: `aaagent -c`.
 START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model"}
 
@@ -186,6 +186,21 @@ def cmd_abandon(args) -> int:
     return 0
 
 
+def cmd_attach(args) -> int:
+    project = project_root()
+    session.init_project(project, Config.load(project))
+    data = sys.stdin.buffer.read() if "-" in args.files else None
+    paths = attach.attach_files(project, args.files, data, args.name)
+    for path in paths:
+        print(f"attached {Path(os.path.relpath(path, project)).as_posix()}")
+    mentions = "".join(attach.mention(project, path) for path in paths)
+    if not args.no_send and attach.type_into_chat(project, mentions):
+        print(f"typed into the chat input: {mentions.strip()}")
+    else:
+        print(f"paste this into the chat: {mentions.strip()}")
+    return 0
+
+
 def _check(ok: bool, label: str, hint: str = "", optional: bool = False) -> bool:
     mark = "ok  " if ok else ("warn" if optional else "FAIL")
     print(f"  {mark}  {label}" + ("" if ok or not hint else f"\n        → {hint}"))
@@ -297,6 +312,22 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("abandon", help="drop a task (keeps its uncommitted changes)")
     s.add_argument("task")
     s.set_defaults(func=cmd_abandon)
+
+    s = sub.add_parser(
+        "attach",
+        help="copy images into .aaagent/attachments/ and mention them in the chat",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=("copy images (PNG, JPEG, GIF, WebP; up to 5 MB) into .aaagent/attachments/ "
+                     "and add them to the chat"),
+        epilog=("-          read one image from stdin, e.g. "
+                "`xclip -selection clipboard -t image/png -o | aaagent attach -`\n"
+                "--name     file name for stdin data (default pasted.png)\n"
+                "--no-send  only print the @-mentions; do not type them into the chat pane"))
+    s.add_argument("files", nargs="+", metavar="file", help="an image file, or - for stdin")
+    s.add_argument("--name", help="file name for stdin data (default pasted.png)")
+    s.add_argument("--no-send", action="store_true",
+                   help="only print the @-mentions; do not type them into the chat pane")
+    s.set_defaults(func=cmd_attach)
 
     s = sub.add_parser("doctor", help="check the installation")
     s.set_defaults(func=cmd_doctor)

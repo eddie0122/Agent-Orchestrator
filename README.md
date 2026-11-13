@@ -97,6 +97,7 @@ Dashboard keys:
 | `d` | the selected task's diff |
 | `l` | choose whose output the bottom pane shows (default: whoever is working) |
 | `a` | abandon the selected task, after a y/n question |
+| `N` | close the chat and start a new one (shown when the chat is in aaagent's tmux layout) |
 | `R` | reopen the previous chat in the chat pane (shown when there is one) |
 | `?` | all keys · `q` closes a view, or quits the dashboard |
 
@@ -105,6 +106,8 @@ The dashboard beeps and says so in its bottom line when a task is committed or n
 ### Chats
 
 Each `aaagent` starts a new chat. `aaagent -c` reopens the last one for this project, and `/resume` inside the chat lists older ones. aaagent remembers its own chat in `.aaagent/chat.json`, so `-c` never picks up an unrelated Claude Code conversation from the same folder. When a new chat starts while tasks are unfinished, Opus is told about them and asks you whether to continue.
+
+To start a fresh conversation in the middle of things, press `N` in the dashboard (in the tmux layout) or type `/clear` in the chat; quitting and running `aaagent` again does the same.
 
 Just talk to Opus. Questions get a direct answer; change requests go through the pipeline. You can steer at any point ("use glm for this", "stop after the plan", "split it into two tasks").
 
@@ -118,6 +121,7 @@ Opus runs these itself. They are also useful for you:
 | `aaagent status [--all]` | workers and tasks, with each task's next step |
 | `aaagent diff <task> [--stat]` | everything changed since the task started |
 | `aaagent logs <worker> [-f]` | worker output |
+| `aaagent attach <file\|-> […] [--no-send]` | copy images into `.aaagent/attachments/` and add them to the chat |
 | `aaagent new "<title>"` | create a task folder with a plan template |
 | `aaagent dispatch <task> [--worker glm] [--force]` | run the next phase (implement / fix / commit) and wait |
 | `aaagent wait <task>` | reattach to a running job |
@@ -128,6 +132,10 @@ Opus runs these itself. They are also useful for you:
 | `aaagent doctor` | check the installation |
 
 Task numbers can be short: `aaagent diff 3` means `003-…`.
+
+### Images
+
+The chat runs on the machine where aaagent runs, so an image has to be on that machine first: copy it with `scp`, or drag it into VSCode's Explorer. Then run `aaagent attach shot.png`; it types `@.aaagent/attachments/…` into the chat, and Opus reads the image. You can also type `@path/to/image.png` in the chat yourself. On a desktop Linux session, `xclip -selection clipboard -t image/png -o | aaagent attach -` attaches the clipboard. Attachments live in `.aaagent/attachments/`: they are never committed, and you can delete them at any time.
 
 ## Safety rules
 
@@ -180,7 +188,9 @@ commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@examp
     logs/    raw worker transcripts (jsonl) and job results
   queue/<worker>/   pending and running jobs
   workers/          worker pids and logs
+  attachments/      images from `aaagent attach`
   chat.json         the last chat's session id, for `aaagent -c`
+  chat-pane         the tmux pane of the chat, for `aaagent attach`
 ```
 
 ## Development
