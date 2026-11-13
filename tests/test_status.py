@@ -1,14 +1,17 @@
 """The dashboard's view logic (status.py) and key handling (tui.handle_key), without a terminal."""
 
 import curses
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from aaagent import status, tui  # noqa: E402
+from aaagent import models, status, tui  # noqa: E402
 
 
 def task(**over):
@@ -24,11 +27,19 @@ FILES = [{"name": "plan.md", "path": "/p/plan.md", "kind": "plan"},
          {"name": "review-1.md", "path": "/p/review-1.md", "kind": "review", "verdict": "changes_requested"}]
 
 
+def worker(name, state, model="opencode-go/deepseek-v4.1-flash", thinking="", **over):
+    base = {"name": name, "state": state, "queued": 0, "job": None, "log": "/none",
+            "model": model, "thinking": thinking}
+    base.update(over)
+    return base
+
+
 def data(tasks=None, workers=None):
     return {"project": "/p", "active_task": None,
+            "planner": {"model": "opus", "thinking": ""},
             "workers": workers if workers is not None else [
-                {"name": "deepseek", "state": "idle", "queued": 0, "job": None, "log": "/none"},
-                {"name": "glm", "state": "stopped", "queued": 0, "job": None, "log": "/none"}],
+                worker("deepseek", "idle"),
+                worker("glm", "stopped", model="opencode-go/glm-5.3-flash")],
             "tasks": tasks or []}
 
 
@@ -60,6 +71,17 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(status.worker_summary({"state": "stopped", "queued": 0}), "stopped")
         self.assertEqual(status.worker_summary({"state": "idle", "queued": 0}), "waiting for a plan")
 
+    def test_worker_summary_shows_the_short_model_and_thinking(self):
+        w = worker("deepseek", "idle", thinking="high",
+                   model="opencode-go/deepseek-v4.1-flash")
+        self.assertEqual(status.worker_summary(w), "waiting for a plan · deepseek-v4.1-flash · high")
+        w = worker("deepseek", "stopped", thinking="")
+        self.assertEqual(status.worker_summary(w), "stopped · deepseek-v4.1-flash")
+
+    def test_planner_summary(self):
+        self.assertEqual(status.planner_summary({"model": "opus", "thinking": "high"}), "opus · high")
+        self.assertEqual(status.planner_summary({"model": "opus", "thinking": ""}), "opus")
+
     def test_transitions(self):
         before = {"tasks": [task(status="running"), task(id="005-x", number=5, status="running")]}
         after = {"tasks": [task(status="committed", commit="1234567890"),
@@ -82,12 +104,25 @@ class RowsTest(unittest.TestCase):
     def test_collapsed_and_expanded(self):
         d = data([task(status="awaiting_review", round=1, files=FILES)])
         rows = status.rows(d)
-        self.assertEqual([r.kind for r in rows], ["header", "worker", "worker", "header", "task"])
+        self.assertEqual([r.kind for r in rows],
+                         ["header", "planner", "worker", "worker", "header", "task"])
         self.assertTrue(rows[-1].text.startswith("▸ 004 health"))
         rows = status.rows(d, {"004-health"})
         self.assertEqual([r.text for r in rows if r.kind == "file"], ["plan.md", "report-1.md", "review-1.md"])
         self.assertEqual(rows[-1].detail, "changes requested")
         self.assertTrue(all(r.task == "004-health" for r in rows if r.kind == "file"))
+
+    def test_planner_row(self):
+        d = data()
+        rows = status.rows(d)
+        planner = rows[1]
+        self.assertEqual(rows[0].text, "WORKERS")
+        self.assertEqual(planner.kind, "planner")
+        self.assertEqual(planner.id, "planner")
+        self.assertEqual(planner.text, "planner")
+        self.assertTrue(planner.selectable)
+        self.assertEqual(planner.detail, status.planner_summary(d["planner"]))
+        self.assertEqual(planner.detail, "opus")
 
     def test_no_tasks(self):
         self.assertEqual(status.rows(data())[-1].kind, "note")
@@ -135,7 +170,7 @@ class KeysTest(unittest.TestCase):
         self.press("j")
         self.assertEqual(self.ui.selected, "task:003-old", "stops at the end")
         self.press("g")
-        self.assertEqual(self.ui.selected, "worker:deepseek")
+        self.assertEqual(self.ui.selected, "planner")
 
     def test_enter_expands_then_opens_a_file(self):
         self.press(10)
@@ -220,6 +255,176 @@ class KeysTest(unittest.TestCase):
         idle = data(workers=[{"name": "deepseek", "state": "idle", "log": "/none"},
                              {"name": "glm", "state": "idle", "log": "/none"}])
         self.assertEqual(tui.output_worker(tui.UI(), idle, task(worker="glm")), "glm")
+
+    def test_model_and_thinking_keys_use_the_selected_row(self):
+        self.ui.selected = "worker:deepseek"
+        self.assertEqual(self.press("m"), ("model", "deepseek"))
+        self.assertEqual(self.press("t"), ("thinking", "deepseek"))
+        self.ui.selected = "planner"
+        self.assertEqual(self.press("m"), ("model", "planner"))
+        self.assertEqual(self.press("t"), ("thinking", "planner"))
+        self.ui.selected = "task:004-health"
+        self.assertEqual(self.press("m"), ("model", None))
+        self.assertEqual(self.press("t"), ("thinking", None))
+
+    def test_picker_moves_and_returns_the_value(self):
+        self.ui.picker = tui.Picker("pick", [("a", "1", ""), ("b", "2", ""), ("c", "3", "")],
+                                    action=("chosen",))
+        self.press(curses.KEY_DOWN)
+        self.press("j")
+        self.assertEqual(self.ui.picker.index, 2)
+        self.press("j")
+        self.assertEqual(self.ui.picker.index, 2, "stops at the end")
+        self.press(curses.KEY_UP)
+        self.assertEqual(self.ui.picker.index, 1)
+        self.press(curses.KEY_HOME)
+        self.assertEqual(self.ui.picker.index, 0)
+        self.press(curses.KEY_END)
+        self.assertEqual(self.ui.picker.index, 2)
+        self.assertEqual(self.press(10), ("chosen", "3"))
+        self.assertIsNone(self.ui.picker)
+
+    def test_picker_cancels(self):
+        for key in ("q", 27, curses.KEY_LEFT, "h"):
+            self.ui.picker = tui.Picker("pick", [("a", "1", "")], action=("chosen",))
+            self.assertIsNone(self.press(key))
+            self.assertIsNone(self.ui.picker)
+            self.assertEqual(self.ui.message, "cancelled")
+
+    def test_prompt_collects_text(self):
+        self.ui.prompt = tui.Prompt("model for planner: ", action=("model_pick", "planner"))
+        for ch in "sonnet":
+            self.assertIsNone(self.press(ch))
+        self.assertEqual(self.ui.prompt.text, "sonnet")
+        self.press(curses.KEY_BACKSPACE)
+        self.assertEqual(self.ui.prompt.text, "sonne")
+        self.assertEqual(self.press(10), ("model_pick", "planner", "sonne"))
+        self.assertIsNone(self.ui.prompt)
+
+    def test_prompt_ignores_empty_text_and_cancels_with_escape(self):
+        self.ui.prompt = tui.Prompt("model: ", action=("model_pick", "planner"))
+        self.assertIsNone(self.press(10))
+        self.assertIsNotNone(self.ui.prompt)
+        self.assertIsNone(self.press(27))
+        self.assertIsNone(self.ui.prompt)
+        self.assertEqual(self.ui.message, "cancelled")
+
+
+class FakeScreen:
+    """Just enough of a curses screen for Dashboard in tests."""
+
+    def __init__(self, height=24, width=80):
+        self.height, self.width = height, width
+        self.written: list[tuple[int, int, str]] = []
+
+    def getmaxyx(self):
+        return self.height, self.width
+
+    def erase(self):
+        self.written = []
+
+    def addstr(self, y, x, text, attr=0):
+        self.written.append((y, x, text))
+
+    def refresh(self):
+        pass
+
+    def timeout(self, ms):
+        pass
+
+    def keypad(self, flag):
+        pass
+
+    def text(self) -> str:
+        return "\n".join(t for _y, _x, t in self.written)
+
+
+class ActTest(unittest.TestCase):
+    """The model/thinking flow of Dashboard.act, without a terminal."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.project = Path(self.tmp.name) / "proj"
+        self.project.mkdir()
+        self.user = Path(self.tmp.name) / "user.toml"
+        env = mock.patch.dict(os.environ, {"AAAGENT_USER_CONFIG": str(self.user)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.scr = FakeScreen()
+        self.dash = tui.Dashboard(self.scr, self.project)
+        self.dash.styles = dict.fromkeys(
+            ("normal", "header", "running", "ok", "warn", "dim", "add", "del", "hunk", "title"), 0)
+        self.dash.draw = lambda: None
+
+    def test_model_picker_lists_the_choices_and_a_typed_name(self):
+        with mock.patch.object(models, "choices", return_value=["sonnet", "opus"]):
+            self.assertTrue(self.dash.act(("model", "planner")))
+        picker = self.dash.ui.picker
+        self.assertEqual(picker.title, "model for planner")
+        self.assertEqual([i[1] for i in picker.items], ["opus", "sonnet", tui.TYPE_NEW])
+        self.assertEqual(picker.items[0][2], "current")
+        self.assertEqual(picker.items[-1][0], "type a name…")
+
+        self.dash.act(("model_pick", "planner", tui.TYPE_NEW))
+        self.assertEqual(self.dash.ui.prompt.action, ("model_pick", "planner"))
+        self.dash.act(("model_pick", "planner", "sonnet"))
+        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["user", "project"])
+
+    def test_picker_can_pick_which_target(self):
+        self.dash.act(("model", None))
+        picker = self.dash.ui.picker
+        self.assertEqual([i[1] for i in picker.items], ["planner", "deepseek", "glm"])
+        self.assertEqual(picker.items[1][2], "opencode-go/deepseek-v4.1-flash")
+        self.dash.act(("thinking", None))
+        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["planner", "deepseek", "glm"])
+        self.assertEqual(self.dash.ui.picker.items[1][2], "default")
+
+    def test_thinking_picker_lists_the_levels(self):
+        with mock.patch.object(models, "thinking_choices", return_value=["low", "high", "max"]):
+            self.dash.act(("thinking", "deepseek"))
+        picker = self.dash.ui.picker
+        self.assertEqual(picker.title, "thinking for deepseek")
+        self.assertEqual([i[1] for i in picker.items], ["default", "low", "high", "max"])
+        self.assertEqual(picker.items[0][2], "the model's own setting")
+
+    def test_thinking_save_writes_the_user_config(self):
+        with mock.patch.object(models, "thinking_choices", return_value=["low", "high", "max"]):
+            self.dash.act(("thinking_save", "deepseek", "high", "user"))
+        text = self.user.read_text()
+        self.assertIn("[workers.deepseek]", text)
+        self.assertIn('thinking = "high"', text)
+        self.assertIn("deepseek thinking: high", self.dash.ui.message)
+        self.assertEqual(self.dash.data["planner"]["model"], "opus")
+
+    def test_model_save_writes_the_project_config(self):
+        self.dash.act(("model_save", "planner", "sonnet", "project"))
+        path = self.project / ".aaagent" / "config.toml"
+        self.assertTrue(path.is_file())
+        text = path.read_text()
+        self.assertIn("[orchestrator]", text)
+        self.assertIn('model = "sonnet"', text)
+        self.assertIn("planner model: sonnet", self.dash.ui.message)
+
+    def test_errors_go_to_the_message(self):
+        self.dash.act(("model_save", "planner", "  ", "project"))
+        self.assertIn("empty", self.dash.ui.message)
+
+    def test_draw_shows_the_picker_and_the_prompt(self):
+        self.dash.ui.picker = tui.Picker("model for planner", [("opus", "opus", "current"),
+                                                              ("sonnet", "sonnet", "")], index=1)
+        tui.Dashboard.draw(self.dash)
+        text = self.scr.text()
+        self.assertIn("model for planner", text)
+        self.assertIn("sonnet", text)
+        self.assertIn("enter select", text)
+
+        self.dash.ui.picker = None
+        self.dash.ui.prompt = tui.Prompt("model for planner: ", "sonne")
+        tui.Dashboard.draw(self.dash)
+        text = self.scr.text()
+        self.assertIn("model for planner: sonne_", text)
+        self.assertIn("enter save", text)
 
 
 class TailTest(unittest.TestCase):

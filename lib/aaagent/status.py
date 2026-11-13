@@ -148,8 +148,21 @@ def worker_summary(w: dict) -> str:
         text = "waiting for a plan"
     else:
         text = "stopped"
+    model = str(w.get("model") or "")
+    if model:
+        text += f" · {model.rsplit('/', 1)[-1]}"
+    if w.get("thinking"):
+        text += f" · {w['thinking']}"
     if w.get("queued"):
         text += f" · {w['queued']} queued"
+    return text
+
+
+def planner_summary(p: dict) -> str:
+    """The planner's model, with its thinking level when one is set."""
+    text = str(p.get("model") or "?")
+    if p.get("thinking"):
+        text += f" · {p['thinking']}"
     return text
 
 
@@ -210,7 +223,7 @@ class Row:
 
     @property
     def selectable(self) -> bool:
-        return self.kind in ("worker", "task", "file")
+        return self.kind in ("planner", "worker", "task", "file")
 
 
 def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_finished: int = 10) -> list[Row]:
@@ -218,6 +231,8 @@ def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_f
     if not data:
         return []
     out = [Row("header:workers", "header", "WORKERS", style="header")]
+    planner = data.get("planner") or {}
+    out.append(Row("planner", "planner", "planner", planner_summary(planner), "normal", 1, planner))
     for w in data.get("workers") or []:
         style = "running" if w.get("state") == "running" else ("dim" if w.get("state") == "stopped" else "normal")
         out.append(Row(f"worker:{w['name']}", "worker", w["name"], worker_summary(w), style, 1, w))

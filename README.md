@@ -78,7 +78,9 @@ With tmux installed, `aaagent` opens one window: the Opus chat on the left and t
 ```
 ┌ Opus chat ─────────────────────┬ aaagent · my-project ─────────────────┐
 │                                │ WORKERS                               │
-│ > add a /health endpoint       │  deepseek          / fixing 003 r2    │
+│ > add a /health endpoint       │ WORKERS                               │
+│                                │  planner                  opus · high │
+│                                │  deepseek          / fixing 003 r2    │
 │                                │  glm               waiting for a plan │
 │                                │ TASKS                                 │
 │                                │  ▾ 003 add health  / fixing · deepseek│
@@ -99,6 +101,8 @@ Dashboard keys:
 | `enter` | task: show or hide its plan, reports and reviews · file: read it · worker: show its output |
 | `d` | the selected task's diff |
 | `l` | choose whose output the bottom pane shows (default: whoever is working) |
+| `m` | change a model: the selected worker's or the planner's, or pick which one; type a name if it is not listed |
+| `t` | the same for a thinking level |
 | `a` | abandon the selected task, after a y/n question |
 | `N` | close the chat and start a new one (shown when the chat is in aaagent's tmux layout) |
 | `R` | reopen the previous chat in the chat pane (shown when there is one) |

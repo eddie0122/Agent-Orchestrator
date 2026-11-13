@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gitutil, session, status, tasks, worker
+from . import dispatch, gitutil, models, session, status, tasks, worker
 from .config import Config
 from .status import Row
 from .tasks import FlowError
@@ -33,6 +33,8 @@ HELP = [
     ("enter", "task: show or hide its files · file: read it · worker: show its output"),
     ("d", "everything the selected task changed (diff)"),
     ("l", "switch whose output is shown below"),
+    ("m", "change a model: the selected worker's or planner's, or pick which"),
+    ("t", "change a thinking level (same)"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
     ("N", "close this chat and start a new one"),
     ("R", "reopen the previous chat in the chat pane"),
@@ -43,6 +45,7 @@ HELP = [
 
 KEY_ENTER = (curses.KEY_ENTER, 10, 13)
 KEY_BACK = (27, curses.KEY_LEFT, curses.KEY_BACKSPACE, 127, ord("q"), ord("h"))
+TYPE_NEW = "\x00type"    # picker value of "type a name…"
 
 
 @dataclass
@@ -61,14 +64,43 @@ class Confirm:
 
 
 @dataclass
+class Picker:
+    """A list of choices shown instead of the lists (a model, a thinking level, where to save)."""
+    title: str
+    items: list[tuple[str, str, str]]   # label, value, detail
+    index: int = 0
+    action: tuple = ()                  # selecting an item returns (*action, value)
+
+
+@dataclass
+class Prompt:
+    """A line of text typed by the user; Enter returns (*action, text)."""
+    title: str
+    text: str = ""
+    action: tuple = ()
+
+
+@dataclass
 class UI:
     selected: str | None = None                     # id of the highlighted row
     expanded: set[str] = field(default_factory=set)  # task ids whose files are listed
     output_worker: str | None = None                # None: follow whichever worker is running
     view: View | None = None
     confirm: Confirm | None = None
+    picker: Picker | None = None
+    prompt: Prompt | None = None
     message: str = ""
     page: int = 10                                  # lines one page scrolls; set while drawing
+
+
+def typed_char(key: int) -> str | None:
+    """The character a key press types, or None for arrows and other special keys."""
+    if 32 <= key <= 126:
+        return chr(key)
+    if 127 < key < getattr(curses, "KEY_MIN", 257):
+        ch = chr(key)
+        return ch if ch.isprintable() else None
+    return None
 
 
 def selectable(rows: list[Row]) -> list[Row]:
@@ -100,7 +132,8 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
                can_resume: bool = False, has_chat_pane: bool = False) -> tuple | None:
     """Apply one key press to the UI state. Returns an action for the caller to carry out:
     ("quit",) ("refresh",) ("open", path, title) ("diff", task_id) ("abandon", task_id)
-    ("resume",) ("new_chat",) ("help",), or None when the key only changed what is shown.
+    ("resume",) ("new_chat",) ("help",) ("model", target) ("thinking", target), or None
+    when the key only changed what is shown.
     """
     if key in (-1, curses.KEY_RESIZE):
         return None
@@ -110,6 +143,45 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
         if key in (ord("y"), ord("Y")):
             return confirm.action
         ui.message = "cancelled"
+        return None
+
+    if ui.prompt:
+        prompt = ui.prompt
+        if key in KEY_ENTER:
+            text = prompt.text.strip()
+            if not text:
+                return None
+            ui.prompt = None
+            return (*prompt.action, text)
+        if key == 27:
+            ui.prompt = None
+            ui.message = "cancelled"
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            prompt.text = prompt.text[:-1]
+        else:
+            char = typed_char(key)
+            if char:
+                prompt.text += char
+        return None
+
+    if ui.picker:
+        picker = ui.picker
+        last = max(0, len(picker.items) - 1)
+        if key in (curses.KEY_UP, ord("k")):
+            picker.index = max(0, picker.index - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            picker.index = min(last, picker.index + 1)
+        elif key == curses.KEY_HOME:
+            picker.index = 0
+        elif key == curses.KEY_END:
+            picker.index = last
+        elif key in KEY_ENTER:
+            value = picker.items[picker.index][1]
+            ui.picker = None
+            return (*picker.action, value)
+        elif key in (ord("q"), 27, curses.KEY_LEFT, ord("h")):
+            ui.picker = None
+            ui.message = "cancelled"
         return None
 
     if ui.view:
@@ -141,6 +213,10 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
         return ("refresh",)
     if key == ord("?"):
         return ("help",)
+    if key == ord("m"):
+        return ("model", _target_of(row))
+    if key == ord("t"):
+        return ("thinking", _target_of(row))
     if key in (curses.KEY_UP, ord("k")):
         _move(ui, rows, -1)
     elif key in (curses.KEY_DOWN, ord("j")):
@@ -196,6 +272,15 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
             ui.confirm = Confirm("Close this chat and reopen the previous one? (y/n)", ("resume",))
         else:
             ui.message = "no previous chat to reopen here (use `aaagent -c` when starting)"
+    return None
+
+
+def _target_of(row: Row | None) -> str | None:
+    """Whose model or thinking level a picker should change, from the selected row."""
+    if row and row.kind == "planner":
+        return models.PLANNER
+    if row and row.kind == "worker":
+        return row.text
     return None
 
 
@@ -361,9 +446,73 @@ class Dashboard:
                     session.respawn_chat(self.project, self.chat_pane, previous,
                                          os.environ.get("AAAGENT_TMUX_CLOSE") or "tmux kill-window")
                     self.ui.message = "reopened the previous chat"
-        except (FlowError, OSError, RuntimeError) as exc:
+            elif name in ("model", "thinking"):
+                if action[1]:
+                    self.pick_values(name, action[1])
+                else:
+                    self.pick_targets(name)
+            elif name == "model_pick":
+                target, value = action[1], action[2]
+                if value == TYPE_NEW:
+                    self.ui.picker = None
+                    self.ui.prompt = Prompt(f"model for {target}: ", action=("model_pick", target))
+                else:
+                    self.pick_scope(("model_save", target, value))
+            elif name == "thinking_pick":
+                self.pick_scope(("thinking_save", action[1], action[2]))
+            elif name == "model_save":
+                target, model, scope = action[1], action[2], action[3]
+                notes = models.set_model(self.project, scope == "project", target, model)
+                self.load()
+                self.ui.message = "; ".join(notes)
+            elif name == "thinking_save":
+                target, level, scope = action[1], action[2], action[3]
+                notes = models.set_thinking(self.project, scope == "project", target, level)
+                self.load()
+                self.ui.message = "; ".join(notes)
+        except (FlowError, OSError, RuntimeError, ValueError) as exc:
             self.ui.message = str(exc)
         return True
+
+    # -- model and thinking pickers -----------------------------------------------
+    def pick_targets(self, kind: str) -> None:
+        """Whose model or thinking level to change: the planner, or one of the workers."""
+        cfg = Config.load(self.project)
+        items = []
+        for target in [models.PLANNER, *cfg.worker_names()]:
+            if kind == "model":
+                detail = models.current(cfg, target)
+            else:
+                detail = models.thinking_current(cfg, target) or "default"
+            items.append((target, target, detail))
+        title = "change the model of" if kind == "model" else "change the thinking level of"
+        self.ui.picker = Picker(title, items, action=(kind,))
+
+    def pick_values(self, kind: str, target: str) -> None:
+        """The choices for `target`: models (with typing) or thinking levels."""
+        self.ui.message = "loading models…" if kind == "model" else "loading thinking levels…"
+        self.draw()
+        cfg = Config.load(self.project)
+        if kind == "model":
+            now = models.current(cfg, target)
+            names = models.choices(cfg, target)
+            if now in names:
+                names = [now, *(n for n in names if n != now)]
+            items = [(name, name, "current" if name == now else "") for name in names]
+            items.append(("type a name…", TYPE_NEW, ""))
+            self.ui.picker = Picker(f"model for {target}", items, action=("model_pick", target))
+        else:
+            now = models.thinking_current(cfg, target)
+            items = [("default", "default", "the model's own setting")]
+            items += [(level, level, "current" if level == now else "")
+                      for level in models.thinking_choices(cfg, target)]
+            self.ui.picker = Picker(f"thinking for {target}", items, action=("thinking_pick", target))
+
+    def pick_scope(self, action: tuple) -> None:
+        """Where to save the choice: the user config (all projects) or this project's."""
+        items = [("all projects", "user", "~/.config/aaagent/config.toml"),
+                 ("this project only", "project", ".aaagent/config.toml")]
+        self.ui.picker = Picker("save where?", items, action=action)
 
     # -- drawing ------------------------------------------------------------------
     def put(self, y: int, x: int, text: str, attr: int = 0, width: int | None = None) -> None:
@@ -391,7 +540,9 @@ class Dashboard:
         name = Path((self.data or {}).get("project") or self.project).name
         self.put(0, 0, f" aaagent · {name}", self.styles["title"])
         body_top, footer = 1, height - 1
-        if self.ui.view:
+        if self.ui.picker:
+            self.draw_picker(body_top, footer - body_top, width)
+        elif self.ui.view:
             self.draw_view(body_top, footer - body_top, width)
         else:
             self.draw_lists(body_top, footer - body_top, width)
@@ -444,6 +595,26 @@ class Dashboard:
             attr = self.styles["warn"] if "✗" in line or "error" in line.lower()[:12] else 0
             self.put(y + 1 + i, 0, line, attr, width - 1)
 
+    def draw_picker(self, top: int, height: int, width: int) -> None:
+        """The choices of a model/thinking picker, in place of the lists."""
+        picker = self.ui.picker
+        body = height - 1
+        self.rule(top, picker.title, width)
+        if body <= 0:
+            return
+        first = 0
+        if picker.index >= body:
+            first = picker.index - body + 1
+        for i, (label, _value, detail) in enumerate(picker.items[first:first + body]):
+            line = status.format_row(Row(f"pick:{first + i}", "note", label, detail, indent=1), width - 1)
+            attr = 0
+            if first + i == picker.index:
+                line += " " * max(0, width - 1 - status.text_width(line))
+                attr = curses.A_REVERSE
+            self.put(top + 1 + i, 0, line, attr)
+        if first + body < len(picker.items):
+            self.put(top + body, max(0, width - 4), " ↓ ", self.styles["dim"])
+
     def draw_view(self, top: int, height: int, width: int) -> None:
         view = self.ui.view
         body = height - 1
@@ -474,13 +645,24 @@ class Dashboard:
         return self.styles["title"] if line.startswith("#") else 0
 
     def draw_footer(self, y: int, width: int) -> None:
+        if self.ui.prompt:
+            prompt = self.ui.prompt
+            text = " " + prompt.title + prompt.text + "_"
+            self.put(y, 0, text, self.styles["title"])
+            hints = "enter save  esc cancel"
+            if width - status.text_width(text) - 2 > status.text_width(hints):
+                self.put(y, width - status.text_width(hints) - 1, hints, self.styles["dim"])
+            return
+        if self.ui.picker:
+            self.put(y, 0, " ↑↓ choose  enter select  q cancel", self.styles["dim"])
+            return
         if self.ui.confirm:
             self.put(y, 0, " " + self.ui.confirm.prompt, self.styles["warn"])
             return
         if self.ui.view:
             hints = "↑↓ scroll  space page  q back"
         else:
-            hints = "enter open  d diff  l output  a abandon"
+            hints = "enter open  d diff  m model  t thinking  a abandon"
             if self.chat_pane:
                 hints += "  N new chat"
             if self.can_resume():
