@@ -10,14 +10,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, attach, dispatch, gitutil, models, session, status, tasks, tui, worker
+from . import __version__, attach, dispatch, gitutil, models, session, sessions, status, tasks, tui, worker
 from .config import ROOT, USER_CONFIG, Config
 from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "new", "dispatch", "wait", "status", "diff", "logs", "stop",
-            "abandon", "attach", "doctor", "version", "help", "model", "thinking"}
+            "abandon", "attach", "doctor", "version", "help", "model", "thinking", "sessions"}
 # Options of `start` that also work without the word: `aaagent -c`.
-START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model"}
+START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model", "--session"}
 
 
 def project_root() -> Path:
@@ -36,7 +36,7 @@ def cmd_start(args) -> int:
     prompt = " ".join(args.prompt) if args.prompt else None
     return session.launch(Path.cwd(), prompt, use_tmux=not (args.no_tmux or args.no_workers),
                           manage_workers=not args.no_workers, resume=args.resume,
-                          model=args.model)
+                          model=args.model, session_ref=args.session)
 
 
 def cmd_model(args) -> int:
@@ -199,6 +199,27 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_sessions(args) -> int:
+    project = project_root()
+    known = sessions.list_sessions(project, limit=None if args.all else 20)
+    if args.json:
+        print(json.dumps(known, indent=1))
+        return 0
+    if not known:
+        print("no chat sessions yet; run `aaagent` to start one.")
+        return 0
+    for session in known:
+        mark = "*" if session["current"] else " "
+        when = (session["last_active"] or "")[:16].replace("T", " ")
+        count = f"{len(session['tasks'])} tasks" if session["tasks"] else "no tasks"
+        title = session["title"] or "(no messages yet)"
+        if not session["available"]:
+            title += " (gone)"
+        print(f"{mark} {session['short']}  {when}  {count:<8}  {title}")
+    print("\nreopen one with: aaagent --session <id>")
+    return 0
+
+
 def cmd_diff(args) -> int:
     project = project_root()
     task = tasks.find(project, args.task)
@@ -312,6 +333,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only open the chat; workers run elsewhere (used by the VSCode extension)")
     s.add_argument("-c", "--continue", "--resume", dest="resume", action="store_true",
                    help="reopen this project's last aaagent chat instead of starting a new one")
+    s.add_argument("--session", metavar="ref",
+                   help="reopen the chat session <ref> (an id or id prefix from `aaagent sessions`)")
     s.add_argument("--model", help="planner model for this chat only")
     s.set_defaults(func=cmd_start)
 
@@ -344,6 +367,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="include committed and abandoned tasks")
     s.add_argument("--json", action="store_true", help="machine-readable output with every task")
     s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("sessions", help="this project's chat sessions, newest first")
+    s.add_argument("--all", action="store_true", help="show every session, not just the latest 20")
+    s.add_argument("--json", action="store_true", help="machine-readable list")
+    s.set_defaults(func=cmd_sessions)
 
     s = sub.add_parser("diff", help="all changes since the task started")
     s.add_argument("task")

@@ -110,9 +110,9 @@ Dashboard keys:
 
 The dashboard beeps and says so in its bottom line when a task is committed or needs you.
 
-### Chats
+### Sessions
 
-Each `aaagent` starts a new chat. `aaagent -c` reopens the last one for this project, and `/resume` inside the chat lists older ones. aaagent remembers its own chat in `.aaagent/chat.json`, so `-c` never picks up an unrelated Claude Code conversation from the same folder. When a new chat starts while tasks are unfinished, Opus is told about them and asks you whether to continue.
+Each `aaagent` starts a new chat session, and a session can create many tasks: `aaagent status` shows each task's session, and `aaagent sessions` lists the sessions with the tasks they created. `aaagent --session <id>` reopens one (the id, or a unique prefix of it, is in that list); `aaagent -c` reopens the last one for this project, and `/resume` inside the chat lists older ones. aaagent remembers its own chats in `.aaagent/sessions.json` (and the last one in `.aaagent/chat.json`), so `-c` never picks up an unrelated Claude Code conversation from the same folder. When a new chat starts while tasks are unfinished, Opus is told about them and asks you whether to continue.
 
 To start a fresh conversation in the middle of things, press `N` in the dashboard (in the tmux layout) or type `/clear` in the chat; quitting and running `aaagent` again does the same.
 
@@ -126,6 +126,7 @@ Opus runs these itself. They are also useful for you:
 |---|---|
 | `aaagent ui` | the dashboard, in any terminal |
 | `aaagent status [--all]` | workers and tasks, with each task's next step |
+| `aaagent sessions [--all]` | this project's chat sessions, with the tasks each created |
 | `aaagent diff <task> [--stat]` | everything changed since the task started |
 | `aaagent logs <worker> [-f]` | worker output |
 | `aaagent attach <file\|-> […] [--no-send]` | copy images into `.aaagent/attachments/` and add them to the chat |
@@ -137,6 +138,7 @@ Opus runs these itself. They are also useful for you:
 | `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner and worker models |
 | `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner and worker thinking levels |
 | `aaagent --model <name>` | start the chat with another planner model for this chat only |
+| `aaagent --session <id>` | reopen a chat session (an id or id prefix from `aaagent sessions`) |
 | `aaagent doctor` | check the installation |
 
 Task numbers can be short: `aaagent diff 3` means `003-…`.
@@ -201,6 +203,7 @@ commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@examp
   attachments/      images from `aaagent attach`
   fetch/            image copy requests between the chat and VSCode
   chat.json         the last chat's session id, for `aaagent -c`
+  sessions.json     the chat sessions and the tasks each one created
   chat-pane         the tmux pane of the chat, for `aaagent attach`
 ```
 
@@ -216,6 +219,7 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 |---|---|
 | `lib/aaagent/cli.py` | commands |
 | `lib/aaagent/session.py` | launches Claude and the workers (tmux or background), chat restore |
+| `lib/aaagent/sessions.py` | the chat sessions: history, and which session created each task |
 | `lib/aaagent/tui.py` | the terminal dashboard (`aaagent ui`) |
 | `lib/aaagent/status.py` | status data and the dashboard's view logic |
 | `lib/aaagent/worker.py` | worker daemon and file queue |

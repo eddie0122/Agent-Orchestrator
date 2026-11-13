@@ -147,6 +147,8 @@ class Task:
 # -- creation and lookup ---------------------------------------------------
 
 def create(project: Path, name: str) -> Task:
+    from . import sessions  # imported here to avoid an import cycle (sessions lists tasks)
+
     base = tasks_dir(project)
     base.mkdir(parents=True, exist_ok=True)
     nums = [int(m.group(1)) for p in base.iterdir() if (m := re.match(r"(\d+)-", p.name))]
@@ -165,6 +167,7 @@ def create(project: Path, name: str) -> Task:
         "worker": None,
         "worker_since_round": 1,
         "sessions": {},
+        "chat_session": sessions.current_session(project),
         "history": [],
     })
     return task

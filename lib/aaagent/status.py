@@ -11,7 +11,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import __version__, tasks, worker
+from . import __version__, sessions, tasks, worker
 from .config import Config
 from .tasks import FINAL_STATUSES, FlowError
 
@@ -67,13 +67,16 @@ def status_data(project: Path, cfg: Config) -> dict:
             "job": {k: job.get(k) for k in ("phase", "round", "worker")} if job else None,
             "next": nxt, "blocked": blocked, "attention": attention,
             "commit": state.get("commit"), "created": state.get("created"),
+            "session": state.get("chat_session"),
             "updated": task.state_file.stat().st_mtime if task.state_file.exists() else None,
             "path": str(task.path), "files": files,
         })
     return {"version": __version__, "project": str(project),
             "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking},
             "workers": workers,
-            "tasks": out_tasks, "active_task": tasks.active_task(project)}
+            "tasks": out_tasks, "active_task": tasks.active_task(project),
+            "sessions": sessions.list_sessions(project, limit=30),
+            "current_session": sessions.current_session(project)}
 
 
 # -- what to say about a task or worker ----------------------------------------
