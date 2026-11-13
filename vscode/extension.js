@@ -6,6 +6,7 @@ const os = require("os");
 const path = require("path");
 const vscode = require("vscode");
 
+const { AttachPanel } = require("./src/attach");
 const { Cli } = require("./src/cli");
 const { DiffProvider, SCHEME } = require("./src/diff");
 const model = require("./src/model");
@@ -200,6 +201,15 @@ function activate(context) {
   const taskOf = (node) => (node && node.task) || null;
   const workerOf = (node) => (node && node.name ? node : null);
 
+  /** Type `text` into the chat's input, starting a chat first if there is none. */
+  async function sendToChat(p, text) {
+    if (!terminals.chat()) {
+      await terminals.startChat(p);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    await terminals.send(text, { submit: false });
+  }
+
   /**
    * Pick a model for the planner or a worker (from a list or typed) and save it
    * user-wide or for this project. `node` is a worker tree item, which skips the
@@ -330,11 +340,51 @@ function activate(context) {
     const ref = sel.isEmpty
       ? model.mention(rel)
       : model.mention(rel, sel.start.line + 1, sel.end.character === 0 && sel.end.line > sel.start.line ? sel.end.line : sel.end.line + 1);
-    if (!terminals.chat()) {
-      await terminals.startChat(p);
-      await new Promise((r) => setTimeout(r, 5000));
+    await sendToChat(p, ref);
+  });
+
+  command("aaagent.attachImage", async () => {
+    const p = project();
+    if (!p) return;
+    AttachPanel.show(context, {
+      project: p,
+      onAttached: (rel) => sendToChat(p, model.mention(rel)),
+    });
+  });
+
+  command("aaagent.attachFile", async (uri, uris) => {
+    const p = project();
+    if (!p) return;
+    const list = Array.isArray(uris) && uris.length ? uris : uri ? [uri]
+      : vscode.window.activeTextEditor ? [vscode.window.activeTextEditor.document.uri] : [];
+    const refs = [];
+    for (const u of list) {
+      if (!u || u.scheme !== "file") continue;
+      const rel = path.relative(p, u.fsPath);
+      if (rel.startsWith("..") || path.isAbsolute(rel)) {
+        vscode.window.showWarningMessage("aaagent: this file is outside the project.");
+        continue;
+      }
+      const name = path.basename(u.fsPath);
+      if (!model.isImagePath(u.fsPath)) {
+        vscode.window.showWarningMessage(`aaagent: ${name} is not an image.`);
+        continue;
+      }
+      let size;
+      try {
+        size = fs.statSync(u.fsPath).size;
+      } catch (err) {
+        vscode.window.showWarningMessage(`aaagent: ${name}: ${err.message}`);
+        continue;
+      }
+      if (size > model.MAX_IMAGE_BYTES) {
+        vscode.window.showWarningMessage(
+          `aaagent: ${name} is ${(size / (1024 * 1024)).toFixed(1)} MB; the limit is ${model.MAX_IMAGE_BYTES / (1024 * 1024)} MB`);
+        continue;
+      }
+      refs.push(model.mention(rel.split(path.sep).join("/")));
     }
-    await terminals.send(ref, { submit: false });
+    if (refs.length) await sendToChat(p, refs.join(""));
   });
 
   command("aaagent.showDiff", async (node) => {

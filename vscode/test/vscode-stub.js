@@ -5,7 +5,7 @@ const path = require("path");
 
 const record = {
   commands: new Map(), executed: [], terminals: [], messages: [], context: {}, treeViews: {},
-  statusItems: [], contentProviders: {}, watchers: [], config: {}, opened: [],
+  statusItems: [], contentProviders: {}, watchers: [], config: {}, opened: [], panels: [],
   quickPicks: [], inputBoxes: [],
 };
 
@@ -59,6 +59,22 @@ const vscode = {
     createTreeView(id, opts) { const v = { id, ...opts, dispose() {} }; record.treeViews[id] = v; return v; },
     createStatusBarItem() { const s = { show() { this.visible = true; }, dispose() {} }; record.statusItems.push(s); return s; },
     createTerminal: makeTerminal,
+    createWebviewPanel(viewType, title, showOptions, options) {
+      const panel = {
+        viewType, title, showOptions,
+        webview: {
+          html: "", cspSource: "vscode-webview:", options, posted: [],
+          postMessage(m) { this.posted.push(m); return Promise.resolve(true); },
+          onDidReceiveMessage(fn) { this._handler = fn; return { dispose() {} }; },
+          asWebviewUri: (u) => u,
+        },
+        reveal() { this.revealed = (this.revealed || 0) + 1; },
+        onDidDispose(fn) { this._onDispose = fn; return { dispose() {} }; },
+        dispose() { this._onDispose && this._onDispose(); },
+      };
+      record.panels.push(panel);
+      return panel;
+    },
     withProgress: async (opts, fn) => fn({ report() {} }),
     showInformationMessage: async (m) => { record.messages.push(["info", m]); return record.answer; },
     showWarningMessage: async (m) => { record.messages.push(["warning", m]); return record.answer; },

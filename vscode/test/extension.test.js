@@ -200,6 +200,91 @@ test("activate() against a real project", async (t) => {
   assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /deepseek model: opencode-go\/kimi-k3/.test(m)),
     JSON.stringify(rec.messages));
 
+  // Attach Image: one panel, reused on a second call, with a nonce CSP and the file button.
+  const panelsBefore = rec.panels.length;
+  await rec.commands.get("aaagent.attachImage")();
+  assert.strictEqual(rec.panels.length, panelsBefore + 1);
+  const panel = rec.panels.at(-1);
+  assert.strictEqual(panel.viewType, "aaagent.attach");
+  assert.strictEqual(panel.title, "aaagent: Attach Image");
+  assert.match(panel.webview.html, /Content-Security-Policy" content="default-src 'none';/);
+  assert.match(panel.webview.html, /script-src 'nonce-[^']+';/);
+  assert.match(panel.webview.html, /Choose files…/);
+  await rec.commands.get("aaagent.attachImage")();
+  assert.strictEqual(rec.panels.length, panelsBefore + 1);
+  assert.strictEqual(panel.revealed, 1);
+
+  // Paste: the bytes land in .aaagent/attachments with a CLI-compatible name and are typed
+  // into the chat input (no Enter).
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+  await panel.webview._handler({ type: "image", id: 1, name: "shot 1.png", data: png.toString("base64") });
+  const attachDir = path.join(project, ".aaagent", "attachments");
+  const saved = fs.readdirSync(attachDir);
+  const shot = saved.find((f) => f.endsWith("-shot-1.png"));
+  assert.ok(shot, JSON.stringify(saved));
+  assert.match(shot, /^\d{8}-\d{6}-shot-1\.png$/);
+  assert.deepStrictEqual(fs.readFileSync(path.join(attachDir, shot)), png);
+  assert.deepStrictEqual(chat3.sent.at(-1),
+    [`\x1b[200~@.aaagent/attachments/${shot} \x1b[201~`, false]);
+  assert.ok(panel.webview.posted.some((m) => m.type === "saved" && m.id === 1 && m.name === `.aaagent/attachments/${shot}`),
+    JSON.stringify(panel.webview.posted));
+
+  // Not an image: an error goes back to the panel and nothing is written.
+  const attachmentsCount = fs.readdirSync(attachDir).length;
+  await panel.webview._handler({ type: "image", id: 2, name: "notes.txt", data: Buffer.from("hello").toString("base64") });
+  assert.strictEqual(fs.readdirSync(attachDir).length, attachmentsCount);
+  assert.ok(panel.webview.posted.some((m) => m.type === "error" && m.id === 2 && m.name === "notes.txt" && /not a PNG/.test(m.message)),
+    JSON.stringify(panel.webview.posted));
+
+  // Two images back to back without awaiting between them: messages are handled one at a
+  // time, the pastes reach the chat in send order, both files are saved, and every reply
+  // echoes the id the webview sent.
+  const beforeBurst = chat3.sent.length;
+  const firstMessage = panel.webview._handler({ type: "image", id: 21, name: "first.png", data: png.toString("base64") });
+  const secondMessage = panel.webview._handler({ type: "image", id: 22, name: "second.png", data: png.toString("base64") });
+  await Promise.all([firstMessage, secondMessage]);
+  const burst = chat3.sent.slice(beforeBurst);
+  assert.strictEqual(burst.length, 2, JSON.stringify(burst));
+  assert.match(burst[0][0], /^\x1b\[200~@\.aaagent\/attachments\/\d{8}-\d{6}-first\.png \x1b\[201~$/);
+  assert.match(burst[1][0], /^\x1b\[200~@\.aaagent\/attachments\/\d{8}-\d{6}-second\.png \x1b\[201~$/);
+  const attachNames = fs.readdirSync(attachDir);
+  assert.ok(attachNames.some((f) => f.endsWith("-first.png")), JSON.stringify(attachNames));
+  assert.ok(attachNames.some((f) => f.endsWith("-second.png")), JSON.stringify(attachNames));
+  const savedFor = (id) => panel.webview.posted.find((m) => m.type === "saved" && m.id === id);
+  assert.match(savedFor(21).name, /-first\.png$/);
+  assert.match(savedFor(22).name, /-second\.png$/);
+  assert.deepStrictEqual(
+    panel.webview.posted.filter((m) => m.type === "saved").map((m) => m.id).slice(-2), [21, 22],
+    JSON.stringify(panel.webview.posted));
+
+  // Attach to aaagent Chat: images in the workspace are mentioned in one paste; a non-image
+  // and a file outside the project are skipped with a warning.
+  const one = path.join(project, "one.png");
+  const two = path.join(project, "two.jpg");
+  const notes = path.join(project, "notes.txt");
+  const outside = path.join(tmp, "outside.png");
+  fs.writeFileSync(one, png);
+  fs.writeFileSync(two, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+  fs.writeFileSync(notes, "hello\n");
+  fs.writeFileSync(outside, png);
+  const messagesBefore = rec.messages.length;
+  await rec.commands.get("aaagent.attachFile")(stub.Uri.file(one),
+    [stub.Uri.file(one), stub.Uri.file(two), stub.Uri.file(notes), stub.Uri.file(outside)]);
+  assert.deepStrictEqual(chat3.sent.at(-1), ["\x1b[200~@one.png @two.jpg \x1b[201~", false]);
+  const attachWarnings = rec.messages.slice(messagesBefore).filter(([lvl]) => lvl === "warning").map(([, m]) => m);
+  assert.ok(attachWarnings.some((m) => /notes\.txt is not an image/.test(m)), JSON.stringify(attachWarnings));
+  assert.ok(attachWarnings.some((m) => /outside the project/.test(m)), JSON.stringify(attachWarnings));
+
+  // No uris array: the single uri is used.
+  await rec.commands.get("aaagent.attachFile")(stub.Uri.file(two), []);
+  assert.deepStrictEqual(chat3.sent.at(-1), ["\x1b[200~@two.jpg \x1b[201~", false]);
+
+  // A closed panel is forgotten: the next call opens a fresh one.
+  panel.dispose();
+  await rec.commands.get("aaagent.attachImage")();
+  assert.strictEqual(rec.panels.length, panelsBefore + 2);
+  rec.panels.at(-1).dispose();
+
   // abandon (confirmed)
   rec.answer = "Abandon";
   await rec.commands.get("aaagent.abandonTask")(nodes[0]);

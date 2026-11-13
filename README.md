@@ -57,6 +57,8 @@ Other handy commands:
 
 - **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
+- **Attach Image…** (Tasks view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
+- **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.
 - **Show Task Changes**, **Abandon Task…**, **Stop All Workers**, **Check Installation**, **Open Configuration**.
 
 Settings: `aaagent.chatLocation` (`editor` or `panel`), `aaagent.notifications` (`all`, `important`, `off`), `aaagent.finishedTasksShown`, `aaagent.path`.

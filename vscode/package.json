@@ -3,7 +3,7 @@
   "publisher": "local",
   "displayName": "aaagent",
   "description": "Chat with Claude Opus as planner and reviewer while opencode workers (DeepSeek, GLM) implement and commit.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "UNLICENSED",
   "private": true,
   "engines": {
@@ -77,6 +77,8 @@
       { "command": "aaagent.resumeChat", "title": "Resume Last Chat", "category": "aaagent", "icon": "$(history)" },
       { "command": "aaagent.ask", "title": "Ask Opus…", "category": "aaagent", "icon": "$(sparkle)" },
       { "command": "aaagent.sendSelection", "title": "Send Selection to Chat", "category": "aaagent" },
+      { "command": "aaagent.attachImage", "title": "Attach Image…", "category": "aaagent", "icon": "$(file-media)" },
+      { "command": "aaagent.attachFile", "title": "Attach to aaagent Chat", "category": "aaagent" },
       { "command": "aaagent.refresh", "title": "Refresh", "category": "aaagent", "icon": "$(refresh)" },
       { "command": "aaagent.showDiff", "title": "Show Task Changes", "category": "aaagent", "icon": "$(diff)" },
       { "command": "aaagent.openTaskFolder", "title": "Reveal Task Folder", "category": "aaagent", "icon": "$(folder-opened)" },
@@ -92,7 +94,8 @@
       "view/title": [
         { "command": "aaagent.newChat", "when": "view == aaagent.tasks", "group": "navigation@1" },
         { "command": "aaagent.ask", "when": "view == aaagent.tasks", "group": "navigation@2" },
-        { "command": "aaagent.refresh", "when": "view == aaagent.tasks", "group": "navigation@3" },
+        { "command": "aaagent.attachImage", "when": "view == aaagent.tasks", "group": "navigation@3" },
+        { "command": "aaagent.refresh", "when": "view == aaagent.tasks", "group": "navigation@4" },
         { "command": "aaagent.openChat", "when": "view == aaagent.tasks", "group": "1_more@1" },
         { "command": "aaagent.resumeChat", "when": "view == aaagent.tasks", "group": "1_more@2" },
         { "command": "aaagent.selectModel", "when": "view == aaagent.workers", "group": "navigation@1" },
@@ -113,8 +116,15 @@
       "editor/context": [
         { "command": "aaagent.sendSelection", "when": "resourceScheme == file && aaagent.state == ready", "group": "aaagent@1" }
       ],
+      "explorer/context": [
+        { "command": "aaagent.attachFile", "when": "aaagent.state == ready && resourceScheme == file && resourceExtname =~ /^\\.(png|jpe?g|gif|webp)$/i", "group": "aaagent@1" }
+      ],
+      "editor/title/context": [
+        { "command": "aaagent.attachFile", "when": "aaagent.state == ready && resourceScheme == file && resourceExtname =~ /^\\.(png|jpe?g|gif|webp)$/i", "group": "aaagent@1" }
+      ],
       "commandPalette": [
         { "command": "aaagent.sendSelection", "when": "editorIsOpen && aaagent.state == ready" },
+        { "command": "aaagent.attachFile", "when": "false" },
         { "command": "aaagent.changeWorkerModel", "when": "false" }
       ]
     },

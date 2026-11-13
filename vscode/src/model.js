@@ -226,7 +226,62 @@ function mention(relPath, startLine, endLine) {
   return `@${p}#L${startLine}-${endLine} `;
 }
 
+// -- images (must match lib/aaagent/attach.py) ---------------------------------
+
+const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp"];
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+function startsWithBytes(buf, bytes, offset = 0) {
+  if (!buf || buf.length < offset + bytes.length) return false;
+  for (let i = 0; i < bytes.length; i++) if (buf[offset + i] !== bytes[i]) return false;
+  return true;
+}
+
+const asciiBytes = (text) => Array.from(text, (c) => c.charCodeAt(0));
+const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** The image type of a Buffer/Uint8Array from its magic bytes, or null. `attach.py:sniff`. */
+function sniffImage(buf) {
+  if (!buf || !buf.length) return null;
+  if (startsWithBytes(buf, PNG_SIG)) return "png";
+  if (startsWithBytes(buf, [0xff, 0xd8, 0xff])) return "jpg";
+  if (startsWithBytes(buf, asciiBytes("GIF87a")) || startsWithBytes(buf, asciiBytes("GIF89a"))) return "gif";
+  if (startsWithBytes(buf, asciiBytes("RIFF")) && startsWithBytes(buf, asciiBytes("WEBP"), 8)) return "webp";
+  return null;
+}
+
+const pad2 = (n) => String(n).padStart(2, "0");
+
+/** The basename split the way Python's `Path` does: stem and the last suffix. */
+function splitName(name) {
+  const base = String(name || "").split(/[\\/]/).pop();
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || base.endsWith(".")) return { stem: base, ext: "" };
+  return { stem: base.slice(0, dot), ext: base.slice(dot) };
+}
+
+/** `<YYYYmmdd-HHMMSS>-<stem>.<ext>`, the same name `attach.py:safe_name` makes. */
+function attachmentName(originalName, kind, date) {
+  const d = date || new Date();
+  const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-` +
+    `${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+  const parts = splitName(originalName);
+  const stem = parts.stem.replace(/[^A-Za-z0-9._-]/g, "-").replace(/-+/g, "-").trim()
+    .replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "") || "image";
+  const ext = parts.ext.replace(/^\./, "").toLowerCase();
+  return `${stamp}-${stem}.${IMAGE_EXTS.includes(ext) ? ext : kind}`;
+}
+
+/** Whether the path has one of the image extensions we accept. */
+function isImagePath(p) {
+  const base = String(p || "").split(/[\\/]/).pop();
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return false;
+  return IMAGE_EXTS.includes(base.slice(dot + 1).toLowerCase());
+}
+
 module.exports = {
   visibleTasks, taskSummary, taskIcon, taskItem, fileItem, workerItem, statusBar, transitions,
   isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
+  IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
 };

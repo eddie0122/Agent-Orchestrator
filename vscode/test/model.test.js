@@ -126,3 +126,42 @@ test("mention and bracketed paste", () => {
   assert.strictEqual(model.mention("a b.py"), '@"a b.py" ');
   assert.strictEqual(model.bracketedPaste("x\ny"), "\x1b[200~x\ny\x1b[201~");
 });
+
+test("sniffImage reads the magic bytes of the four accepted image types", () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+  assert.strictEqual(model.sniffImage(png), "png");
+  assert.strictEqual(model.sniffImage(new Uint8Array(png)), "png");
+  assert.strictEqual(model.sniffImage(Buffer.from([0xff, 0xd8, 0xff, 0xe0])), "jpg");
+  assert.strictEqual(model.sniffImage(Buffer.from("GIF87a....")), "gif");
+  assert.strictEqual(model.sniffImage(Buffer.from("GIF89a....")), "gif");
+  const webp = Buffer.alloc(12);
+  webp.write("RIFF", 0);
+  webp.write("WEBP", 8);
+  assert.strictEqual(model.sniffImage(webp), "webp");
+  assert.strictEqual(model.sniffImage(Buffer.from("RIFFxxxxNOPE")), null);
+  assert.strictEqual(model.sniffImage(Buffer.from("hello")), null);
+  assert.strictEqual(model.sniffImage(Buffer.alloc(0)), null);
+});
+
+test("attachmentName mirrors the CLI names", () => {
+  const date = new Date(2026, 2, 4, 5, 6, 7); // local time
+  assert.strictEqual(model.attachmentName("shot 1.PNG", "png", date), "20260304-050607-shot-1.png");
+  assert.strictEqual(model.attachmentName("스크린샷.png", "png", date), "20260304-050607-image.png");
+  assert.strictEqual(model.attachmentName("", "png", date), "20260304-050607-image.png");
+  assert.strictEqual(model.attachmentName("clip.bmp", "jpeg", date), "20260304-050607-clip.jpeg");
+  assert.strictEqual(model.attachmentName("pasted", "webp", date), "20260304-050607-pasted.webp");
+  assert.strictEqual(model.attachmentName("a--b.png", "png", date), "20260304-050607-a-b.png");
+  assert.strictEqual(model.attachmentName(`${"x".repeat(60)}.png`, "png", date),
+    `20260304-050607-${"x".repeat(40)}.png`);
+});
+
+test("isImagePath accepts the image extensions in any case", () => {
+  assert.strictEqual(model.isImagePath("src/shot.PNG"), true);
+  assert.strictEqual(model.isImagePath("a/b.jpg"), true);
+  assert.strictEqual(model.isImagePath("a/b.jpeg"), true);
+  assert.strictEqual(model.isImagePath("a/b.gif"), true);
+  assert.strictEqual(model.isImagePath("a/b.webp"), true);
+  assert.strictEqual(model.isImagePath("a/b.txt"), false);
+  assert.strictEqual(model.isImagePath("a/b"), false);
+  assert.strictEqual(model.isImagePath(".png"), false);
+});
