@@ -30,14 +30,16 @@ TAIL_BYTES = 16384
 
 HELP = [
     ("↑ ↓  j k", "move"),
-    ("enter", "task: show or hide its files · file: read it · worker: show its output"),
+    ("enter", "task: show or hide its files · session: show its tasks · file: read it · worker: show its output"),
+    ("", "on a session's task: jump to it in TASKS"),
     ("d", "everything the selected task changed (diff)"),
     ("l", "switch whose output is shown below"),
     ("m", "change a model: the selected worker's or planner's, or pick which"),
     ("t", "change a thinking level (same)"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
-    ("N", "close this chat and start a new one"),
-    ("R", "reopen the previous chat in the chat pane"),
+    ("o", "open the selected session in the chat pane"),
+    ("N", "start a new chat session"),
+    ("R", "restore an earlier session (pick from a list)"),
     ("r", "refresh now"),
     ("q", "close this view; from the list, quit the dashboard"),
     ("Ctrl-b o", "tmux: move between the chat and this dashboard (or click)"),
@@ -129,11 +131,11 @@ def _move(ui: UI, rows: list[Row], delta: int) -> None:
 
 
 def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] = (),
-               can_resume: bool = False, has_chat_pane: bool = False) -> tuple | None:
+               has_chat_pane: bool = False) -> tuple | None:
     """Apply one key press to the UI state. Returns an action for the caller to carry out:
     ("quit",) ("refresh",) ("open", path, title) ("diff", task_id) ("abandon", task_id)
-    ("resume",) ("new_chat",) ("help",) ("model", target) ("thinking", target), or None
-    when the key only changed what is shown.
+    ("restore",) ("open_session", session_id) ("new_chat",) ("help",) ("model", target)
+    ("thinking", target), or None when the key only changed what is shown.
     """
     if key in (-1, curses.KEY_RESIZE):
         return None
@@ -233,6 +235,17 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
                 ui.expanded.discard(row.task)
             else:
                 ui.expanded.add(row.task)
+        elif row.kind == "session":
+            key_id = f"session:{row.ref['id']}"
+            if not row.ref.get("tasks"):
+                ui.message = "no tasks in this session yet"
+            elif key_id in ui.expanded and key != curses.KEY_RIGHT:
+                ui.expanded.discard(key_id)
+            else:
+                ui.expanded.add(key_id)
+        elif row.kind == "stask":
+            ui.selected = f"task:{row.task}"
+            ui.expanded.add(row.task)
         elif row.kind == "file":
             return ("open", row.ref["path"], f"{row.task} / {row.text}")
         elif row.kind == "worker":
@@ -243,6 +256,10 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
             ui.selected = f"task:{row.task}"
         elif row and row.kind == "task":
             ui.expanded.discard(row.task)
+        elif row and row.kind == "session":
+            ui.expanded.discard(f"session:{row.ref['id']}")
+        elif row and row.kind == "stask":
+            ui.selected = f"session:{row.id.split(':')[1]}"
     elif key == ord("l"):
         order = [None, *worker_names]
         at = order.index(ui.output_worker) if ui.output_worker in order else 0
@@ -261,17 +278,31 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
         else:
             ui.confirm = Confirm(f"Abandon {status.task_label(task)}? Its changes stay. (y/n)",
                                  ("abandon", task["id"]))
+    elif key == ord("o"):
+        if not row or row.kind != "session":
+            ui.message = "select a session to open"
+        elif not has_chat_pane:
+            ui.message = f"open it with: aaagent --session {row.ref['short']}"
+        elif not row.ref.get("available", True):
+            ui.message = "this session's conversation is gone"
+        elif row.ref.get("current"):
+            ui.message = "this session is already the chat"
+        else:
+            label = status.clip(status.session_label(row.ref), 40)
+            ui.confirm = Confirm(f'Open session "{label}" in the chat pane? '
+                                 "The current chat closes. (y/n)",
+                                 ("open_session", row.ref["id"]))
     elif key == ord("N"):
         if has_chat_pane:
-            ui.confirm = Confirm("Close this chat and start a new one? (y/n)", ("new_chat",))
+            ui.confirm = Confirm("Close this chat and start a new session? (y/n)", ("new_chat",))
         else:
-            ui.message = ("new chat works in aaagent's tmux layout; otherwise quit the chat and "
-                          "run `aaagent` again, or type /clear in the chat")
+            ui.message = ("a new session works in aaagent's tmux layout; otherwise quit the chat "
+                          "and run `aaagent` again")
     elif key == ord("R"):
-        if can_resume:
-            ui.confirm = Confirm("Close this chat and reopen the previous one? (y/n)", ("resume",))
-        else:
-            ui.message = "no previous chat to reopen here (use `aaagent -c` when starting)"
+        if has_chat_pane:
+            return ("restore",)
+        ui.message = ("restore works in aaagent's tmux layout; otherwise use `aaagent sessions` "
+                      "and `aaagent --session <id>`")
     return None
 
 
@@ -287,7 +318,7 @@ def _target_of(row: Row | None) -> str | None:
 def _task_of(row: Row | None, rows: list[Row]) -> dict | None:
     if not row or not row.task:
         return None
-    if row.kind == "task":
+    if row.kind in ("task", "stask"):
         return row.ref
     return next((r.ref for r in rows if r.kind == "task" and r.task == row.task), None)
 
@@ -405,9 +436,6 @@ class Dashboard:
             if new.get("active_task"):
                 self.ui.expanded.add(new["active_task"])
 
-    def can_resume(self) -> bool:
-        return bool(self.chat_pane and session.previous_chat(self.project))
-
     # -- actions ------------------------------------------------------------------
     def act(self, action: tuple) -> bool:
         """Carry out an action from handle_key. Returns False to quit."""
@@ -438,14 +466,23 @@ class Dashboard:
                     session.respawn_chat(self.project, self.chat_pane, None,
                                          os.environ.get("AAAGENT_TMUX_CLOSE") or "tmux kill-window")
                     self.ui.message = "started a new chat"
-            elif name == "resume":
-                previous = session.previous_chat(self.project)
-                if not previous or not self.chat_pane:
-                    self.ui.message = "no previous chat to reopen"
+            elif name == "restore":
+                earlier = [s for s in (self.data or {}).get("sessions") or []
+                           if s.get("available") and not s.get("current")]
+                if not earlier:
+                    self.ui.message = "no earlier session to restore"
                 else:
-                    session.respawn_chat(self.project, self.chat_pane, previous,
+                    items = [(status.clip(status.session_label(s), 60), s["id"],
+                              status.session_summary(s)) for s in earlier]
+                    self.ui.picker = Picker("restore which session?", items, action=("open_session",))
+            elif name == "open_session":
+                if not self.chat_pane:
+                    self.ui.message = "open a session works in aaagent's tmux layout"
+                else:
+                    session.respawn_chat(self.project, self.chat_pane, action[1],
                                          os.environ.get("AAAGENT_TMUX_CLOSE") or "tmux kill-window")
-                    self.ui.message = "reopened the previous chat"
+                    self.ui.message = f"opened session {action[1][:8]}"
+                    self.load()
             elif name in ("model", "thinking"):
                 if action[1]:
                     self.pick_values(name, action[1])
@@ -664,9 +701,10 @@ class Dashboard:
         else:
             hints = "enter open  d diff  m model  t thinking  a abandon"
             if self.chat_pane:
-                hints += "  N new chat"
-            if self.can_resume():
-                hints += "  R prev chat"
+                row = self.selected_row()
+                if row and row.kind == "session":
+                    hints += "  o open session"
+                hints += "  N new session  R restore"
             hints += "  ? keys"
         text = self.error or self.ui.message
         if text:
@@ -677,6 +715,11 @@ class Dashboard:
                 self.put(y, width - status.text_width(hints) - 1, hints, self.styles["dim"])
         else:
             self.put(y, 0, " " + hints, self.styles["dim"])
+
+    def selected_row(self) -> Row | None:
+        """The highlighted row, as the lists build them."""
+        return next((r for r in status.rows(self.data, self.ui.expanded)
+                     if r.id == self.ui.selected), None)
 
     # -- main loop ----------------------------------------------------------------
     def loop(self) -> int:
@@ -695,8 +738,7 @@ class Dashboard:
                 continue
             rows = status.rows(self.data, self.ui.expanded)
             names = tuple(w["name"] for w in (self.data or {}).get("workers") or [])
-            action = handle_key(self.ui, key, rows, names,
-                                self.can_resume() if key == ord("R") else False, bool(self.chat_pane))
+            action = handle_key(self.ui, key, rows, names, bool(self.chat_pane))
             if action and not self.act(action):
                 return 0
 

@@ -79,10 +79,13 @@ With tmux installed, `aaagent` opens one window: the Opus chat on the left and t
 ```
 ┌ Opus chat ─────────────────────┬ aaagent · my-project ─────────────────┐
 │                                │ WORKERS                               │
-│ > add a /health endpoint       │ WORKERS                               │
-│                                │  planner                  opus · high │
+│ > add a /health endpoint       │  planner                  opus · high │
 │                                │  deepseek          / fixing 003 r2    │
 │                                │  glm               waiting for a plan │
+│                                │ SESSIONS                              │
+│                                │  ▾ add a /health endpoint  open · 2 t…│
+│                                │     003 add health        / fixing …  │
+│                                │  · fix login              2 h ago     │
 │                                │ TASKS                                 │
 │                                │  ▾ 003 add health  / fixing · deepseek│
 │                                │     plan.md                           │
@@ -99,15 +102,18 @@ Dashboard keys:
 | key | does |
 |---|---|
 | `↑` `↓` / `j` `k` | move |
-| `enter` | task: show or hide its plan, reports and reviews · file: read it · worker: show its output |
-| `d` | the selected task's diff |
+| `enter` | task: show or hide its plan, reports and reviews · session: show its tasks · a session's task: jump to it in TASKS · file: read it · worker: show its output |
+| `d` | the selected task's diff (also from a session's task) |
 | `l` | choose whose output the bottom pane shows (default: whoever is working) |
 | `m` | change a model: the selected worker's or the planner's, or pick which one; type a name if it is not listed |
 | `t` | the same for a thinking level |
 | `a` | abandon the selected task, after a y/n question |
-| `N` | close the chat and start a new one (shown when the chat is in aaagent's tmux layout) |
-| `R` | reopen the previous chat in the chat pane (shown when there is one) |
+| `o` | open the selected session in the chat pane, after a y/n question (shown for a session row in aaagent's tmux layout) |
+| `N` | start a new session (closes this chat; shown in aaagent's tmux layout) |
+| `R` | restore an earlier session, picked from a list (shown in aaagent's tmux layout) |
 | `?` | all keys · `q` closes a view, or quits the dashboard |
+
+**SESSIONS** lists the chat sessions newest first, the open one marked `open`, with the tasks each one created. `enter` on a session shows those tasks; `enter` on one of them jumps to it in TASKS, so its plan, reports, reviews and diff are there too. `N` starts a new session, `R` picks an earlier one from a list, and `o` reopens the one that is selected.
 
 The dashboard beeps and says so in its bottom line when a task is committed or needs you.
 

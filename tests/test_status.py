@@ -4,14 +4,16 @@ import curses
 import os
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from aaagent import models, status, tui  # noqa: E402
+from aaagent import models, session, status, tui  # noqa: E402
 
 
 def task(**over):
@@ -20,6 +22,20 @@ def task(**over):
             "blocked": None, "attention": None, "commit": None, "files": []}
     base.update(over)
     return base
+
+
+def session_(**over):
+    base = {"id": "sess-current", "short": "sess-cur", "title": "add a /health endpoint",
+            "started": "2026-11-13T10:00:00+0900", "last_active": "2026-11-13T21:43:50+0900",
+            "transcript_path": "/t/current.jsonl", "available": True, "current": False, "tasks": []}
+    base.update(over)
+    return base
+
+
+def recently(**kw):
+    """A timestamp a while ago, as sessions.py writes them."""
+    when = datetime.now(timezone.utc) - timedelta(**kw)
+    return when.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 FILES = [{"name": "plan.md", "path": "/p/plan.md", "kind": "plan"},
@@ -34,13 +50,13 @@ def worker(name, state, model="opencode-go/deepseek-v4.1-flash", thinking="", **
     return base
 
 
-def data(tasks=None, workers=None):
+def data(tasks=None, workers=None, sessions=None):
     return {"project": "/p", "active_task": None,
             "planner": {"model": "opus", "thinking": ""},
             "workers": workers if workers is not None else [
                 worker("deepseek", "idle"),
                 worker("glm", "stopped", model="opencode-go/glm-5.3-flash")],
-            "tasks": tasks or []}
+            "tasks": tasks or [], "sessions": sessions or []}
 
 
 class SummaryTest(unittest.TestCase):
@@ -100,17 +116,101 @@ class SummaryTest(unittest.TestCase):
         self.assertTrue(status.is_busy(data(workers=[{"name": "x", "state": "idle", "queued": 1}])))
 
 
+class SessionSummaryTest(unittest.TestCase):
+    NOW = datetime(2026, 11, 13, 12, 0, 0, tzinfo=timezone.utc)
+
+    def iso(self, **kw):
+        return (self.NOW - timedelta(**kw)).strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    def test_ago(self):
+        now = self.NOW.timestamp()
+        self.assertEqual(status.ago(self.iso(seconds=30), now), "just now")
+        self.assertEqual(status.ago(self.iso(minutes=5), now), "5 min ago")
+        self.assertEqual(status.ago(self.iso(hours=3), now), "3 h ago")
+        self.assertEqual(status.ago(self.iso(days=1), now), "1 day ago")
+        self.assertEqual(status.ago(self.iso(days=2), now), "2 days ago")
+        self.assertEqual(status.ago(self.iso(days=13), now), "13 days ago")
+        self.assertEqual(status.ago(self.iso(days=30), now), "2026-10-14")
+        self.assertEqual(status.ago("not a date", now), "")
+        self.assertEqual(status.ago(None, now), "")
+        self.assertEqual(status.ago("", now), "")
+
+    def test_session_label(self):
+        self.assertEqual(status.session_label(session_(title="fix login")), "fix login")
+        self.assertEqual(status.session_label(session_(title="")), "(no messages yet)")
+
+    def test_session_summary(self):
+        two = session_(last_active=recently(hours=2), tasks=["001-a", "002-b"])
+        self.assertEqual(status.session_summary(two), "2 h ago · 2 tasks")
+        self.assertEqual(status.session_summary(session_(last_active=recently(hours=2),
+                                                         tasks=["001-a"])), "2 h ago · 1 task")
+        self.assertEqual(status.session_summary(two, True), "open · 2 tasks")
+        self.assertEqual(status.session_summary(session_(last_active=recently(hours=2),
+                                                         tasks=["001-a"], available=False)),
+                         "2 h ago · 1 task · gone")
+        self.assertEqual(status.session_summary(session_(last_active=None)), "")
+
+
 class RowsTest(unittest.TestCase):
     def test_collapsed_and_expanded(self):
         d = data([task(status="awaiting_review", round=1, files=FILES)])
         rows = status.rows(d)
         self.assertEqual([r.kind for r in rows],
-                         ["header", "planner", "worker", "worker", "header", "task"])
+                         ["header", "planner", "worker", "worker", "header", "note", "header", "task"])
+        self.assertEqual(rows[4].text, "SESSIONS")
         self.assertTrue(rows[-1].text.startswith("▸ 004 health"))
         rows = status.rows(d, {"004-health"})
         self.assertEqual([r.text for r in rows if r.kind == "file"], ["plan.md", "report-1.md", "review-1.md"])
         self.assertEqual(rows[-1].detail, "changes requested")
         self.assertTrue(all(r.task == "004-health" for r in rows if r.kind == "file"))
+
+    def test_sessions_section(self):
+        d = data([task(status="awaiting_review", round=1)], sessions=[
+            session_(current=True, tasks=["004-health"], last_active=recently(minutes=5)),
+            session_(id="sess-old", short="sess-old", title="fix login", available=False,
+                     last_active=recently(hours=3))])
+        rows = status.rows(d)
+        self.assertEqual(rows[4].id, "header:sessions")
+        self.assertEqual(rows[4].text, "SESSIONS")
+        current, old = rows[5], rows[6]
+        self.assertEqual(current.id, "session:sess-current")
+        self.assertEqual(current.text, "▸ add a /health endpoint")
+        self.assertEqual(current.detail, "open · 1 task")
+        self.assertEqual(current.style, "ok")
+        self.assertTrue(current.selectable)
+        self.assertEqual(old.text, "· fix login")
+        self.assertEqual(old.detail, "3 h ago · gone")
+        self.assertEqual(old.style, "dim")
+        self.assertEqual(rows[7].text, "TASKS")
+
+    def test_a_session_shows_its_tasks_when_expanded(self):
+        d = data([task(status="awaiting_review", round=1, files=FILES)], sessions=[
+            session_(current=True, tasks=["004-health", "999-unknown"])])
+        rows = status.rows(d, {"session:sess-current"})
+        self.assertEqual(rows[5].text, "▾ add a /health endpoint")
+        stasks = [r for r in rows if r.kind == "stask"]
+        self.assertEqual(len(stasks), 1, "unknown task ids are skipped")
+        self.assertEqual(stasks[0].id, "stask:sess-current:004-health")
+        self.assertEqual(stasks[0].text, "004 health")
+        self.assertEqual(stasks[0].detail, "in review (round 1)")
+        self.assertEqual(stasks[0].indent, 3)
+        self.assertEqual(stasks[0].task, "004-health")
+        self.assertTrue(stasks[0].selectable)
+
+    def test_the_current_session_is_kept_and_more_sessions_are_counted(self):
+        sessions = [session_(id=f"s{i}", short=f"s{i}", current=(i == 6)) for i in range(7)]
+        rows = status.rows(data(sessions=sessions), keep_sessions=5)
+        shown = [r.id for r in rows if r.kind == "session"]
+        self.assertEqual(shown, [f"session:s{i}" for i in range(5)] + ["session:s6"])
+        note = next(r for r in rows if r.id == "note:sessions-more")
+        self.assertEqual(note.text, "… 1 more: aaagent sessions")
+        self.assertEqual(note.style, "dim")
+
+    def test_sessions_note_when_there_are_none(self):
+        note = next(r for r in status.rows(data()) if r.id == "note:sessions")
+        self.assertEqual(note.text, "none yet: start the chat with aaagent")
+        self.assertEqual(note.style, "dim")
+        self.assertFalse(note.selectable)
 
     def test_planner_row(self):
         d = data()
@@ -157,10 +257,10 @@ class KeysTest(unittest.TestCase):
                           task(id="003-old", number=3, title="old", status="committed", commit="abc1234")])
         self.ui = tui.UI()
 
-    def press(self, key, can_resume=False, has_chat_pane=False):
+    def press(self, key, has_chat_pane=False):
         rows = status.rows(self.data, self.ui.expanded)
         k = ord(key) if isinstance(key, str) else key
-        return tui.handle_key(self.ui, k, rows, ("deepseek", "glm"), can_resume, has_chat_pane)
+        return tui.handle_key(self.ui, k, rows, ("deepseek", "glm"), has_chat_pane)
 
     def test_starts_on_the_open_task_and_moves(self):
         rows = status.rows(self.data)
@@ -226,19 +326,20 @@ class KeysTest(unittest.TestCase):
         self.assertIsNone(self.ui.view)
         self.assertEqual(self.press("q"), ("quit",))
 
-    def test_resume_only_when_possible(self):
+    def test_restore_needs_the_tmux_layout(self):
         self.assertIsNone(self.press("R"))
-        self.assertIn("no previous chat", self.ui.message)
-        self.press("R", can_resume=True)
-        self.assertEqual(self.press("y"), ("resume",))
+        self.assertIn("tmux layout", self.ui.message)
+        self.assertIn("aaagent sessions", self.ui.message)
+        self.assertEqual(self.press("R", has_chat_pane=True), ("restore",))
 
-    def test_new_chat_needs_the_tmux_layout(self):
+    def test_new_session_needs_the_tmux_layout(self):
         self.assertIsNone(self.press("N"))
         self.assertIsNone(self.ui.confirm)
         self.assertIn("tmux layout", self.ui.message)
 
         self.press("N", has_chat_pane=True)
         self.assertEqual(self.ui.confirm.action, ("new_chat",))
+        self.assertIn("start a new session", self.ui.confirm.prompt)
         self.assertIsNone(self.press("n"))
         self.assertIsNone(self.ui.confirm)
         self.assertEqual(self.ui.message, "cancelled")
@@ -308,6 +409,92 @@ class KeysTest(unittest.TestCase):
         self.assertIsNone(self.press(27))
         self.assertIsNone(self.ui.prompt)
         self.assertEqual(self.ui.message, "cancelled")
+
+
+class SessionKeysTest(unittest.TestCase):
+    """Enter, o, d and a on the SESSIONS rows."""
+
+    def setUp(self):
+        self.data = data(
+            [task(status="awaiting_review", round=1, files=FILES)],
+            sessions=[session_(id="sess-current", short="sess-cur", current=True,
+                               tasks=["004-health"], last_active=recently(minutes=5)),
+                      session_(id="sess-old", short="sess-old", title="fix login", tasks=[],
+                               last_active=recently(hours=2)),
+                      session_(id="sess-gone", short="sess-gone", title="gone chat",
+                               available=False, last_active=recently(hours=3))])
+        self.ui = tui.UI()
+
+    def press(self, key, has_chat_pane=False):
+        rows = status.rows(self.data, self.ui.expanded)
+        k = ord(key) if isinstance(key, str) else key
+        return tui.handle_key(self.ui, k, rows, ("deepseek", "glm"), has_chat_pane)
+
+    def test_enter_shows_a_sessions_tasks(self):
+        self.ui.selected = "session:sess-current"
+        self.assertIsNone(self.press(10))
+        self.assertIn("session:sess-current", self.ui.expanded)
+        self.press(curses.KEY_RIGHT)
+        self.assertIn("session:sess-current", self.ui.expanded)
+        self.assertIsNone(self.press(10))
+        self.assertNotIn("session:sess-current", self.ui.expanded)
+        self.press(10)
+        self.press(curses.KEY_LEFT)
+        self.assertNotIn("session:sess-current", self.ui.expanded)
+
+    def test_enter_on_a_session_without_tasks_says_so(self):
+        self.ui.selected = "session:sess-old"
+        self.assertIsNone(self.press(10))
+        self.assertEqual(self.ui.message, "no tasks in this session yet")
+        self.assertEqual(self.ui.expanded, set())
+
+    def test_enter_on_a_sessions_task_selects_it_in_tasks(self):
+        self.ui.expanded.add("session:sess-current")
+        self.ui.selected = "stask:sess-current:004-health"
+        self.assertIsNone(self.press(10))
+        self.assertEqual(self.ui.selected, "task:004-health")
+        self.assertIn("004-health", self.ui.expanded)
+        self.assertEqual(self.press("d"), ("diff", "004-health"))
+
+    def test_left_on_a_sessions_task_goes_back_to_its_session(self):
+        self.ui.expanded.add("session:sess-current")
+        self.ui.selected = "stask:sess-current:004-health"
+        self.press(curses.KEY_LEFT)
+        self.assertEqual(self.ui.selected, "session:sess-current")
+
+    def test_abandon_works_from_a_sessions_task(self):
+        self.ui.expanded.add("session:sess-current")
+        self.ui.selected = "stask:sess-current:004-health"
+        self.press("a")
+        self.assertEqual(self.ui.confirm.action, ("abandon", "004-health"))
+
+    def test_open_session_explains_itself_outside_tmux(self):
+        self.ui.selected = "session:sess-old"
+        self.assertIsNone(self.press("o"))
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "open it with: aaagent --session sess-old")
+
+    def test_open_session_when_gone_or_already_open(self):
+        self.ui.selected = "session:sess-gone"
+        self.press("o", has_chat_pane=True)
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "this session's conversation is gone")
+        self.ui.selected = "session:sess-current"
+        self.press("o", has_chat_pane=True)
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "this session is already the chat")
+
+    def test_open_session_asks_first(self):
+        self.ui.selected = "session:sess-old"
+        self.assertIsNone(self.press("o", has_chat_pane=True))
+        self.assertIn('Open session "fix login"', self.ui.confirm.prompt)
+        self.assertIn("current chat closes", self.ui.confirm.prompt)
+        self.assertEqual(self.press("y"), ("open_session", "sess-old"))
+
+    def test_o_on_another_row_asks_for_a_session(self):
+        self.ui.selected = "task:004-health"
+        self.assertIsNone(self.press("o"))
+        self.assertEqual(self.ui.message, "select a session to open")
 
 
 class FakeScreen:
@@ -425,6 +612,61 @@ class ActTest(unittest.TestCase):
         text = self.scr.text()
         self.assertIn("model for planner: sonne_", text)
         self.assertIn("enter save", text)
+
+
+class ActSessionsTest(unittest.TestCase):
+    """Restoring and opening chat sessions from Dashboard.act, without a terminal."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.project = Path(self.tmp.name) / "proj"
+        self.project.mkdir()
+        self.user = Path(self.tmp.name) / "user.toml"
+        env = mock.patch.dict(os.environ, {"AAAGENT_USER_CONFIG": str(self.user)})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AAAGENT_TMUX_CLOSE", None)
+        self.scr = FakeScreen()
+        self.dash = tui.Dashboard(self.scr, self.project)
+        self.dash.chat_pane = None
+        self.dash.styles = dict.fromkeys(
+            ("normal", "header", "running", "ok", "warn", "dim", "add", "del", "hunk", "title"), 0)
+        self.dash.draw = lambda: None
+        self.dash.data = data(sessions=[
+            session_(id="sess-current", current=True, tasks=["004-health"]),
+            session_(id="sess-gone", title="a gone chat", available=False),
+            session_(id="sess-old", title="fix login", tasks=["003-old"], last_active=recently(hours=2)),
+            session_(id="sess-older", title="earlier work", last_active=recently(days=2))])
+
+    def test_restore_builds_a_picker_of_reopenable_sessions(self):
+        self.assertTrue(self.dash.act(("restore",)))
+        picker = self.dash.ui.picker
+        self.assertEqual(picker.title, "restore which session?")
+        self.assertEqual([i[1] for i in picker.items], ["sess-old", "sess-older"])
+        self.assertEqual([i[0] for i in picker.items], ["fix login", "earlier work"])
+        self.assertEqual(picker.action, ("open_session",))
+        self.assertEqual(picker.items[0][2], "2 h ago · 1 task")
+
+    def test_restore_without_an_earlier_session_says_so(self):
+        self.dash.data["sessions"] = [session_(id="sess-current", current=True)]
+        self.dash.act(("restore",))
+        self.assertIsNone(self.dash.ui.picker)
+        self.assertEqual(self.dash.ui.message, "no earlier session to restore")
+
+    def test_open_session_restarts_the_chat_pane_on_it(self):
+        self.dash.chat_pane = "%1"
+        with mock.patch.object(session, "respawn_chat") as respawn, \
+                mock.patch.object(self.dash, "load"):
+            self.assertTrue(self.dash.act(("open_session", "sess-old")))
+        respawn.assert_called_once_with(self.project, "%1", "sess-old", "tmux kill-window")
+        self.assertEqual(self.dash.ui.message, "opened session sess-old")
+
+    def test_open_session_needs_the_tmux_layout(self):
+        with mock.patch.object(session, "respawn_chat") as respawn:
+            self.assertTrue(self.dash.act(("open_session", "sess-old")))
+        respawn.assert_not_called()
+        self.assertIn("tmux layout", self.dash.ui.message)
 
 
 class TailTest(unittest.TestCase):
