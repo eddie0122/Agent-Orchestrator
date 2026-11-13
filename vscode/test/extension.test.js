@@ -204,6 +204,29 @@ test("activate() against a real project", async (t) => {
   assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /deepseek model: opencode-go\/kimi-k3/.test(m)),
     JSON.stringify(rec.messages));
 
+  // Select Thinking: the planner's level, saved to the user config.
+  rec.quickPicks = [
+    (items) => items.find((i) => i.target === "planner"),
+    (items) => items.find((i) => i.level === "xhigh"),
+    (items) => items.find((i) => i.project === false),
+  ];
+  await rec.commands.get("aaagent.selectThinking")();
+  assert.match(fs.readFileSync(userConfig, "utf8"), /thinking = "xhigh"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /planner thinking: xhigh/.test(m)),
+    JSON.stringify(rec.messages));
+
+  // Change Thinking: a worker from its context menu, saved to this project only.
+  rec.quickPicks = [
+    (items) => items.find((i) => i.level === "max"),
+    (items) => items.find((i) => i.project === true),
+  ];
+  await rec.commands.get("aaagent.changeWorkerThinking")(workersTree.getChildren()[0]);
+  assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
+    /thinking = "max"/);
+  await api.refresh();
+  assert.strictEqual(api.store.data.workers.find((w) => w.name === "deepseek").thinking, "max");
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "planner: sonnet · xhigh");
+
   // Attach Image: one panel, reused on a second call, with a nonce CSP and the file button.
   const panelsBefore = rec.panels.length;
   await rec.commands.get("aaagent.attachImage")();

@@ -139,6 +139,32 @@ function modelChoices(info, target) {
   return [{ label: "$(edit) Type a model name…", typed: true }, ...entries];
 }
 
+/** `aaagent thinking --json` → the quick-pick list of things whose thinking level can be changed. */
+function thinkingTargets(info) {
+  const planner = (info && info.planner) || {};
+  const workers = (info && info.workers) || {};
+  const out = [{ label: "Planner (Claude)", description: `${planner.thinking || "default"} · ${planner.model}`,
+    target: "planner" }];
+  for (const [name, w] of Object.entries(workers)) {
+    out.push({ label: `Worker: ${name}`, description: `${w.thinking || "default"} · ${w.model}`, target: name });
+  }
+  return out;
+}
+
+/** Quick-pick entries for a target's thinking levels: Default, then the choices. */
+function thinkingChoices(info, target) {
+  const planner = (info && info.planner) || {};
+  const workers = (info && info.workers) || {};
+  const entry = target === "planner" ? planner : (workers[target] || {});
+  const current = entry.thinking || "";
+  const entries = (entry.choices || [])
+    .filter((level) => level)
+    .map((level) => (level === current
+      ? { label: level, description: "current", level }
+      : { label: level, level }));
+  return [{ label: "Default", description: "the model's own setting", level: "default" }, ...entries];
+}
+
 function workerItem(w) {
   let description;
   let icon;
@@ -152,13 +178,17 @@ function workerItem(w) {
     description = "stopped";
     icon = { id: "circle-outline" };
   }
-  if (description !== "stopped" && w.model) description += ` · ${shortModel(w.model)}`;
+  if (description !== "stopped" && w.model) {
+    description += ` · ${shortModel(w.model)}`;
+    if (w.thinking) description += ` · ${w.thinking}`;
+  }
   if (w.queued) description += ` · ${w.queued} queued`;
+  const thinking = w.thinking ? `thinking: ${w.thinking}\n` : "";
   return {
     id: `worker:${w.name}`,
     label: w.name,
     description,
-    tooltip: `${w.name}: ${w.model}\n${w.pid ? `pid ${w.pid}` : "not running"}`,
+    tooltip: `${w.name}: ${w.model}\n${thinking}${w.pid ? `pid ${w.pid}` : "not running"}`,
     icon,
     contextValue: `worker.${w.state}`,
   };
@@ -283,5 +313,6 @@ function isImagePath(p) {
 module.exports = {
   visibleTasks, taskSummary, taskIcon, taskItem, fileItem, workerItem, statusBar, transitions,
   isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
+  thinkingTargets, thinkingChoices,
   IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
 };

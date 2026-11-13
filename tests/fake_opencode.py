@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Stand-in for `opencode` used by the tests.
 
-`models` prints a short list of model ids for `aaagent model`; `run` behaves like a job.
+`models` prints a short list of model ids for `aaagent model`; `api GET /api/model` prints
+their thinking variants for `aaagent thinking`; `run` behaves like a job (`-m model#variant`
+is accepted and the variant is ignored for the job's behaviour).
 
 Env:
   FAKE_OC_FAIL      comma-separated models that fail (error event, exit 1)
@@ -31,9 +33,20 @@ def main():
                      "opencode-go/kimi-k3"):
             print(name)
         return 0
+    if args[:3] == ["api", "GET", "/api/model"]:
+        print(json.dumps({"data": [
+            {"id": "deepseek-v4.1-flash", "providerID": "opencode-go",
+             "variants": [{"id": "low"}, {"id": "high"}, {"id": "max"}]},
+            {"id": "glm-5.3-flash", "providerID": "opencode-go",
+             "variants": [{"id": "low"}, {"id": "high"}, {"id": "max"}]},
+            {"id": "kimi-k3", "providerID": "opencode-go",
+             "variants": [{"id": "low"}, {"id": "high"}, {"id": "max"}]},
+        ]}))
+        return 0
     if not args or args[0] != "run":
         return 0
-    model = args[args.index("-m") + 1]
+    model_arg = args[args.index("-m") + 1]
+    model = model_arg.split("#", 1)[0]  # `-m provider/model#variant`
     agent = args[args.index("--agent") + 1]
     session = args[args.index("--session") + 1] if "--session" in args else f"ses_fake{int(time.time() * 1000)}"
     prompt = args[-1]

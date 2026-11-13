@@ -99,7 +99,10 @@ def claude_command(project: Path, cfg: Config, claude: str, first_prompt: str | 
            "-n", f"aaagent {project.name}"]
     if resume_id:
         cmd += ["--resume", resume_id]
-    cmd += [str(a) for a in cfg.orchestrator.get("extra_args", [])]
+    extra_args = [str(a) for a in cfg.orchestrator.get("extra_args", [])]
+    if cfg.planner_thinking and "--effort" not in extra_args:
+        cmd += ["--effort", cfg.planner_thinking]
+    cmd += extra_args
     if first_prompt:
         cmd.append(first_prompt)
     return cmd

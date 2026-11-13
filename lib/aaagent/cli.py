@@ -15,7 +15,7 @@ from .config import ROOT, USER_CONFIG, Config
 from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "new", "dispatch", "wait", "status", "diff", "logs", "stop",
-            "abandon", "attach", "doctor", "version", "help", "model"}
+            "abandon", "attach", "doctor", "version", "help", "model", "thinking"}
 # Options of `start` that also work without the word: `aaagent -c`.
 START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model"}
 
@@ -85,6 +85,57 @@ def _set_or_pick(args, project: Path, cfg, target: str) -> int:
     return 0
 
 
+def cmd_thinking(args) -> int:
+    project = project_root()
+    cfg = Config.load(project)
+    if args.json:
+        print(json.dumps({
+            "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking,
+                        "choices": models.thinking_choices(cfg, models.PLANNER)},
+            "workers": {name: {"model": cfg.worker_model(name),
+                               "thinking": cfg.worker_thinking(name),
+                               "choices": models.thinking_choices(cfg, name)}
+                        for name in cfg.worker_names()},
+        }, indent=1))
+        return 0
+    if args.list:
+        if not args.target:
+            raise FlowError("--list needs a target: use `aaagent thinking --list planner|worker`")
+        for level in models.thinking_choices(cfg, models.resolve_target(cfg, args.target)):
+            print(level)
+        return 0
+    if args.target:
+        return _set_or_pick_thinking(args, project, cfg, models.resolve_target(cfg, args.target))
+    rows = [("target", "model", "thinking"),
+            (models.PLANNER, cfg.planner_model, cfg.planner_thinking or "default")]
+    rows += [(name, cfg.worker_model(name), cfg.worker_thinking(name) or "default")
+             for name in cfg.worker_names()]
+    widths = [max(len(row[i]) for row in rows) for i in range(3)]
+    for row in rows:
+        print(f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]}")
+    if sys.stdin.isatty():
+        answer = input(f"change which? (planner/{'/'.join(cfg.worker_names())}, enter = none): ")
+        if answer.strip():
+            target = models.resolve_target(cfg, answer.strip())
+            return _set_or_pick_thinking(args, project, cfg, target)
+    return 0
+
+
+def _set_or_pick_thinking(args, project: Path, cfg, target: str) -> int:
+    """With a level, set it; otherwise pick one from a list on a terminal."""
+    if args.level:
+        print("\n".join(models.set_thinking(project, args.project, target, args.level)))
+        return 0
+    if not sys.stdin.isatty():
+        raise FlowError("no thinking level given; use `aaagent thinking <target> <level>`")
+    chosen = models.pick_thinking_interactive(cfg, target)
+    if chosen is None:
+        print("unchanged")
+        return 0
+    print("\n".join(models.set_thinking(project, args.project, target, chosen)))
+    return 0
+
+
 def cmd_ui(args) -> int:
     project = project_root()
     session.init_project(project, Config.load(project))
@@ -137,7 +188,7 @@ def cmd_status(args) -> int:
         job = worker.running_job(project, name)
         queued = len(worker.pending_jobs(project, name)) if worker.queue_dir(project, name).is_dir() else 0
         doing = f"running {job['phase']} {job['task']} r{job['round']}" if job else ("idle" if pid else "-")
-        print(f"  {name:<9} {cfg.worker_model(name):<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
+        print(f"  {name:<9} {cfg.worker_label(name):<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
               f"{doing}{f', {queued} queued' if queued else ''}")
     all_tasks = tasks.all_tasks(project)
     if not args.all:
@@ -340,6 +391,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--project", action="store_true",
                    help="write <project>/.aaagent/config.toml instead of the user config")
     s.set_defaults(func=cmd_model)
+
+    s = sub.add_parser("thinking", help="show or change the planner and worker thinking levels")
+    s.add_argument("target", nargs="?", help="planner or a worker name")
+    s.add_argument("level", nargs="?", help="thinking level, or default to clear it")
+    s.add_argument("--list", action="store_true", help="print the choices for <target>")
+    s.add_argument("--json", action="store_true", help="machine-readable thinking levels and choices")
+    s.add_argument("--project", action="store_true",
+                   help="write <project>/.aaagent/config.toml instead of the user config")
+    s.set_defaults(func=cmd_thinking)
 
     s = sub.add_parser("version")
     s.set_defaults(func=lambda a: print(__version__) or 0)

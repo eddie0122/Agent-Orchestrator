@@ -17,6 +17,10 @@ AGENT_DIR_NAME = ".aaagent"
 PLANNER_CHOICES = ["opus", "sonnet", "haiku", "fable",
                    "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"]
 
+# Thinking levels: Claude Code's `--effort` values, and the fallback opencode variants.
+PLANNER_THINKING = ["low", "medium", "high", "xhigh", "max"]
+WORKER_THINKING_FALLBACK = ["low", "high", "max"]
+
 
 def user_config_path() -> Path:
     """The user-wide config file (looked up at call time so tests can set the env var)."""
@@ -65,6 +69,18 @@ class Config:
         if name not in workers or not isinstance(workers[name], dict):
             raise KeyError(f"unknown worker '{name}' (configured: {', '.join(self.worker_names())})")
         return workers[name]["model"]
+
+    def worker_thinking(self, name: str) -> str:
+        workers = self.data.get("workers", {})
+        if name not in workers or not isinstance(workers[name], dict):
+            raise KeyError(f"unknown worker '{name}' (configured: {', '.join(self.worker_names())})")
+        return str(workers[name].get("thinking") or "")
+
+    def worker_label(self, name: str) -> str:
+        """The worker's model, with its thinking level when one is set."""
+        model = self.worker_model(name)
+        level = self.worker_thinking(name)
+        return f"{model}, thinking {level}" if level else model
 
     @property
     def opencode_bin(self) -> str:
@@ -116,6 +132,10 @@ class Config:
     @property
     def planner_model(self) -> str:
         return str(self.orchestrator.get("model") or "opus")
+
+    @property
+    def planner_thinking(self) -> str:
+        return str(self.orchestrator.get("thinking") or "")
 
     @property
     def track_agent_dir(self) -> bool:

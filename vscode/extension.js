@@ -110,8 +110,9 @@ function activate(context) {
   function render() {
     workers.refresh();
     tasks.refresh();
-    workersView.description = store.data && store.data.planner && store.data.planner.model
-      ? `planner: ${store.data.planner.model}`
+    const planner = store.data && store.data.planner;
+    workersView.description = planner && planner.model
+      ? `planner: ${planner.model}${planner.thinking ? ` · ${planner.thinking}` : ""}`
       : undefined;
     const sb = model.statusBar(store.data);
     statusItem.text = sb.text;
@@ -289,6 +290,43 @@ function activate(context) {
     if (answer === "Apply to Current Chat") await terminals.send(`/model ${chosen}`, { submit: true });
   }
 
+  /**
+   * Pick a thinking level for the planner or a worker and save it user-wide or for this
+   * project. `node` is a worker tree item, which skips the target step.
+   */
+  async function selectThinking(node) {
+    const p = project();
+    if (!p) return;
+    let info;
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: "aaagent: loading thinking levels…" },
+      async () => { info = JSON.parse(await cli.exec(p, ["thinking", "--json"], { timeout: 70000 })); });
+    let target = node && node.name;
+    if (!target) {
+      const pick = await vscode.window.showQuickPick(model.thinkingTargets(info),
+        { placeHolder: "Change the thinking level of what?" });
+      if (!pick) return;
+      target = pick.target;
+    }
+    const entry = target === "planner" ? (info.planner || {}) : ((info.workers || {})[target] || {});
+    const current = entry.thinking || "default";
+    const choice = await vscode.window.showQuickPick(model.thinkingChoices(info, target), {
+      placeHolder: `Thinking level for ${target} (current: ${current})`,
+      matchOnDescription: true,
+    });
+    if (!choice) return;
+    const scope = await vscode.window.showQuickPick([
+      { label: "All projects", description: "~/.config/aaagent/config.toml", project: false },
+      { label: "This project only", description: ".aaagent/config.toml", project: true },
+    ], { placeHolder: "Save where?" });
+    if (!scope) return;
+    const out = await cli.exec(p, ["thinking", target, choice.level, ...(scope.project ? ["--project"] : [])]);
+    const text = model.short(out, 300);
+    const notable = out.split("\n").some((line) => /^(warning|note):/.test(line.trim()));
+    if (notable) await vscode.window.showWarningMessage(text);
+    else await vscode.window.showInformationMessage(text);
+  }
+
   function command(id, fn) {
     sub(vscode.commands.registerCommand(id, async (...args) => {
       try {
@@ -331,6 +369,13 @@ function activate(context) {
   command("aaagent.changeWorkerModel", async (node) => {
     const w = workerOf(node) || await pickWorker("Change the model of which worker?");
     if (w) await selectModel(w);
+  });
+
+  command("aaagent.selectThinking", (node) => selectThinking(node));
+
+  command("aaagent.changeWorkerThinking", async (node) => {
+    const w = workerOf(node) || await pickWorker("Change the thinking level of which worker?");
+    if (w) await selectThinking(w);
   });
 
   command("aaagent.resumeChat", async () => {

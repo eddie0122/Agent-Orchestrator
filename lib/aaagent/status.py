@@ -26,7 +26,8 @@ def status_data(project: Path, cfg: Config) -> dict:
         job = worker.running_job(project, name)
         queued = len(worker.pending_jobs(project, name)) if worker.queue_dir(project, name).is_dir() else 0
         workers.append({
-            "name": name, "model": cfg.worker_model(name), "pid": pid,
+            "name": name, "model": cfg.worker_model(name), "thinking": cfg.worker_thinking(name),
+            "pid": pid,
             "state": "running" if job else ("idle" if pid else "stopped"),
             "job": {k: job[k] for k in ("task", "phase", "round", "created")} if job else None,
             "queued": queued, "log": str(worker.log_file(project, name)),
@@ -70,7 +71,8 @@ def status_data(project: Path, cfg: Config) -> dict:
             "path": str(task.path), "files": files,
         })
     return {"version": __version__, "project": str(project),
-            "planner": {"model": cfg.planner_model}, "workers": workers,
+            "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking},
+            "workers": workers,
             "tasks": out_tasks, "active_task": tasks.active_task(project)}
 
 

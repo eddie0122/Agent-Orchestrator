@@ -1,12 +1,13 @@
-"""Choosing the planner and worker models (`aaagent model`)."""
+"""Choosing the planner and worker models (`aaagent model`) and thinking levels (`aaagent thinking`)."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
-from .config import (PLANNER_CHOICES, Config, project_config_path, set_toml_value,
-                     user_config_path)
+from .config import (PLANNER_CHOICES, PLANNER_THINKING, WORKER_THINKING_FALLBACK, Config,
+                     project_config_path, set_toml_value, user_config_path)
 from .tasks import FlowError
 
 PLANNER = "planner"
@@ -92,6 +93,102 @@ def pick_interactive(cfg: Config, target: str, input_fn=input, print_fn=print) -
             if 1 <= index <= len(available):
                 return available[index - 1]
             print_fn(f"error: pick a number from 1 to {len(available)}")
+            continue
+        return answer
+    return None
+
+
+# -- thinking levels -----------------------------------------------------------
+
+def thinking_current(cfg: Config, target: str) -> str:
+    """The thinking level in use for `target`; "" means the tool's own default."""
+    return cfg.planner_thinking if target == PLANNER else cfg.worker_thinking(target)
+
+
+def worker_thinking_choices(cfg: Config, model: str) -> list[str]:
+    """The variant ids `model` offers, from `opencode api GET /api/model`.
+
+    Any failure (opencode missing, timeout, bad JSON, no matching model) falls back to
+    WORKER_THINKING_FALLBACK.
+    """
+    fallback = list(WORKER_THINKING_FALLBACK)
+    try:
+        proc = subprocess.run([cfg.opencode_bin, "api", "GET", "/api/model"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return fallback
+    if proc.returncode != 0:
+        return fallback
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return fallback
+    for entry in data.get("data") or []:
+        if not isinstance(entry, dict):
+            continue
+        if f"{entry.get('providerID')}/{entry.get('id')}" == model:
+            variants = [v.get("id") for v in entry.get("variants") or []
+                        if isinstance(v, dict) and v.get("id")]
+            return variants or fallback
+    return fallback
+
+
+def thinking_choices(cfg: Config, target: str) -> list[str]:
+    """Suggested thinking levels for `target`."""
+    if target == PLANNER:
+        return list(PLANNER_THINKING)
+    return worker_thinking_choices(cfg, cfg.worker_model(target))
+
+
+def set_thinking(project: Path, cfg_scope_project: bool, target: str, level: str) -> list[str]:
+    """Save `level` for `target` ("" or `default` = unset) and return the lines to show."""
+    level = level.strip()
+    if level == "default":
+        level = ""
+    path = project_config_path(project) if cfg_scope_project else user_config_path()
+    if target == PLANNER:
+        section = "orchestrator"
+    else:
+        section = f"workers.{target}"
+    try:
+        set_toml_value(path, section, "thinking", level)
+    except ValueError as exc:
+        raise FlowError(str(exc)) from exc
+    notes = [f"{target} thinking: {level or 'default'}  (saved to {path})"]
+    cfg = Config.load(project)
+    if thinking_current(cfg, target) != level:
+        notes.append(f"note: {project_config_path(project)} overrides this; "
+                     "use --project to change it there")
+    if target == PLANNER:
+        notes.append("applies when the next chat starts")
+    else:
+        notes.append("applies from the next dispatch")
+    if level:
+        available = thinking_choices(cfg, target)
+        if level not in available:
+            notes.append(f"warning: {level} is not one of: {', '.join(available)}")
+    return notes
+
+
+def pick_thinking_interactive(cfg: Config, target: str, input_fn=input,
+                              print_fn=print) -> str | None:
+    """Ask for a thinking level; None means keep the current one, "default" clears it."""
+    available = thinking_choices(cfg, target)
+    now = thinking_current(cfg, target)
+    print_fn("  0. default" + ("  (current)" if not now else ""))
+    for number, name in enumerate(available, 1):
+        print_fn(f"  {number}. {name}" + ("  (current)" if name == now else ""))
+    for _ in range(3):
+        answer = input_fn("number or level (enter = keep current): ").strip()
+        if not answer:
+            return None
+        if answer.isdigit():
+            index = int(answer)
+            if index == 0:
+                return "default"
+            if 1 <= index <= len(available):
+                return available[index - 1]
+            print_fn(f"error: pick a number from 0 to {len(available)}")
             continue
         return answer
     return None

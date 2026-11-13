@@ -51,6 +51,15 @@ test("workerItem shows the job a worker is running and its model", () => {
     "stopped");
 });
 
+test("workerItem shows the thinking level when one is set", () => {
+  const w = model.workerItem({ name: "deepseek", model: "opencode-go/deepseek-v4.1-flash", thinking: "high",
+    pid: 9, state: "idle", queued: 0 });
+  assert.strictEqual(w.description, "waiting for a plan · deepseek-v4.1-flash · high");
+  assert.strictEqual(w.tooltip, "deepseek: opencode-go/deepseek-v4.1-flash\nthinking: high\npid 9");
+  assert.strictEqual(model.workerItem({ name: "glm", model: "opencode-go/glm-5.3-flash", thinking: "",
+    state: "stopped", queued: 0 }).tooltip, "glm: opencode-go/glm-5.3-flash\nnot running");
+});
+
 const modelInfo = () => ({
   planner: { model: "opus", choices: ["sonnet", "opus", "haiku"] },
   workers: {
@@ -83,6 +92,40 @@ test("modelChoices offers typing first, then the current model first and marked"
     { label: "opencode-go/deepseek-v4.1-flash", model: "opencode-go/deepseek-v4.1-flash", description: "current" },
     { label: "opencode-go/kimi-k3", model: "opencode-go/kimi-k3" },
     { label: "opencode-go/glm-5.3-flash", model: "opencode-go/glm-5.3-flash" },
+  ]);
+});
+
+const thinkingInfo = () => ({
+  planner: { model: "opus", thinking: "xhigh", choices: ["low", "medium", "high", "xhigh", "max"] },
+  workers: {
+    deepseek: { model: "opencode-go/deepseek-v4.1-flash", thinking: "high", choices: ["low", "high", "max"] },
+    glm: { model: "opencode-go/glm-5.3-flash", thinking: "", choices: ["low", "high", "max"] },
+  },
+});
+
+test("thinkingTargets lists the planner first, then the workers", () => {
+  assert.deepStrictEqual(model.thinkingTargets(thinkingInfo()), [
+    { label: "Planner (Claude)", description: "xhigh · opus", target: "planner" },
+    { label: "Worker: deepseek", description: "high · opencode-go/deepseek-v4.1-flash", target: "deepseek" },
+    { label: "Worker: glm", description: "default · opencode-go/glm-5.3-flash", target: "glm" },
+  ]);
+});
+
+test("thinkingChoices offers Default and the levels, marking the current one", () => {
+  const info = thinkingInfo();
+  assert.deepStrictEqual(model.thinkingChoices(info, "planner"), [
+    { label: "Default", description: "the model's own setting", level: "default" },
+    { label: "low", level: "low" },
+    { label: "medium", level: "medium" },
+    { label: "high", level: "high" },
+    { label: "xhigh", description: "current", level: "xhigh" },
+    { label: "max", level: "max" },
+  ]);
+  assert.deepStrictEqual(model.thinkingChoices(info, "glm"), [
+    { label: "Default", description: "the model's own setting", level: "default" },
+    { label: "low", level: "low" },
+    { label: "high", level: "high" },
+    { label: "max", level: "max" },
   ]);
 });
 
