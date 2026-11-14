@@ -31,6 +31,17 @@ model = "sonnet"      # thinking = "high" sets claude --effort
 
 Claude workers use the same Claude subscription and usage limit as the chat. `workers.claude_bin` points them at another binary; empty means the chat's.
 
+### Who reviews
+
+By default the chat (the planner) reviews every round: you run `aaagent dispatch` for the implement/fix round, read the report, write `review-N.md`, and dispatch again. Set a worker as the reviewer and one dispatch does the whole loop by itself:
+
+```toml
+[flow]
+reviewer = "glm"      # a worker name, or "orchestrator" (the default) for the chat
+```
+
+With a worker reviewer, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails twice (or writes no valid verdict), the round comes back to the chat to review itself.
+
 ## Install
 
 ```bash
@@ -43,7 +54,7 @@ The installer is safe to re-run. It:
 - checks python 3.11+ and git
 - installs opencode and the Claude Code CLI if they are missing, and asks you to log in if needed
 - installs tmux with apt, which asks for your sudo password
-- registers the `aaagent-worker` and `aaagent-committer` agents in `~/.config/opencode/agents/`
+- registers the `aaagent-worker`, `aaagent-committer` and `aaagent-reviewer` agents in `~/.config/opencode/agents/`
 - links `aaagent` into `~/.local/bin`
 - builds and installs the VSCode extension (skip it with `--no-vscode`)
 - runs `aaagent doctor`

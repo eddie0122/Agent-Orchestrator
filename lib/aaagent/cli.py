@@ -312,7 +312,7 @@ def cmd_doctor(args) -> int:
             good &= _check(model in model_list, f"worker {name}: {model}", "check `opencode models` and your config")
     if oc:
         agents_dir = Path.home() / ".config" / "opencode" / "agents"
-        for agent in (cfg.implement_agent, cfg.commit_agent):
+        for agent in (cfg.implement_agent, cfg.commit_agent, cfg.review_agent):
             good &= _check((agents_dir / f"{agent}.md").is_file(), f"opencode agent {agent}", "re-run install.sh")
     claude = session.find_claude(cfg)
     good &= _check(bool(claude), f"claude CLI ({claude or 'not found'})", "re-run install.sh")
@@ -368,7 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("title", nargs="+")
     s.set_defaults(func=cmd_new)
 
-    s = sub.add_parser("dispatch", help="send a task's next phase (implement/fix/commit) to a worker and wait")
+    s = sub.add_parser("dispatch", help="send a task's next phase (implement/fix/review/commit) to a worker and wait")
     s.add_argument("task")
     s.add_argument("--worker", help="use this worker")
     s.add_argument("--force", action="store_true", help="allow a round beyond max_review_rounds")

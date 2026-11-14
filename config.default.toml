@@ -20,6 +20,7 @@ claude_bin = ""
 # opencode agents installed by install.sh
 implement_agent = "aaagent-worker"
 commit_agent = "aaagent-committer"
+review_agent = "aaagent-reviewer"
 
 [workers.deepseek]
 model = "opencode-go/deepseek-v4.1-flash"
@@ -49,6 +50,9 @@ max_review_rounds = 3
 fallback_after_failed_reviews = 2
 # Kill a worker job that runs longer than this.
 job_timeout_minutes = 30
+# Who reviews each round: "orchestrator" (the chat) or a worker name such as "glm".
+# With a worker, one dispatch runs implement → review → fix … until approval.
+reviewer = "orchestrator"
 
 [git]
 # false = .aaagent/ is listed in .git/info/exclude and never committed.

@@ -93,8 +93,9 @@ def _hook(name: str) -> str:
 
 def claude_settings(phase: str) -> dict:
     """The `--settings` value for a worker job."""
+    role = " reviewer" if phase == "review" else ""
     guard = {"matcher": "Read|Edit|Write|MultiEdit|NotebookEdit",
-             "hooks": [{"type": "command", "command": _hook("guard_worker.py")}]}
+             "hooks": [{"type": "command", "command": _hook("guard_worker.py") + role}]}
     if phase == "commit":
         permissions = {
             "allow": ["Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)",

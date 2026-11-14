@@ -17,7 +17,7 @@ from . import __version__, sessions, tasks, worker
 from .config import Config
 from .tasks import FINAL_STATUSES, FlowError
 
-PHASE_VERB = {"implement": "implementing", "fix": "fixing", "commit": "committing"}
+PHASE_VERB = {"implement": "implementing", "fix": "fixing", "review": "reviewing", "commit": "committing"}
 
 
 def status_data(project: Path, cfg: Config) -> dict:

@@ -35,6 +35,7 @@ def main() -> int:
     if not path.is_absolute():
         path = Path(event.get("cwd") or project) / path
     path = path.resolve()
+    reviewer = sys.argv[1:2] == ["reviewer"]
 
     name = path.name
     if (name == ".env" or name.startswith(".env.")) and name != ".env.example":
@@ -43,8 +44,14 @@ def main() -> int:
 
     if event.get("tool_name") in EDIT_TOOLS:
         agent_dir = project / ".aaagent"
-        if agent_dir in path.parents:
-            rel = path.relative_to(agent_dir)
+        rel = path.relative_to(agent_dir) if agent_dir in path.parents else None
+        if reviewer:
+            review_file = (rel is not None and len(rel.parts) == 3 and rel.parts[0] == "tasks"
+                           and bool(REVIEW.fullmatch(rel.parts[2])))
+            if not review_file:
+                return block("aaagent: a reviewer does not change files; write only your review file.")
+            return 0
+        if rel is not None:
             planner_file = (rel == Path("config.toml")
                             or (len(rel.parts) == 3 and rel.parts[0] == "tasks"
                                 and (rel.parts[2] in ("plan.md", "state.json")

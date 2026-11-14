@@ -33,6 +33,17 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
                 if p.exists():
                     history.append(task.rel(p))
         values["history"] = ", ".join(history) or "(none)"
+    if step.phase == "review":
+        values["review"] = task.rel(task.review(step.round))
+        values["base"] = state.get("base_commit") or "HEAD"
+        history = []
+        for n in range(1, step.round):
+            for p in (task.report(n), task.review(n)):
+                if p.exists():
+                    history.append(task.rel(p))
+        values["history"] = ", ".join(history) or "(none)"
+        pre = state.get("preexisting_dirty") or []
+        values["preexisting"] = ", ".join(pre) if pre else "(none)"
     if step.phase == "commit":
         values["review"] = task.rel(task.review(task.latest_review()))
         values["report"] = task.rel(task.report(step.round))
@@ -41,7 +52,7 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
         trailer = cfg.data.get("git", {}).get("commit_trailer", "")
         values["trailer"] = f"\n   - End the body with this trailer line: {trailer}" if trailer else ""
     text = _fill((PROMPTS / f"worker-{step.phase}.md").read_text(), values)
-    if retry and step.phase != "commit":
+    if retry and step.phase in ("implement", "fix"):
         text += ("\nNOTE: a previous attempt at this round by another worker failed part-way. "
                  "Its partial changes may be in the working tree; check `git status` and "
                  "`git diff` and build on them rather than starting over.\n")
@@ -51,10 +62,16 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
 def _enqueue(project: Path, task: Task, step: Step, cfg: Config, retry_of: str | None = None) -> dict:
     state = task.load()
     backend = cfg.worker_backend(step.worker)
-    session = None if step.phase == "commit" else state.get("sessions", {}).get(step.worker)
+    session_key = f"{step.worker}:review" if step.phase == "review" else step.worker
+    session = None if step.phase == "commit" else state.get("sessions", {}).get(session_key)
     if not backends.session_fits(backend, session):
         session = None
-    agent = cfg.commit_agent if step.phase == "commit" else cfg.implement_agent
+    if step.phase == "commit":
+        agent = cfg.commit_agent
+    elif step.phase == "review":
+        agent = cfg.review_agent
+    else:
+        agent = cfg.implement_agent
     job_id = worker.new_job_id()
     job = worker.enqueue(project, {
         "id": job_id, "task": task.id, "phase": step.phase, "round": step.round,
@@ -65,10 +82,12 @@ def _enqueue(project: Path, task: Task, step: Step, cfg: Config, retry_of: str |
         "pre_head": gitutil.head(project),
         "log": str(task.logs / f"r{step.round}-{step.phase}-{step.worker}-{job_id}.jsonl"),
     })
-    changes = {"status": "running", "worker": step.worker, "current_job": {
+    changes = {"status": "running", "current_job": {
         k: job[k] for k in ("id", "phase", "round", "worker", "retry_of", "pre_head", "log")}}
-    if step.phase == "implement" or step.switched:
-        changes["worker_since_round"] = step.round
+    if step.phase != "review":
+        changes["worker"] = step.worker
+        if step.phase == "implement" or step.switched:
+            changes["worker_since_round"] = step.round
     task.update(**changes)
     task.log_event(f"queued {step.phase} round {step.round}", worker=step.worker, job=job["id"],
                    reason=step.reason or None)
@@ -81,11 +100,32 @@ def dispatch(project: Path, ref: str, worker_override: str | None = None, force:
     task = tasks.find(project, ref)
     step = tasks.next_step(task, cfg, worker_override=worker_override, force=force)
     tasks.claim_active(project, task)
-    note = f" ({step.reason}; switching worker)" if step.reason else ""
-    print(f"{task.id}: {step.phase} round {step.round} → {step.worker} "
-          f"({cfg.worker_label(step.worker)}){note}", flush=True)
-    _enqueue(project, task, step, cfg)
-    return wait(project, task.id)
+    while True:
+        note = f" ({step.reason}; switching worker)" if step.reason else ""
+        print(f"{task.id}: {step.phase} round {step.round} → {step.worker} "
+              f"({cfg.worker_label(step.worker)}){note}", flush=True)
+        _enqueue(project, task, step, cfg)
+        code = wait(project, task.id)
+        step = _auto_step(task, cfg) if code == 0 else None
+        if step is None:
+            return code
+
+
+def _auto_step(task: Task, cfg: Config) -> Step | None:
+    """With a reviewing worker: the review after a report, and the fix after a rejected review."""
+    if not cfg.reviewer_worker:
+        return None
+    state = task.load()
+    if state.get("status") not in ("awaiting_review", "changes_requested"):
+        return None
+    if state.get("review_failed_round") == task.latest_report():
+        return None
+    try:
+        step = tasks.next_step(task, cfg)
+    except FlowError as exc:
+        print(f"Task {task.id} stops here: {exc}")
+        return None
+    return step if step.phase in ("review", "fix") else None
 
 
 def _result_or_none(project: Path, job_id: str) -> dict | None:
@@ -141,7 +181,8 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
     state = task.load()
     phase, rnd, who = job["phase"], job["round"], job["worker"]
     if result.get("session") and phase != "commit":
-        state.setdefault("sessions", {})[who] = result["session"]
+        session_key = f"{who}:review" if phase == "review" else who
+        state.setdefault("sessions", {})[session_key] = result["session"]
     tok = state.setdefault("tokens", {}).setdefault(who, {"input": 0, "output": 0})
     for k in ("input", "output"):
         tok[k] += int((result.get("tokens") or {}).get(k, 0))
@@ -154,12 +195,17 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
     error = result.get("error") if result.get("status") != "ok" else None
     if not error and phase in ("implement", "fix") and not task.report(rnd).is_file():
         error = f"worker finished without writing {task.rel(task.report(rnd))}"
+    if not error and phase == "review" and task.verdict(rnd) not in ("approved", "changes_requested"):
+        error = (f"reviewer finished without writing {task.rel(task.review(rnd))} "
+                 "with a valid verdict")
     new_head = gitutil.head(project)
     if not error and phase == "commit" and new_head == job.get("pre_head"):
         error = "worker finished without creating a commit"
     mins = (result.get("finished", time.time()) - result.get("started", time.time())) / 60
 
     if error:
+        if phase == "review" and task.review(rnd).is_file():
+            task.review(rnd).replace(task.path / f"review-{rnd}.invalid.md")
         task.log_event(f"{phase} round {rnd} failed", worker=who, error=error)
         print(f"✗ {phase} round {rnd} by {who} failed after {mins:.1f} min: {error}")
         print(f"  log: {task.rel(Path(job['log']))}")
@@ -169,6 +215,14 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
             step = Step(phase, rnd, alt, switched=True, reason=f"{who} failed")
             task.update(current_job=None, status="retrying")
             return _enqueue(project, task, step, cfg, retry_of=job["id"])
+        if phase == "review":
+            task.update(current_job=None, status="awaiting_review", review_failed_round=rnd)
+            task.log_event(f"review round {rnd} handed to the orchestrator", worker=who)
+            print(f"The reviewer could not review round {rnd}. Review it yourself: read the report, "
+                  f"inspect `aaagent diff {task.id}`, write {task.rel(task.review(rnd))} with "
+                  f"`verdict: approved` or `verdict: changes_requested`, and run "
+                  f"`aaagent dispatch {task.id}`.")
+            return None
         task.update(current_job=None, status="failed")
         print(f"Task {task.id} is stopped. Read the log above, then fix the plan and "
               f"`aaagent dispatch {task.id}` again, or tell the user.")
@@ -186,6 +240,19 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         print(f"Task {task.id} is complete. Tell the user what was done.")
         return None
 
+    if phase == "review":
+        verdict = task.verdict(rnd)
+        task.update(current_job=None, status=verdict, review_failed_round=None)
+        task.log_event(f"review round {rnd}: {verdict}", worker=who)
+        print(f"✓ review round {rnd} by {who} in {mins:.1f} min: {verdict.replace('_', ' ')}")
+        print(f"  review: {task.rel(task.review(rnd))}")
+        if verdict == "approved":
+            print(f"Next: the reviewer approved round {rnd}. Read the review and the report, look "
+                  f"over `aaagent diff {task.id}`, then run `aaagent dispatch {task.id}` to commit. "
+                  f"To overrule the approval, overwrite the review file with "
+                  f"`verdict: changes_requested` and your required changes, then dispatch.")
+        return None
+
     report = task.report(rnd)
     report_status = tasks.frontmatter(report).get("status", "?")
     task.update(current_job=None, status="awaiting_review")
@@ -194,9 +261,13 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
     print(f"  report: {task.rel(report)}")
     print("  changes since task start:")
     print(gitutil.diff_stat(project, state.get("base_commit")))
-    print(f"Next: read the report, inspect `aaagent diff {task.id}`, re-run the validation, then write "
-          f"{task.rel(task.review(rnd))} with `verdict: approved` or `verdict: changes_requested`, "
-          f"and run `aaagent dispatch {task.id}`.")
+    if cfg.reviewer_worker:
+        print(f"Next: {cfg.reviewer_worker} reviews round {rnd} "
+              f"(`aaagent dispatch {task.id}` continues if this command was interrupted).")
+    else:
+        print(f"Next: read the report, inspect `aaagent diff {task.id}`, re-run the validation, then write "
+              f"{task.rel(task.review(rnd))} with `verdict: approved` or `verdict: changes_requested`, "
+              f"and run `aaagent dispatch {task.id}`.")
     return None
 
 

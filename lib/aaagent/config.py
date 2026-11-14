@@ -116,10 +116,26 @@ class Config:
     def commit_agent(self) -> str:
         return self.data["workers"].get("commit_agent", "aaagent-committer")
 
+    @property
+    def review_agent(self) -> str:
+        return self.data["workers"].get("review_agent", "aaagent-reviewer")
+
     # -- flow --------------------------------------------------------------
     @property
     def flow(self) -> dict:
         return self.data.get("flow", {})
+
+    @property
+    def reviewer(self) -> str:
+        """Who reviews each round: "orchestrator" (the chat) or a worker's name."""
+        value = str(self.flow.get("reviewer") or "").strip()
+        return "orchestrator" if value in ("", "orchestrator", "planner", "chat") else value
+
+    @property
+    def reviewer_worker(self) -> str | None:
+        """The worker that reviews, or None when the orchestrator does (or the name is unknown)."""
+        name = self.reviewer
+        return name if name != "orchestrator" and name in self.worker_names() else None
 
     @property
     def default_worker(self) -> str:

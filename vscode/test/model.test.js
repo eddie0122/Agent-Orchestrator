@@ -25,6 +25,8 @@ test("taskSummary describes each stage", () => {
   assert.strictEqual(model.taskSummary(task({ next: { phase: "implement" } })), "plan ready");
   assert.strictEqual(model.taskSummary(task({ status: "running", job: { phase: "implement", worker: "deepseek" } })),
     "implementing · deepseek");
+  assert.strictEqual(model.taskSummary(task({ status: "running", job: { phase: "review", worker: "glm" } })),
+    "reviewing · glm");
   assert.strictEqual(model.taskSummary(task({ status: "awaiting_review", round: 2 })), "in review (round 2)");
   assert.strictEqual(model.taskSummary(task({ status: "awaiting_review", round: 1, next: { phase: "commit" } })),
     "in review (round 1)");

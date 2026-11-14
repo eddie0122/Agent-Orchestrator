@@ -32,6 +32,10 @@ def orchestrator_prompt(cfg: Config, project: Path | None = None) -> str:
     text = (text.replace("{workers}", workers)
                 .replace("{default_worker}", cfg.default_worker)
                 .replace("{fallback_worker}", cfg.fallback_worker))
+    reviewer = cfg.reviewer_worker
+    if reviewer:
+        note = (ROOT / "prompts" / "orchestrator-worker-review.md").read_text()
+        text += note.replace("{reviewer}", reviewer).replace("{model}", cfg.worker_model(reviewer))
     pending = unfinished_tasks(project, cfg) if project else []
     if pending:
         text += ("\n## Unfinished work from an earlier chat\n"

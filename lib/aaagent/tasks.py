@@ -3,7 +3,8 @@
 Layout inside a project:
     .aaagent/tasks/NNN-slug/plan.md        written by the orchestrator
     .aaagent/tasks/NNN-slug/report-N.md    written by the worker (round N)
-    .aaagent/tasks/NNN-slug/review-N.md    written by the orchestrator (reviews report-N)
+    .aaagent/tasks/NNN-slug/review-N.md    written by the reviewer (the orchestrator,
+                                           or a worker when `flow.reviewer` names one)
     .aaagent/tasks/NNN-slug/state.json     bookkeeping
     .aaagent/tasks/NNN-slug/logs/          raw worker output
 """
@@ -200,8 +201,8 @@ def find(project: Path, ref: str) -> Task:
 
 @dataclass
 class Step:
-    phase: str          # implement | fix | commit
-    round: int          # report number this job produces (commit: last round)
+    phase: str          # implement | fix | review | commit
+    round: int          # report number this job produces (review: the round it reviews)
     worker: str
     switched: bool = False   # worker changed by the fallback rule
     reason: str = ""
@@ -232,6 +233,9 @@ def next_step(task: Task, cfg: Config, worker_override: str | None = None, force
         return Step("implement", 1, worker)
 
     if reviews < reports:
+        reviewer = cfg.reviewer_worker
+        if reviewer:
+            return Step("review", reports, reviewer)
         raise FlowError(
             f"report-{reports}.md has no review yet. Review the work and write "
             f"{task.rel(task.review(reports))} (verdict: approved or changes_requested).")

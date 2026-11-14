@@ -4,7 +4,7 @@
 
 const FINAL = new Set(["committed", "abandoned"]);
 
-const PHASE_VERB = { implement: "implementing", fix: "fixing", commit: "committing" };
+const PHASE_VERB = { implement: "implementing", fix: "fixing", review: "reviewing", commit: "committing" };
 
 function isFinal(task) {
   return FINAL.has(task.status);

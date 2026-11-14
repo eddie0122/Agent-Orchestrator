@@ -8,6 +8,8 @@ is accepted and the variant is ignored for the job's behaviour).
 Env:
   FAKE_OC_FAIL      comma-separated models that fail (error event, exit 1)
   FAKE_OC_NOREPORT  comma-separated models that exit 0 without writing the report
+  FAKE_OC_REVIEW    comma-separated verdicts for review jobs, by round (default "approved")
+  FAKE_OC_NOREVIEW  comma-separated models that exit 0 without writing the review
   FAKE_OC_ARGS_LOG  file to append each invocation's argv (JSON) to
 """
 
@@ -61,6 +63,21 @@ def main():
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
                         "commit", "-q", "-m", "feat: fake work"], check=True)
         emit({"type": "text", "sessionID": session, "part": {"type": "text", "text": "committed"}})
+        return 0
+
+    if agent == "aaagent-reviewer":
+        if model in os.environ.get("FAKE_OC_NOREVIEW", "").split(","):
+            return 0
+        review_file = re.search(r"Write your review to: (\S+)", prompt).group(1)
+        rnd = int(re.search(r"review-(\d+)\.md", review_file).group(1))
+        verdicts = os.environ.get("FAKE_OC_REVIEW", "").split(",")
+        verdict = (verdicts[rnd - 1].strip()
+                   if rnd - 1 < len(verdicts) and verdicts[rnd - 1].strip() else "approved")
+        with open(review_file, "w") as fh:
+            fh.write(f"---\nverdict: {verdict}\nround: {rnd}\n---\n"
+                     f"## Assessment\nby {model}\n## Required changes\n1. more\n")
+        emit({"type": "step_finish", "sessionID": session,
+              "part": {"type": "step-finish", "tokens": {"input": 100, "output": 10}}})
         return 0
 
     with open("work.txt", "a") as fh:
