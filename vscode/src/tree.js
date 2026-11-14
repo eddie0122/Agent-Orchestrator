@@ -1,5 +1,5 @@
 "use strict";
-// Tree views: Workers, Sessions and Tasks.
+// Tree views: Planner, Reviewer, Workers, Sessions and Tasks.
 
 const vscode = require("vscode");
 const model = require("./model");
@@ -16,6 +16,56 @@ function toTreeItem(spec, collapsible = vscode.TreeItemCollapsibleState.None) {
       : new vscode.ThemeIcon(spec.icon.id);
   }
   return item;
+}
+
+/** The Planner view: one node, the chat's model and thinking level. */
+class PlannerProvider {
+  constructor(store) {
+    this.store = store;
+    this._onDidChange = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChange.event;
+  }
+
+  refresh() {
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(node) {
+    const item = toTreeItem(model.plannerItem(node || {}));
+    item.command = { command: "aaagent.changePlannerModel", title: "Change Planner Model", arguments: [node] };
+    return item;
+  }
+
+  getChildren(node) {
+    if (node) return [];
+    return this.store.data ? [this.store.data.planner || {}] : [];
+  }
+}
+
+/** The Reviewer view: one node, the chat or the reviewer job. */
+class ReviewerProvider {
+  constructor(store) {
+    this.store = store;
+    this._onDidChange = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChange.event;
+  }
+
+  refresh() {
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(node) {
+    const item = toTreeItem(model.reviewerItem(node));
+    item.command = model.plannerReviews(node)
+      ? { command: "aaagent.selectReviewer", title: "Change Reviewer", arguments: [node] }
+      : { command: "aaagent.showReviewer", title: "Show Reviewer Output", arguments: [node] };
+    return item;
+  }
+
+  getChildren(node) {
+    if (node) return [];
+    return this.store.data ? [this.store.data] : [];
+  }
 }
 
 class WorkersProvider {
@@ -139,4 +189,4 @@ class SessionsProvider {
   }
 }
 
-module.exports = { WorkersProvider, TasksProvider, SessionsProvider };
+module.exports = { PlannerProvider, ReviewerProvider, WorkersProvider, TasksProvider, SessionsProvider };

@@ -12,7 +12,7 @@ const { DiffProvider, SCHEME } = require("./src/diff");
 const { LocalFetcher } = require("./src/fetch");
 const model = require("./src/model");
 const { Terminals } = require("./src/terminals");
-const { SessionsProvider, TasksProvider, WorkersProvider } = require("./src/tree");
+const { SessionsProvider, TasksProvider, WorkersProvider, PlannerProvider, ReviewerProvider } = require("./src/tree");
 
 const STATE_MESSAGES = {
   noFolder: "Open a folder to use aaagent.",
@@ -25,6 +25,8 @@ function activate(context) {
   const config = () => vscode.workspace.getConfiguration("aaagent");
   const cli = new Cli(() => config().get("path", ""));
   const store = { data: null, error: null, state: "loading" };
+  const planner = new PlannerProvider(store);
+  const reviewer = new ReviewerProvider(store);
   const workers = new WorkersProvider(store);
   const tasks = new TasksProvider(store);
   const terminals = new Terminals(cli, store);
@@ -35,9 +37,13 @@ function activate(context) {
   const isOpen = (session) => !!terminals.chat() && !!session.current;
   const sessions = new SessionsProvider(store, { isOpen, tasks });
 
+  const plannerView = vscode.window.createTreeView("aaagent.planner", { treeDataProvider: planner });
+  const reviewerView = vscode.window.createTreeView("aaagent.reviewer", { treeDataProvider: reviewer });
   const workersView = vscode.window.createTreeView("aaagent.workers", { treeDataProvider: workers });
   const sessionsView = vscode.window.createTreeView("aaagent.sessions", { treeDataProvider: sessions, showCollapseAll: true });
   const tasksView = vscode.window.createTreeView("aaagent.tasks", { treeDataProvider: tasks, showCollapseAll: true });
+  sub(plannerView);
+  sub(reviewerView);
   sub(workersView);
   sub(sessionsView);
   sub(tasksView);
@@ -114,11 +120,14 @@ function activate(context) {
   }
 
   function render() {
+    planner.refresh();
+    reviewer.refresh();
     workers.refresh();
     sessions.refresh();
     tasks.refresh();
     workersView.description = model.workersDescription(store.data);
     sessionsView.description = terminals.chat() ? "open" : undefined;
+    vscode.commands.executeCommand("setContext", "aaagent.reviewerIsModel", !model.plannerReviews(store.data));
     const sb = model.statusBar(store.data);
     statusItem.text = sb.text;
     statusItem.tooltip = store.data ? sb.tooltip : (STATE_MESSAGES[store.state] || sb.tooltip);
@@ -296,7 +305,8 @@ function activate(context) {
     }
     const current = target === "planner"
       ? (info.planner || {}).model
-      : ((info.workers || {})[target] || {}).model;
+      : target === "reviewer" ? (info.reviewer || {}).model
+        : ((info.workers || {})[target] || {}).model;
     const choice = await vscode.window.showQuickPick(model.modelChoices(info, target), {
       placeHolder: `Model for ${target} (current: ${current})`,
       matchOnDescription: true,
@@ -348,7 +358,9 @@ function activate(context) {
       if (!pick) return;
       target = pick.target;
     }
-    const entry = target === "planner" ? (info.planner || {}) : ((info.workers || {})[target] || {});
+    const entry = target === "planner"
+      ? (info.planner || {})
+      : target === "reviewer" ? (info.reviewer || {}) : ((info.workers || {})[target] || {});
     const current = entry.thinking || "default";
     const choice = await vscode.window.showQuickPick(model.thinkingChoices(info, target), {
       placeHolder: `Thinking level for ${target} (current: ${current})`,
@@ -368,27 +380,47 @@ function activate(context) {
   }
 
   /**
-   * Pick who reviews each round (the planner, or a worker) and save it user-wide or for
-   * this project.
+   * Pick who reviews each round: the planner (the chat), or any Claude/opencode model,
+   * saved user-wide or for this project.
    */
   async function selectReviewer() {
     const p = project();
     if (!p) return;
-    const choice = await vscode.window.showQuickPick(model.reviewerChoices(store.data || {}), {
+    let info;
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: "aaagent: loading models…" },
+      async () => { info = JSON.parse(await cli.exec(p, ["model", "--json"], { timeout: 70000 })); });
+    const current = (info.reviewer || {}).model || "planner";
+    const choice = await vscode.window.showQuickPick(model.reviewerChoices(info), {
       placeHolder: "Who reviews each round?",
       matchOnDescription: true,
     });
     if (!choice) return;
+    let chosen;
+    if (choice.typed) {
+      const answer = await vscode.window.showInputBox({
+        prompt: "Reviewer model: a Claude model like sonnet, or an opencode id like opencode-go/glm-5.3-flash",
+        value: current === "planner" ? "" : current,
+        ignoreFocusOut: true,
+      });
+      chosen = (answer || "").trim();
+      if (!chosen || chosen === current) return;
+    } else {
+      chosen = choice.reviewer;
+    }
+    if (!chosen || chosen === current) return;
     const scope = await vscode.window.showQuickPick([
       { label: "All projects", description: "~/.config/aaagent/config.toml", project: false },
       { label: "This project only", description: ".aaagent/config.toml", project: true },
     ], { placeHolder: "Save where?" });
     if (!scope) return;
-    const out = await cli.exec(p, ["reviewer", choice.reviewer, ...(scope.project ? ["--project"] : [])]);
+    const out = await cli.exec(p, ["model", "reviewer", chosen, ...(scope.project ? ["--project"] : [])]);
     const text = model.short(out, 300);
     const notable = out.split("\n").some((line) => /^(warning|note):/.test(line.trim()));
     if (notable) await vscode.window.showWarningMessage(text);
     else await vscode.window.showInformationMessage(text);
+    await refresh();
+    await terminals.ensureWorkers(p);
   }
 
   function command(id, fn) {
@@ -428,6 +460,10 @@ function activate(context) {
     if (p) await terminals.startChat(p);
   });
 
+  command("aaagent.changePlannerModel", () => selectModel({ name: "planner" }));
+
+  command("aaagent.changePlannerThinking", () => selectThinking({ name: "planner" }));
+
   command("aaagent.selectModel", (node) => selectModel(node));
 
   command("aaagent.changeWorkerModel", async (node) => {
@@ -438,6 +474,38 @@ function activate(context) {
   command("aaagent.selectThinking", (node) => selectThinking(node));
 
   command("aaagent.selectReviewer", () => selectReviewer());
+
+  command("aaagent.changeReviewerThinking", async () => {
+    if (model.plannerReviews(store.data)) {
+      vscode.window.showInformationMessage(
+        "The planner reviews in the chat; change the planner's thinking level instead.");
+      return;
+    }
+    await selectThinking({ name: "reviewer" });
+  });
+
+  command("aaagent.showReviewer", async () => {
+    const p = project();
+    if (!p) return;
+    if (model.plannerReviews(store.data)) {
+      vscode.window.showInformationMessage("The planner reviews in the chat; there is no reviewer output.");
+      return;
+    }
+    await terminals.showWorker(p, "reviewer");
+  });
+
+  command("aaagent.stopReviewer", async () => {
+    const p = project();
+    if (!p) return;
+    const review = (store.data && store.data.review) || {};
+    if (review.state === "running") {
+      const ok = await vscode.window.showWarningMessage(
+        "The reviewer is in the middle of a review. Stop it anyway?",
+        { modal: true, detail: "The review job fails and the round goes back to the planner." }, "Stop");
+      if (ok !== "Stop") return;
+    }
+    await cli.exec(p, ["stop", "reviewer"]);
+  });
 
   command("aaagent.changeWorkerThinking", async (node) => {
     const w = workerOf(node) || await pickWorker("Change the thinking level of which worker?");
@@ -593,6 +661,72 @@ function activate(context) {
   command("aaagent.startWorkers", async () => {
     const p = project();
     if (p) await terminals.ensureWorkers(p, { reveal: true });
+  });
+
+  command("aaagent.addWorker", async () => {
+    const p = project();
+    if (!p) return;
+    let info;
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: "aaagent: loading models…" },
+      async () => { info = JSON.parse(await cli.exec(p, ["model", "--json"], { timeout: 70000 })); });
+    const choice = await vscode.window.showQuickPick(model.addWorkerChoices(info), {
+      placeHolder: "Model for the new worker",
+      matchOnDescription: true,
+    });
+    if (!choice) return;
+    let chosen;
+    if (choice.typed) {
+      const answer = await vscode.window.showInputBox({
+        prompt: "Model for the new worker",
+        ignoreFocusOut: true,
+      });
+      chosen = (answer || "").trim();
+      if (!chosen) return;
+    } else {
+      chosen = choice.model;
+    }
+    const scope = await vscode.window.showQuickPick([
+      { label: "All projects", description: "~/.config/aaagent/config.toml", project: false },
+      { label: "This project only", description: ".aaagent/config.toml", project: true },
+    ], { placeHolder: "Save where?" });
+    if (!scope) return;
+    const out = await cli.exec(p, ["workers", "add", chosen, ...(scope.project ? ["--project"] : [])]);
+    vscode.window.showInformationMessage(model.short(out.split("\n")[0], 300));
+    await refresh();
+    await terminals.ensureWorkers(p);
+  });
+
+  command("aaagent.removeWorker", async (node) => {
+    const p = project();
+    if (!p) return;
+    const w = workerOf(node) || await pickWorker("Remove which worker?");
+    if (!w) return;
+    const list = (store.data && store.data.workers) || [];
+    if (list.length <= 1) {
+      vscode.window.showInformationMessage("aaagent needs at least one worker.");
+      return;
+    }
+    const ok = await vscode.window.showWarningMessage(
+      `Remove ${w.name} (${w.model})?`,
+      {
+        modal: true,
+        detail: "Its configuration is deleted and its terminal closes. Tasks it worked on keep their history.",
+      },
+      "Remove");
+    if (ok !== "Remove") return;
+    const out = await cli.exec(p, ["workers", "remove", w.name]);
+    terminals.disposeWorkerTerminal(w.name);
+    vscode.window.showInformationMessage(model.short(out, 300));
+  });
+
+  command("aaagent.setDefaultWorker", async (node) => {
+    const p = project();
+    if (!p) return;
+    const w = workerOf(node) || await pickWorker("Use which worker as the default?");
+    if (!w) return;
+    const out = await cli.exec(p, ["workers", "default", w.name]);
+    vscode.window.showInformationMessage(model.short(out, 300));
   });
 
   command("aaagent.showWorker", async (node) => {

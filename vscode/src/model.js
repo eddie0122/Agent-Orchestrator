@@ -167,11 +167,79 @@ function fileItem(task, file) {
     contextValue: `file.${file.kind}` };
 }
 
+/** The Planner view's node: the chat's Claude model and thinking level. */
+function plannerItem(planner) {
+  const p = planner || {};
+  const name = p.model || "planner";
+  return {
+    id: "planner",
+    label: name,
+    description: p.thinking || "default thinking",
+    tooltip: `Planner (the chat): ${name}\nthinking: ${p.thinking || "default"}\nClaude models only`,
+    icon: { id: "sparkle" },
+    contextValue: "planner",
+  };
+}
+
+/** Whether the chat (the planner) reviews each round itself. */
+function plannerReviews(data) {
+  if (!data) return true;
+  if (data.reviewer === "orchestrator") return true;
+  const review = data.review;
+  if (!review) return true;
+  return !!review.planner_reviews;
+}
+
+/** The Reviewer view's node: "the chat", or the reviewer job and what it is doing. */
+function reviewerItem(data) {
+  if (plannerReviews(data)) {
+    return {
+      id: "reviewer",
+      label: "Planner (the chat)",
+      description: "reviews each round in the chat",
+      tooltip: "The planner reviews each round itself.\nChange Reviewer… picks a Claude or opencode model instead.",
+      icon: { id: "comment-discussion" },
+      contextValue: "reviewer.planner",
+    };
+  }
+  const review = data.review || {};
+  let description;
+  let icon;
+  if (review.state === "running" && review.job) {
+    description = `${PHASE_VERB[review.job.phase] || review.job.phase} ${review.job.task.split("-")[0]} r${review.job.round}`;
+    icon = { id: "sync~spin" };
+  } else if (review.state === "idle") {
+    description = "waiting for a round";
+    icon = { id: "circle-filled", color: "testing.iconPassed" };
+  } else {
+    description = "stopped";
+    icon = { id: "circle-outline" };
+  }
+  if (review.thinking) description += ` · ${review.thinking}`;
+  if (review.queued) description += ` · ${review.queued} queued`;
+  const thinking = review.thinking ? `thinking: ${review.thinking}\n` : "thinking: default\n";
+  const backend = review.backend ? `backend: ${review.backend}\n` : "";
+  return {
+    id: "reviewer",
+    label: shortModel(review.model),
+    description,
+    tooltip: `reviewer: ${review.model}\n${backend}${thinking}${review.pid ? `pid ${review.pid}` : "not running"}`,
+    icon,
+    contextValue: `reviewer.model.${review.state || "stopped"}`,
+  };
+}
+
 /** `aaagent model --json` → the quick-pick list of things whose model can be changed. */
 function modelTargets(info) {
   const planner = (info && info.planner) || {};
+  const reviewer = (info && info.reviewer) || {};
   const workers = (info && info.workers) || {};
   const out = [{ label: "Planner (Claude)", description: planner.model, target: "planner" }];
+  out.push({
+    label: "Reviewer",
+    description: reviewer.model && reviewer.model !== "planner" ? reviewer.model : "planner (the chat)",
+    target: "reviewer",
+  });
   for (const [name, w] of Object.entries(workers)) {
     out.push({ label: `Worker: ${name}`, description: w.model, target: name });
   }
@@ -188,9 +256,20 @@ function shortModel(id) {
 /** Quick-pick entries for a target's models: a "type a name" entry, then current first. */
 function modelChoices(info, target) {
   const planner = (info && info.planner) || {};
+  const reviewer = (info && info.reviewer) || {};
   const workers = (info && info.workers) || {};
-  const current = target === "planner" ? planner.model : (workers[target] || {}).model;
-  const list = target === "planner" ? (planner.choices || []) : ((info && info.worker_choices) || []);
+  let current;
+  let list;
+  if (target === "planner") {
+    current = planner.model;
+    list = planner.choices || [];
+  } else if (target === "reviewer") {
+    current = reviewer.model;
+    list = reviewer.choices || [];
+  } else {
+    current = (workers[target] || {}).model;
+    list = (info && info.worker_choices) || [];
+  }
   const names = [];
   for (const name of list) if (name && !names.includes(name)) names.push(name);
   if (current) {
@@ -207,9 +286,14 @@ function modelChoices(info, target) {
 /** `aaagent thinking --json` → the quick-pick list of things whose thinking level can be changed. */
 function thinkingTargets(info) {
   const planner = (info && info.planner) || {};
+  const reviewer = (info && info.reviewer) || {};
   const workers = (info && info.workers) || {};
   const out = [{ label: "Planner (Claude)", description: `${planner.thinking || "default"} · ${planner.model}`,
     target: "planner" }];
+  if (reviewer.model && reviewer.model !== "planner") {
+    out.push({ label: "Reviewer", description: `${reviewer.thinking || "default"} · ${reviewer.model}`,
+      target: "reviewer" });
+  }
   for (const [name, w] of Object.entries(workers)) {
     out.push({ label: `Worker: ${name}`, description: `${w.thinking || "default"} · ${w.model}`, target: name });
   }
@@ -219,8 +303,12 @@ function thinkingTargets(info) {
 /** Quick-pick entries for a target's thinking levels: Default, then the choices. */
 function thinkingChoices(info, target) {
   const planner = (info && info.planner) || {};
+  const reviewer = (info && info.reviewer) || {};
   const workers = (info && info.workers) || {};
-  const entry = target === "planner" ? planner : (workers[target] || {});
+  let entry;
+  if (target === "planner") entry = planner;
+  else if (target === "reviewer") entry = reviewer;
+  else entry = workers[target] || {};
   const current = entry.thinking || "";
   const entries = (entry.choices || [])
     .filter((level) => level)
@@ -230,34 +318,48 @@ function thinkingChoices(info, target) {
   return [{ label: "Default", description: "the model's own setting", level: "default" }, ...entries];
 }
 
-/** Quick-pick entries for Select Reviewer: the planner (the chat), then every worker. */
-function reviewerChoices(data) {
-  const current = (data && data.reviewer) || "orchestrator";
+/** Quick-pick entries for Change Reviewer…: the planner, typing, then the models. */
+function reviewerChoices(info) {
+  const reviewer = (info && info.reviewer) || {};
+  const current = reviewer.model || "planner";
   const out = [{
     label: "Planner (the chat)",
-    description: current === "orchestrator" ? "current" : "",
-    reviewer: "orchestrator",
-  }];
-  for (const w of (data && data.workers) || []) {
-    const model = w.model || "";
-    const here = w.name === current;
-    out.push({
-      label: w.name,
-      description: here ? `${model} · current` : model,
-      reviewer: w.name,
-    });
+    description: current === "planner" ? "current" : "the chat reviews each round",
+    reviewer: "planner",
+  }, { label: "$(edit) Type a model name…", typed: true }];
+  const names = [];
+  for (const name of reviewer.choices || []) {
+    if (!name || name === "planner" || names.includes(name)) continue;
+    names.push(name);
+  }
+  if (current !== "planner") {
+    const i = names.indexOf(current);
+    if (i >= 0) names.splice(i, 1);
+    names.unshift(current);
+  }
+  for (const name of names) {
+    out.push(name === current
+      ? { label: name, reviewer: name, description: "current" }
+      : { label: name, reviewer: name });
   }
   return out;
 }
 
-/** The Workers view description: the planner, plus the reviewer when a worker reviews. */
+/** Quick-pick entries for Add Worker…: typing first, then the models a new worker could run. */
+function addWorkerChoices(info) {
+  return [
+    { label: "$(edit) Type a model name…", typed: true },
+    ...((info && info.worker_choices) || []).map((m) => ({ label: m, model: m })),
+  ];
+}
+
+/** The Workers view description: which worker is the default and which the fallback. */
 function workersDescription(data) {
-  const planner = (data && data.planner) || {};
-  if (!planner.model) return undefined;
-  let text = `planner: ${planner.model}${planner.thinking ? ` · ${planner.thinking}` : ""}`;
-  const reviewer = (data && data.reviewer) || "orchestrator";
-  if (reviewer !== "orchestrator") text += ` · reviewer: ${reviewer}`;
-  return text;
+  const workers = (data && data.workers) || [];
+  if (!workers.length) return undefined;
+  const def = workers.find((w) => w.default) || workers[0];
+  const fallback = workers.find((w) => w.fallback);
+  return fallback ? `default: ${def.name} · fallback: ${fallback.name}` : `default: ${def.name}`;
 }
 
 function workerItem(w) {
@@ -278,6 +380,8 @@ function workerItem(w) {
     if (w.thinking) description += ` · ${w.thinking}`;
   }
   if (w.queued) description += ` · ${w.queued} queued`;
+  if (w.default) description += " · default";
+  else if (w.fallback) description += " · fallback";
   const thinking = w.thinking ? `thinking: ${w.thinking}\n` : "";
   return {
     id: `worker:${w.name}`,
@@ -285,7 +389,7 @@ function workerItem(w) {
     description,
     tooltip: `${w.name}: ${w.model}\n${thinking}${w.pid ? `pid ${w.pid}` : "not running"}`,
     icon,
-    contextValue: `worker.${w.state}`,
+    contextValue: `worker.${w.state}${w.default ? ".default" : ""}`,
   };
 }
 
@@ -306,7 +410,9 @@ function statusBar(data) {
   }
   const up = (data.workers || []).filter((w) => w.state !== "stopped").map((w) => w.name);
   const planner = data.planner && data.planner.model ? `planner: ${data.planner.model}\n` : "";
-  const reviewer = data.reviewer && data.reviewer !== "orchestrator" ? `reviewer: ${data.reviewer}\n` : "";
+  const reviewer = plannerReviews(data)
+    ? "reviewer: planner (the chat)\n"
+    : `reviewer: ${(data.review || {}).model || "?"}\n`;
   const tooltip = `${planner}${reviewer}aaagent: ${up.length ? `workers up: ${up.join(", ")}` : "workers stopped"}\nClick to open the aaagent view`;
   return { text, tooltip };
 }
@@ -413,5 +519,6 @@ module.exports = {
   visibleTasks, taskSummary, taskIcon, taskItem, fileItem, workerItem, statusBar, transitions,
   isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
   thinkingTargets, thinkingChoices, reviewerChoices, workersDescription, ago, sessionItem,
-  sessionChoices, IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
+  sessionChoices, plannerItem, reviewerItem, plannerReviews, addWorkerChoices,
+  IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
 };

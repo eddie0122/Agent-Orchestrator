@@ -120,6 +120,66 @@ test("workerItem shows the job a worker is running and its model", () => {
     "stopped");
 });
 
+test("workerItem marks the default and fallback workers", () => {
+  const def = model.workerItem({ name: "worker1", model: "opencode-go/deepseek-v4.1-flash", state: "idle",
+    queued: 0, default: true });
+  assert.strictEqual(def.description, "waiting for a plan · deepseek-v4.1-flash · default");
+  assert.strictEqual(def.contextValue, "worker.idle.default");
+  const fallback = model.workerItem({ name: "worker2", model: "opencode-go/glm-5.3-flash", state: "stopped",
+    queued: 0, fallback: true });
+  assert.strictEqual(fallback.description, "stopped · fallback");
+  assert.strictEqual(fallback.contextValue, "worker.stopped");
+});
+
+test("plannerItem shows the chat's model and thinking level", () => {
+  assert.deepStrictEqual(model.plannerItem({ model: "opus", thinking: "xhigh" }), {
+    id: "planner",
+    label: "opus",
+    description: "xhigh",
+    tooltip: "Planner (the chat): opus\nthinking: xhigh\nClaude models only",
+    icon: { id: "sparkle" },
+    contextValue: "planner",
+  });
+  assert.strictEqual(model.plannerItem({}).description, "default thinking");
+  assert.strictEqual(model.plannerItem(undefined).label, "planner");
+});
+
+test("reviewerItem shows the planner when the chat reviews", () => {
+  const planner = model.reviewerItem({ reviewer: "orchestrator", review: { planner_reviews: true } });
+  assert.strictEqual(planner.label, "Planner (the chat)");
+  assert.strictEqual(planner.description, "reviews each round in the chat");
+  assert.strictEqual(planner.contextValue, "reviewer.planner");
+  assert.deepStrictEqual(planner.icon, { id: "comment-discussion" });
+  assert.match(planner.tooltip, /planner reviews each round itself/);
+  // Older status data without a review entry, and no data at all, mean the same.
+  assert.strictEqual(model.reviewerItem({ reviewer: "orchestrator" }).contextValue, "reviewer.planner");
+  assert.strictEqual(model.reviewerItem({}).contextValue, "reviewer.planner");
+  assert.strictEqual(model.reviewerItem(null).contextValue, "reviewer.planner");
+});
+
+test("reviewerItem shows the reviewer job like a worker", () => {
+  const data = (review) => ({ reviewer: "reviewer", review: { planner_reviews: false, ...review } });
+  const running = model.reviewerItem(data({
+    model: "opencode-go/glm-5.3-flash", thinking: "high", backend: "opencode", pid: 12,
+    state: "running", job: { task: "016-a-view", phase: "review", round: 2 }, queued: 1,
+  }));
+  assert.strictEqual(running.label, "glm-5.3-flash");
+  assert.strictEqual(running.description, "reviewing 016 r2 · high · 1 queued");
+  assert.strictEqual(running.contextValue, "reviewer.model.running");
+  assert.deepStrictEqual(running.icon, { id: "sync~spin" });
+  assert.strictEqual(running.tooltip,
+    "reviewer: opencode-go/glm-5.3-flash\nbackend: opencode\nthinking: high\npid 12");
+  const idle = model.reviewerItem(data({ model: "sonnet", state: "idle", pid: 3 }));
+  assert.strictEqual(idle.description, "waiting for a round");
+  assert.strictEqual(idle.contextValue, "reviewer.model.idle");
+  assert.deepStrictEqual(idle.icon, { id: "circle-filled", color: "testing.iconPassed" });
+  const stopped = model.reviewerItem(data({ model: "sonnet", state: "stopped", pid: null }));
+  assert.strictEqual(stopped.description, "stopped");
+  assert.strictEqual(stopped.contextValue, "reviewer.model.stopped");
+  assert.deepStrictEqual(stopped.icon, { id: "circle-outline" });
+  assert.match(stopped.tooltip, /\nnot running$/);
+});
+
 test("workerItem shows the thinking level when one is set", () => {
   const w = model.workerItem({ name: "deepseek", model: "opencode-go/deepseek-v4.1-flash", thinking: "high",
     pid: 9, state: "idle", queued: 0 });
@@ -129,36 +189,44 @@ test("workerItem shows the thinking level when one is set", () => {
     state: "stopped", queued: 0 }).tooltip, "glm: opencode-go/glm-5.3-flash\nnot running");
 });
 
-test("reviewerChoices lists the planner first, then the workers", () => {
-  const data = {
-    reviewer: "glm",
-    workers: [
-      { name: "deepseek", model: "opencode-go/deepseek-v4.1-flash" },
-      { name: "glm", model: "opencode-go/glm-5.3-flash" },
-    ],
+test("reviewerChoices lists the planner, typing, then the models with the current first", () => {
+  const info = {
+    reviewer: { model: "planner", choices: ["planner", "sonnet", "opencode-go/glm-5.3-flash"] },
   };
-  assert.deepStrictEqual(model.reviewerChoices(data), [
-    { label: "Planner (the chat)", description: "", reviewer: "orchestrator" },
-    { label: "deepseek", description: "opencode-go/deepseek-v4.1-flash", reviewer: "deepseek" },
-    { label: "glm", description: "opencode-go/glm-5.3-flash · current", reviewer: "glm" },
+  assert.deepStrictEqual(model.reviewerChoices(info), [
+    { label: "Planner (the chat)", description: "current", reviewer: "planner" },
+    { label: "$(edit) Type a model name…", typed: true },
+    { label: "sonnet", reviewer: "sonnet" },
+    { label: "opencode-go/glm-5.3-flash", reviewer: "opencode-go/glm-5.3-flash" },
   ]);
-  assert.strictEqual(model.reviewerChoices({})[0].description, "current");
+  const modelReviewer = model.reviewerChoices({
+    reviewer: { model: "opencode-go/glm-5.3-flash", choices: ["planner", "sonnet", "opencode-go/glm-5.3-flash"] },
+  });
+  assert.strictEqual(modelReviewer[0].description, "the chat reviews each round");
+  assert.deepStrictEqual(modelReviewer[2],
+    { label: "opencode-go/glm-5.3-flash", reviewer: "opencode-go/glm-5.3-flash", description: "current" });
+  // No duplicate "planner" entry, whatever the choices say.
+  assert.strictEqual(modelReviewer.filter((c) => c.reviewer === "planner").length, 1);
 });
 
-test("workersDescription adds the reviewer when a worker reviews", () => {
-  assert.strictEqual(model.workersDescription({ planner: { model: "opus" } }), "planner: opus");
-  assert.strictEqual(model.workersDescription({ planner: { model: "opus", thinking: "high" },
-    reviewer: "orchestrator" }), "planner: opus · high");
-  assert.strictEqual(model.workersDescription({ planner: { model: "opus" }, reviewer: "glm" }),
-    "planner: opus · reviewer: glm");
-  assert.strictEqual(model.workersDescription({ planner: {} }), undefined);
+test("workersDescription names the default and fallback workers", () => {
+  assert.strictEqual(model.workersDescription({
+    workers: [{ name: "worker1", default: true }, { name: "worker2", fallback: true }],
+  }), "default: worker1 · fallback: worker2");
+  assert.strictEqual(model.workersDescription({
+    workers: [{ name: "worker1", default: true }, { name: "worker2" }],
+  }), "default: worker1");
+  assert.strictEqual(model.workersDescription({ workers: [{ name: "only" }] }), "default: only");
+  assert.strictEqual(model.workersDescription({ workers: [] }), undefined);
   assert.strictEqual(model.workersDescription(null), undefined);
 });
 
-test("statusBar shows the reviewer in its tooltip when a worker reviews", () => {
+test("statusBar names the reviewer in its tooltip", () => {
   const base = { workers: [], planner: { model: "opus" }, tasks: [] };
-  assert.match(model.statusBar(base).tooltip, /^planner: opus\naaagent:/);
-  assert.match(model.statusBar({ ...base, reviewer: "glm" }).tooltip, /^planner: opus\nreviewer: glm\naaagent:/);
+  assert.match(model.statusBar(base).tooltip, /^planner: opus\nreviewer: planner \(the chat\)\naaagent:/);
+  assert.match(model.statusBar({ ...base, reviewer: "reviewer",
+    review: { planner_reviews: false, model: "opencode-go/glm-5.3-flash" } }).tooltip,
+  /^planner: opus\nreviewer: opencode-go\/glm-5\.3-flash\naaagent:/);
 });
 
 test("transitions say the planner and stay quiet while a worker reviews", () => {
@@ -181,6 +249,8 @@ test("transitions say the planner and stay quiet while a worker reviews", () => 
 
 const modelInfo = () => ({
   planner: { model: "opus", choices: ["sonnet", "opus", "haiku"] },
+  reviewer: { model: "planner", thinking: "", backend: null,
+    choices: ["planner", "sonnet", "opencode-go/glm-5.3-flash"] },
   workers: {
     deepseek: { model: "opencode-go/deepseek-v4.1-flash" },
     glm: { model: "opencode-go/glm-5.3-flash" },
@@ -188,12 +258,16 @@ const modelInfo = () => ({
   worker_choices: ["opencode-go/kimi-k3", "opencode-go/glm-5.3-flash"],
 });
 
-test("modelTargets lists the planner first, then the workers", () => {
+test("modelTargets lists the planner, the reviewer, then the workers", () => {
   assert.deepStrictEqual(model.modelTargets(modelInfo()), [
     { label: "Planner (Claude)", description: "opus", target: "planner" },
+    { label: "Reviewer", description: "planner (the chat)", target: "reviewer" },
     { label: "Worker: deepseek", description: "opencode-go/deepseek-v4.1-flash", target: "deepseek" },
     { label: "Worker: glm", description: "opencode-go/glm-5.3-flash", target: "glm" },
   ]);
+  const reviewer = model.modelTargets({ ...modelInfo(),
+    reviewer: { model: "opencode-go/glm-5.3-flash", choices: [] } });
+  assert.strictEqual(reviewer[1].description, "opencode-go/glm-5.3-flash");
 });
 
 test("modelChoices offers typing first, then the current model first and marked", () => {
@@ -212,6 +286,21 @@ test("modelChoices offers typing first, then the current model first and marked"
     { label: "opencode-go/kimi-k3", model: "opencode-go/kimi-k3" },
     { label: "opencode-go/glm-5.3-flash", model: "opencode-go/glm-5.3-flash" },
   ]);
+  assert.deepStrictEqual(model.modelChoices(info, "reviewer"), [
+    { label: "$(edit) Type a model name…", typed: true },
+    { label: "planner", model: "planner", description: "current" },
+    { label: "sonnet", model: "sonnet" },
+    { label: "opencode-go/glm-5.3-flash", model: "opencode-go/glm-5.3-flash" },
+  ]);
+});
+
+test("addWorkerChoices offers typing first, then the models for a new worker", () => {
+  assert.deepStrictEqual(model.addWorkerChoices(modelInfo()), [
+    { label: "$(edit) Type a model name…", typed: true },
+    { label: "opencode-go/kimi-k3", model: "opencode-go/kimi-k3" },
+    { label: "opencode-go/glm-5.3-flash", model: "opencode-go/glm-5.3-flash" },
+  ]);
+  assert.deepStrictEqual(model.addWorkerChoices({}), [{ label: "$(edit) Type a model name…", typed: true }]);
 });
 
 const thinkingInfo = () => ({
@@ -222,12 +311,19 @@ const thinkingInfo = () => ({
   },
 });
 
-test("thinkingTargets lists the planner first, then the workers", () => {
+test("thinkingTargets lists the planner, then the reviewer only when a model reviews, then the workers", () => {
   assert.deepStrictEqual(model.thinkingTargets(thinkingInfo()), [
     { label: "Planner (Claude)", description: "xhigh · opus", target: "planner" },
     { label: "Worker: deepseek", description: "high · opencode-go/deepseek-v4.1-flash", target: "deepseek" },
     { label: "Worker: glm", description: "default · opencode-go/glm-5.3-flash", target: "glm" },
   ]);
+  const withReviewer = model.thinkingTargets({ ...thinkingInfo(),
+    reviewer: { model: "sonnet", thinking: "medium", choices: ["low", "medium", "high"] } });
+  assert.deepStrictEqual(withReviewer.slice(0, 2), [
+    { label: "Planner (Claude)", description: "xhigh · opus", target: "planner" },
+    { label: "Reviewer", description: "medium · sonnet", target: "reviewer" },
+  ]);
+  assert.strictEqual(withReviewer.length, 4);
 });
 
 test("thinkingChoices offers Default and the levels, marking the current one", () => {
@@ -245,6 +341,14 @@ test("thinkingChoices offers Default and the levels, marking the current one", (
     { label: "low", level: "low" },
     { label: "high", level: "high" },
     { label: "max", level: "max" },
+  ]);
+  assert.deepStrictEqual(model.thinkingChoices({
+    ...info, reviewer: { model: "sonnet", thinking: "medium", choices: ["low", "medium", "high"] },
+  }, "reviewer"), [
+    { label: "Default", description: "the model's own setting", level: "default" },
+    { label: "low", level: "low" },
+    { label: "medium", description: "current", level: "medium" },
+    { label: "high", level: "high" },
   ]);
 });
 

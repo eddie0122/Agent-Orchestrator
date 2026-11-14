@@ -49,7 +49,8 @@ test("manifest: every command in a menu is declared, and every declared command 
     for (const m of w.contents.matchAll(/command:(aaagent\.[A-Za-z]+)/g)) assert.ok(declared.has(m[1]), m[1]);
   }
   const views = pkg.contributes.views.aaagent.map((v) => v.id);
-  assert.deepStrictEqual(views, ["aaagent.workers", "aaagent.sessions", "aaagent.tasks"]);
+  assert.deepStrictEqual(views,
+    ["aaagent.planner", "aaagent.reviewer", "aaagent.workers", "aaagent.sessions", "aaagent.tasks"]);
   assert.ok(fs.existsSync(path.join(__dirname, "..", pkg.contributes.viewsContainers.activitybar[0].icon)));
   // registration is checked after activation below
   test.declared = declared;
@@ -84,11 +85,27 @@ test("activate() against a real project", async (t) => {
   const workersTree = rec.treeViews["aaagent.workers"].treeDataProvider;
   const tasksTree = rec.treeViews["aaagent.tasks"].treeDataProvider;
   assert.deepStrictEqual(workersTree.getChildren().map((w) => w.name), ["worker1", "worker2"]);
-  assert.strictEqual(workersTree.getTreeItem(workersTree.getChildren()[0]).description, "stopped");
+  assert.strictEqual(workersTree.getTreeItem(workersTree.getChildren()[0]).description, "stopped · default");
   assert.deepStrictEqual(tasksTree.getChildren(), []);
   // The `.aaagent/**` refresh watcher plus the image-fetch watcher.
   assert.strictEqual(rec.watchers.length, 2);
-  assert.match(rec.treeViews["aaagent.workers"].description, /^planner: /);
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
+
+  // The Planner and Reviewer views each show one node.
+  const plannerTree = rec.treeViews["aaagent.planner"].treeDataProvider;
+  const reviewerTree = rec.treeViews["aaagent.reviewer"].treeDataProvider;
+  assert.strictEqual(plannerTree.getChildren().length, 1);
+  const plannerNode = plannerTree.getChildren()[0];
+  const plannerItem = plannerTree.getTreeItem(plannerNode);
+  assert.strictEqual(plannerItem.label, api.store.data.planner.model);
+  assert.strictEqual(plannerItem.description, api.store.data.planner.thinking || "default thinking");
+  assert.strictEqual(plannerItem.command.command, "aaagent.changePlannerModel");
+  assert.strictEqual(reviewerTree.getChildren().length, 1);
+  const reviewerItem = reviewerTree.getTreeItem(reviewerTree.getChildren()[0]);
+  assert.strictEqual(reviewerItem.label, "Planner (the chat)");
+  assert.strictEqual(reviewerItem.contextValue, "reviewer.planner");
+  assert.strictEqual(reviewerItem.command.command, "aaagent.selectReviewer");
+  assert.strictEqual(rec.context["aaagent.reviewerIsModel"], false);
 
   // a task with a plan, a (hand-written) report and a review
   sh(project, AAAGENT, ["new", "health endpoint"]);
@@ -245,13 +262,13 @@ test("activate() against a real project", async (t) => {
     /thinking = "max"/);
   await api.refresh();
   assert.strictEqual(api.store.data.workers.find((w) => w.name === "worker1").thinking, "max");
-  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "planner: sonnet · xhigh");
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
 
-  // Select Reviewer…: a worker reviewer (its model is copied into [reviewer]),
-  // saved to this project only.
+  // Change Reviewer…: one model reviews each round (its model goes into [reviewer]),
+  // saved to this project only. A reviewer terminal appears.
   rec.answer = undefined;
   rec.quickPicks = [
-    (items) => items.find((i) => i.reviewer === "worker2"),
+    (items) => items.find((i) => i.reviewer === "opencode-go/glm-5.3-flash"),
     (items) => items.find((i) => i.project === true),
   ];
   await rec.commands.get("aaagent.selectReviewer")();
@@ -259,10 +276,46 @@ test("activate() against a real project", async (t) => {
     /\[reviewer\]\nmodel = "opencode-go\/glm-5\.3-flash"/);
   assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer: reviewer \(opencode-go\/glm-5\.3-flash\)/.test(m)),
     JSON.stringify(rec.messages));
+  assert.ok(rec.terminals.some((term) => term.name === "aaagent: reviewer"
+    && term.exitStatus === undefined), JSON.stringify(rec.terminals.map((term) => term.name)));
   await api.refresh();
   assert.strictEqual(api.store.data.reviewer, "reviewer");
-  assert.strictEqual(rec.treeViews["aaagent.workers"].description,
-    "planner: sonnet · xhigh · reviewer: reviewer");
+  assert.strictEqual(rec.context["aaagent.reviewerIsModel"], true);
+  const modelReviewerItem = reviewerTree.getTreeItem(reviewerTree.getChildren()[0]);
+  assert.strictEqual(modelReviewerItem.label, "glm-5.3-flash");
+  assert.strictEqual(modelReviewerItem.contextValue, "reviewer.model.stopped");
+  assert.strictEqual(modelReviewerItem.command.command, "aaagent.showReviewer");
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
+
+  // Change Reviewer Thinking… targets the reviewer, not the planner.
+  rec.quickPicks = [
+    (items) => items.find((i) => i.level === "high"),
+    (items) => items.find((i) => i.project === true),
+  ];
+  await rec.commands.get("aaagent.changeReviewerThinking")();
+  const reviewConf = fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8");
+  assert.match(reviewConf, /\[reviewer\]\nmodel = "opencode-go\/glm-5\.3-flash"/);
+  assert.match(reviewConf, /\[reviewer\][\s\S]*?thinking = "high"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer thinking: high/.test(m)),
+    JSON.stringify(rec.messages));
+
+  // The reviewer's output opens its own terminal; Stop Reviewer asks only while it runs.
+  const reviewerTerm = rec.terminals.find((term) => term.name === "aaagent: reviewer");
+  assert.ok(reviewerTerm, JSON.stringify(rec.terminals.map((term) => term.name)));
+  const reviewerShown = reviewerTerm.shown;
+  await rec.commands.get("aaagent.showReviewer")();
+  assert.strictEqual(reviewerTerm.shown, reviewerShown + 1);
+  api.store.data.review.state = "running";
+  const beforeStop = rec.messages.length;
+  rec.answer = undefined;
+  await rec.commands.get("aaagent.stopReviewer")();
+  assert.ok(rec.messages.slice(beforeStop).some(([lvl, m]) => lvl === "warning" && /middle of a review/.test(m)),
+    JSON.stringify(rec.messages.slice(beforeStop)));
+  rec.answer = "Stop";
+  await rec.commands.get("aaagent.stopReviewer")();
+  api.store.data.review.state = "stopped";
+  assert.ok(!rec.messages.some(([lvl]) => lvl === "error"), JSON.stringify(rec.messages));
+  rec.answer = undefined;
 
   // Attach Image: one panel, reused on a second call, with a nonce CSP and the file button.
   const panelsBefore = rec.panels.length;
@@ -463,6 +516,51 @@ test("activate() against a real project", async (t) => {
   assert.deepStrictEqual(readSessions().map((s) => s.id), [resumeId]);
   assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /deleted session bbbbbbbb/.test(m)),
     JSON.stringify(rec.messages.slice(-5)));
+  // Add Worker…: picks a model and scope, then the new worker gets its own terminal.
+  await api.refresh();
+  rec.answer = undefined;
+  rec.quickPicks = [
+    (items) => items.find((i) => i.model === "opencode-go/kimi-k3"),
+    (items) => items.find((i) => i.project === true),
+  ];
+  await rec.commands.get("aaagent.addWorker")();
+  await api.refresh();
+  assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1", "worker2", "worker3"]);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /^added worker3: opencode-go\/kimi-k3/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
+  assert.ok(rec.terminals.some((term) => term.name === "aaagent: worker3" && term.exitStatus === undefined),
+    JSON.stringify(rec.terminals.map((term) => term.name)));
+
+  // Use as Default Worker: the Workers view description follows.
+  const worker3 = workersTree.getChildren().find((w) => w.name === "worker3");
+  await rec.commands.get("aaagent.setDefaultWorker")(worker3);
+  await api.refresh();
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker3 · fallback: worker1");
+
+  // Remove Worker…: asks first; a dismissed modal keeps the worker.
+  rec.answer = undefined;
+  await rec.commands.get("aaagent.removeWorker")(worker3);
+  await api.refresh();
+  assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1", "worker2", "worker3"]);
+
+  // Confirmed: the worker leaves the config and its terminal closes.
+  rec.answer = "Remove";
+  await rec.commands.get("aaagent.removeWorker")(worker3);
+  await api.refresh();
+  assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1", "worker2"]);
+  assert.ok(!rec.terminals.some((term) => term.name === "aaagent: worker3" && term.exitStatus === undefined));
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
+
+  // The last worker cannot be removed.
+  rec.answer = "Remove";
+  await rec.commands.get("aaagent.removeWorker")(workersTree.getChildren().find((w) => w.name === "worker2"));
+  await api.refresh();
+  const beforeLast = rec.messages.length;
+  await rec.commands.get("aaagent.removeWorker")(workersTree.getChildren()[0]);
+  assert.ok(rec.messages.slice(beforeLast).some(([lvl, m]) => lvl === "info"
+    && /needs at least one worker/.test(m)), JSON.stringify(rec.messages.slice(beforeLast)));
+  await api.refresh();
+  assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1"]);
   rec.answer = undefined;
 });
 

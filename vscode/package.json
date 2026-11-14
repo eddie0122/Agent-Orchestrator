@@ -2,7 +2,7 @@
   "name": "aaagent",
   "publisher": "local",
   "displayName": "aaagent",
-  "description": "Chat with Claude Opus as planner and reviewer while opencode workers (DeepSeek, GLM) implement and commit.",
+  "description": "Chat with Claude as the planner; a reviewer (the planner or any model) checks each round, and opencode or Claude workers implement and commit.",
   "version": "0.4.0",
   "license": "UNLICENSED",
   "private": true,
@@ -32,6 +32,14 @@
     },
     "views": {
       "aaagent": [
+        {
+          "id": "aaagent.planner",
+          "name": "Planner"
+        },
+        {
+          "id": "aaagent.reviewer",
+          "name": "Reviewer"
+        },
         {
           "id": "aaagent.workers",
           "name": "Workers"
@@ -84,10 +92,15 @@
       { "command": "aaagent.openSession", "title": "Open Session", "category": "aaagent", "icon": "$(debug-restart)" },
       { "command": "aaagent.deleteSession", "title": "Delete Session…", "category": "aaagent", "icon": "$(trash)" },
       { "command": "aaagent.selectModel", "title": "Select Model…", "category": "aaagent", "icon": "$(settings)" },
+      { "command": "aaagent.changePlannerModel", "title": "Change Planner Model…", "category": "aaagent", "icon": "$(settings)" },
+      { "command": "aaagent.changePlannerThinking", "title": "Change Planner Thinking Level…", "category": "aaagent", "icon": "$(lightbulb)" },
       { "command": "aaagent.changeWorkerModel", "title": "Change Model…", "category": "aaagent", "icon": "$(settings)" },
       { "command": "aaagent.selectThinking", "title": "Select Thinking Level…", "category": "aaagent", "icon": "$(lightbulb)" },
       { "command": "aaagent.changeWorkerThinking", "title": "Change Thinking Level…", "category": "aaagent", "icon": "$(lightbulb)" },
-      { "command": "aaagent.selectReviewer", "title": "Select Reviewer…", "category": "aaagent", "icon": "$(eye)" },
+      { "command": "aaagent.selectReviewer", "title": "Change Reviewer…", "category": "aaagent", "icon": "$(eye)" },
+      { "command": "aaagent.changeReviewerThinking", "title": "Change Reviewer Thinking Level…", "category": "aaagent", "icon": "$(lightbulb)" },
+      { "command": "aaagent.showReviewer", "title": "Show Reviewer Output", "category": "aaagent", "icon": "$(terminal)" },
+      { "command": "aaagent.stopReviewer", "title": "Stop Reviewer", "category": "aaagent", "icon": "$(debug-stop)" },
       { "command": "aaagent.resumeChat", "title": "Restore Previous Session…", "category": "aaagent", "icon": "$(history)" },
       { "command": "aaagent.ask", "title": "Ask Opus…", "category": "aaagent", "icon": "$(sparkle)" },
       { "command": "aaagent.sendSelection", "title": "Send Selection to Chat", "category": "aaagent" },
@@ -98,6 +111,9 @@
       { "command": "aaagent.openTaskFolder", "title": "Reveal Task Folder", "category": "aaagent", "icon": "$(folder-opened)" },
       { "command": "aaagent.abandonTask", "title": "Abandon Task…", "category": "aaagent", "icon": "$(trash)" },
       { "command": "aaagent.startWorkers", "title": "Start Workers", "category": "aaagent", "icon": "$(play)" },
+      { "command": "aaagent.addWorker", "title": "Add Worker…", "category": "aaagent", "icon": "$(add)" },
+      { "command": "aaagent.removeWorker", "title": "Remove Worker…", "category": "aaagent", "icon": "$(trash)" },
+      { "command": "aaagent.setDefaultWorker", "title": "Use as Default Worker", "category": "aaagent", "icon": "$(star)" },
       { "command": "aaagent.showWorker", "title": "Show Worker Output", "category": "aaagent", "icon": "$(terminal)" },
       { "command": "aaagent.stopWorker", "title": "Stop Worker", "category": "aaagent", "icon": "$(debug-stop)" },
       { "command": "aaagent.stopWorkers", "title": "Stop All Workers", "category": "aaagent", "icon": "$(debug-stop)" },
@@ -113,13 +129,18 @@
         { "command": "aaagent.refresh", "when": "view == aaagent.sessions", "group": "navigation@5" },
         { "command": "aaagent.openChat", "when": "view == aaagent.sessions", "group": "1_more@1" },
         { "command": "aaagent.refresh", "when": "view == aaagent.tasks", "group": "navigation@1" },
-        { "command": "aaagent.selectModel", "when": "view == aaagent.workers", "group": "navigation@1" },
-        { "command": "aaagent.selectThinking", "when": "view == aaagent.workers", "group": "navigation@2" },
-        { "command": "aaagent.selectReviewer", "when": "view == aaagent.workers", "group": "navigation@3" },
-        { "command": "aaagent.startWorkers", "when": "view == aaagent.workers", "group": "navigation@4" },
-        { "command": "aaagent.stopWorkers", "when": "view == aaagent.workers", "group": "navigation@5" },
-        { "command": "aaagent.doctor", "when": "view == aaagent.workers", "group": "1_more@1" },
-        { "command": "aaagent.openConfig", "when": "view == aaagent.workers", "group": "1_more@2" }
+        { "command": "aaagent.changePlannerModel", "when": "view == aaagent.planner", "group": "navigation@1" },
+        { "command": "aaagent.changePlannerThinking", "when": "view == aaagent.planner", "group": "navigation@2" },
+        { "command": "aaagent.selectReviewer", "when": "view == aaagent.reviewer", "group": "navigation@1" },
+        { "command": "aaagent.changeReviewerThinking", "when": "view == aaagent.reviewer && aaagent.reviewerIsModel", "group": "navigation@2" },
+        { "command": "aaagent.showReviewer", "when": "view == aaagent.reviewer && aaagent.reviewerIsModel", "group": "navigation@3" },
+        { "command": "aaagent.addWorker", "when": "view == aaagent.workers", "group": "navigation@1" },
+        { "command": "aaagent.startWorkers", "when": "view == aaagent.workers", "group": "navigation@2" },
+        { "command": "aaagent.stopWorkers", "when": "view == aaagent.workers", "group": "navigation@3" },
+        { "command": "aaagent.selectModel", "when": "view == aaagent.workers", "group": "1_more@1" },
+        { "command": "aaagent.selectThinking", "when": "view == aaagent.workers", "group": "1_more@2" },
+        { "command": "aaagent.doctor", "when": "view == aaagent.workers", "group": "1_more@3" },
+        { "command": "aaagent.openConfig", "when": "view == aaagent.workers", "group": "1_more@4" }
       ],
       "view/item/context": [
         { "command": "aaagent.openSession", "when": "view == aaagent.sessions && viewItem == session.available", "group": "inline@1" },
@@ -130,10 +151,18 @@
         { "command": "aaagent.showDiff", "when": "(view == aaagent.tasks || view == aaagent.sessions) && viewItem =~ /^task\\./", "group": "1_view@1" },
         { "command": "aaagent.openTaskFolder", "when": "(view == aaagent.tasks || view == aaagent.sessions) && viewItem =~ /^task\\./", "group": "1_view@2" },
         { "command": "aaagent.abandonTask", "when": "(view == aaagent.tasks || view == aaagent.sessions) && viewItem == task.active", "group": "2_manage@1" },
+        { "command": "aaagent.changePlannerModel", "when": "view == aaagent.planner && viewItem == planner", "group": "inline@1" },
+        { "command": "aaagent.changePlannerThinking", "when": "view == aaagent.planner && viewItem == planner", "group": "inline@2" },
+        { "command": "aaagent.selectReviewer", "when": "view == aaagent.reviewer && viewItem =~ /^reviewer\\./", "group": "inline@1" },
+        { "command": "aaagent.showReviewer", "when": "view == aaagent.reviewer && viewItem =~ /^reviewer\\.model/", "group": "inline@2" },
+        { "command": "aaagent.changeReviewerThinking", "when": "view == aaagent.reviewer && viewItem =~ /^reviewer\\.model/", "group": "1_manage@1" },
+        { "command": "aaagent.stopReviewer", "when": "view == aaagent.reviewer && viewItem =~ /^reviewer\\.model\\.(idle|running)$/", "group": "2_manage@1" },
         { "command": "aaagent.showWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\./", "group": "inline@1" },
-        { "command": "aaagent.stopWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\.(idle|running)$/", "group": "inline@2" },
+        { "command": "aaagent.stopWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\.(idle|running)(\\.|$)/", "group": "inline@2" },
         { "command": "aaagent.changeWorkerModel", "when": "view == aaagent.workers && viewItem =~ /^worker\\./", "group": "1_manage@1" },
-        { "command": "aaagent.changeWorkerThinking", "when": "view == aaagent.workers && viewItem =~ /^worker\\./", "group": "1_manage@2" }
+        { "command": "aaagent.changeWorkerThinking", "when": "view == aaagent.workers && viewItem =~ /^worker\\./", "group": "1_manage@2" },
+        { "command": "aaagent.setDefaultWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\./ && viewItem !~ /\\.default/", "group": "1_manage@3" },
+        { "command": "aaagent.removeWorker", "when": "view == aaagent.workers && viewItem =~ /^worker\\./", "group": "2_remove@1" }
       ],
       "editor/context": [
         { "command": "aaagent.sendSelection", "when": "resourceScheme == file && aaagent.state == ready", "group": "aaagent@1" }

@@ -49,7 +49,7 @@ model = "sonnet"          # a Claude model name runs on headless Claude Code
 
 The reviewer is a role of its own, with its own model, thinking level, queue, daemon and log (`.aaagent/workers/reviewer.log`, `aaagent logs reviewer`) — never one of the worker slots. Like a worker, it runs on headless Claude Code when its model is a Claude name and on opencode when the id has a slash.
 
-`aaagent reviewer sonnet` sets it (add `--project` to write this project's config only), `aaagent reviewer opencode-go/glm-5.3-flash --thinking high` sets model and level, `aaagent reviewer worker2` copies worker2's model and thinking into `[reviewer]` (a snapshot: changing worker2 later does not change the reviewer), `aaagent reviewer planner` gives the job back to the chat, and `aaagent reviewer` shows the current one. `aaagent model reviewer <model>` and `aaagent thinking reviewer <level>` work too. In the dashboard press `v`, in VSCode run **Select Reviewer…** (picking a worker copies its model). An old `[flow] reviewer = "<worker>"` is still honoured until you set the reviewer again, which clears that key in the written file.
+`aaagent reviewer sonnet` sets it (add `--project` to write this project's config only), `aaagent reviewer opencode-go/glm-5.3-flash --thinking high` sets model and level, `aaagent reviewer worker2` copies worker2's model and thinking into `[reviewer]` (a snapshot: changing worker2 later does not change the reviewer), `aaagent reviewer planner` gives the job back to the chat, and `aaagent reviewer` shows the current one. `aaagent model reviewer <model>` and `aaagent thinking reviewer <level>` work too. In the dashboard press `v`, in VSCode run **Change Reviewer…** in the Reviewer view (a typed model id sets it directly). An old `[flow] reviewer = "<worker>"` is still honoured until you set the reviewer again, which clears that key in the written file.
 
 With a reviewer model, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails (or writes no valid verdict) it is retried once on the reviewer itself; if that fails too, the round comes back to the chat to review itself.
 
@@ -80,18 +80,21 @@ After installing, run **Developer: Reload Window** once. Then:
 
 1. Open a project folder (a git repository) and click the **aaagent** icon in the activity bar.
 2. Click **New Session** (or run `aaagent: Ask Opus…` from the command palette and type the request). **New Session** closes the open chat and starts a fresh one; **Restore Previous Session…** reopens an earlier one, and **Open Chat** is in the Sessions view's `…` menu.
-   The Opus chat opens as an editor tab, and the workers open as split terminals in the panel.
+   The Opus chat opens as an editor tab, and each worker (and the reviewer, when a model reviews) opens as a split terminal in the panel.
 3. Talk to Opus. The sidebar follows along:
-   - **Workers**: who is running what. Inline buttons show a worker's output or stop it.
+   - **Planner**: the chat's Claude model and thinking level. Click the model to change it.
+   - **Reviewer**: who reviews each round — the planner (the chat) itself, or any Claude/opencode model. Click **Change Reviewer…** to switch, and while a model reviews, its thinking level, output terminal and **Stop Reviewer** are here too.
+   - **Workers**: who is running what. Add a worker with **+** (**Add Worker…**), and right-click a worker to change its model or thinking level, use it as the default, or remove it. Inline buttons show a worker's output or stop it.
    - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it, and right-click → **Delete Session…** (or the trash button) deletes a session that is not the open chat. **New Session**, **Restore Previous Session…**, **Ask Opus…** and **Attach Image…** are in its title bar.
    - **Tasks**: all tasks, newest first, with the current stage (planning, implementing, in review, committed…). Expand a task to open its `plan.md`, `report-N.md` and `review-N.md`, or **Changes** for the diff.
    - The **status bar** shows what is happening now. A notification appears when a task is committed or needs your decision.
 
 Other handy commands:
 
-- **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
-- **Select Thinking Level…** (Workers view title, or right-click a worker → **Change Thinking Level…**): set the planner's reasoning effort or a worker's model variant, for all projects or just this one.
-- **Select Reviewer…** (Workers view title): choose who reviews each round: the planner (the chat) or a worker (whose model is then copied to the reviewer), for all projects or just this one.
+- **Select Model…**/**Select Thinking Level…** (Workers view `…` menu, or the command palette): change the planner's, the reviewer's or a worker's model or thinking level, from a list or typed, for all projects or just this one. Each job's own view has a direct button for it (**Change Planner Model…**, **Change Reviewer Thinking Level…**, or right-click a worker → **Change Model…**/**Change Thinking Level…**).
+- **Change Reviewer…** (Reviewer view title): choose who reviews each round: the planner (the chat) or any Claude/opencode model, from a list or typed, for all projects or just this one.
+- **Add Worker…** (Workers view title): pick or type a model for a new worker; it gets its own terminal like the others.
+- **Remove Worker…** and **Use as Default Worker** (right-click a worker): remove a worker (after a confirmation; its config and terminal go, its tasks keep their history) or make it the default implementer.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
 - **Attach Image…** (Sessions view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
 - **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.
