@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
 from aaagent import dispatch, status, tasks, worker  # noqa: E402
-from aaagent.config import Config, project_config_path  # noqa: E402
+from aaagent.config import REVIEWER, Config, project_config_path  # noqa: E402
 from aaagent.tasks import FlowError  # noqa: E402
 
 FAKE_OC = ROOT / "tests" / "fake_opencode.py"
@@ -30,7 +30,8 @@ worker:
 Append the model name to work.txt.
 """
 
-REVIEWER = '[flow]\nreviewer = "worker2"\n'
+REVIEWER_CFG = '[reviewer]\nmodel = "opencode-go/glm-5.3-flash"\n'
+LEGACY_REVIEWER = '[flow]\nreviewer = "worker2"\n'
 
 
 def review(verdict: str, rnd: int) -> str:
@@ -66,10 +67,11 @@ class ReviewJobTest(unittest.TestCase):
         session.init_project(self.project, Config.load(self.project))
 
     def stop_workers(self):
-        for name in ("worker1", "worker2"):
+        for name in ("worker1", "worker2", REVIEWER):
             worker.stop(self.project, name)
         for _ in range(50):
-            if not any(worker.worker_pid(self.project, n) for n in ("worker1", "worker2")):
+            if not any(worker.worker_pid(self.project, n)
+                       for n in ("worker1", "worker2", REVIEWER)):
                 break
             time.sleep(0.1)
 
@@ -115,26 +117,34 @@ class ReviewJobTest(unittest.TestCase):
         cfg = Config.load(self.project)
         self.assertEqual(cfg.reviewer, "orchestrator")
         self.assertIsNone(cfg.reviewer_worker)
+        self.assertTrue(cfg.reviewer_is_planner)
         self.assertEqual(cfg.review_agent, "aaagent-reviewer")
+
+        self.config('[reviewer]\nmodel = "nope"\n')
+        cfg = Config.load(self.project)
+        self.assertEqual(cfg.reviewer_model, "nope")
+        self.assertEqual(cfg.reviewer_worker, REVIEWER,
+                         "a model reviewer is never the orchestrator")
 
         self.config('[flow]\nreviewer = "nope"\n')
         cfg = Config.load(self.project)
-        self.assertEqual(cfg.reviewer, "nope")
-        self.assertIsNone(cfg.reviewer_worker, "an unknown worker name falls back to the orchestrator")
+        self.assertEqual(cfg.reviewer, "orchestrator",
+                         "an unknown legacy name falls back to the planner")
 
         for alias in ("planner", "chat", ""):
-            self.config(f'[flow]\nreviewer = "{alias}"\n')
+            self.config(f'[reviewer]\nmodel = "{alias}"\n' if alias else "")
             self.assertEqual(Config.load(self.project).reviewer, "orchestrator", alias)
 
-        self.config(REVIEWER)
+        self.config(REVIEWER_CFG)
         cfg = Config.load(self.project)
-        self.assertEqual(cfg.reviewer, "worker2")
-        self.assertEqual(cfg.reviewer_worker, "worker2")
+        self.assertEqual(cfg.reviewer, REVIEWER)
+        self.assertEqual(cfg.reviewer_worker, REVIEWER)
+        self.assertEqual(cfg.reviewer_model, GLM)
 
     # -- 2. one dispatch runs the whole round --------------------------------
 
     def test_one_dispatch_implements_reviews_then_commits(self):
-        self.config(REVIEWER)
+        self.config(REVIEWER_CFG)
         task = self.new_task()
         head0 = self.git("rev-parse", "HEAD").strip()
         code, out = self.run_dispatch(task)
@@ -161,7 +171,7 @@ class ReviewJobTest(unittest.TestCase):
 
     def test_changes_requested_then_approved_in_one_dispatch(self):
         os.environ["FAKE_OC_REVIEW"] = "changes_requested,approved"
-        self.config(REVIEWER)
+        self.config(REVIEWER_CFG)
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
@@ -172,7 +182,7 @@ class ReviewJobTest(unittest.TestCase):
         self.assertEqual(state["status"], "approved")
         self.assertEqual(state["worker"], "worker1")
         self.assertIn("worker1", state["sessions"])
-        self.assertIn("worker2:review", state["sessions"], "the reviewer keeps its own session")
+        self.assertIn(REVIEWER, state["sessions"], "the reviewer keeps its own session")
 
         reviewer_calls = [c for c in self.calls() if c[c.index("--agent") + 1] == "aaagent-reviewer"]
         self.assertEqual(len(reviewer_calls), 2)
@@ -183,7 +193,7 @@ class ReviewJobTest(unittest.TestCase):
 
     def test_round_limit_stops_the_chain(self):
         os.environ["FAKE_OC_REVIEW"] = "changes_requested,changes_requested,changes_requested"
-        self.config(REVIEWER)
+        self.config(REVIEWER_CFG)
         task = self.new_task()
         head0 = self.git("rev-parse", "HEAD").strip()
         code, out = self.run_dispatch(task)
@@ -201,49 +211,40 @@ class ReviewJobTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertTrue(task.report(4).is_file())
 
-    # -- 5. a failed reviewer hands the round to the other worker -------------
+    # -- 5. a failed review retries on the reviewer, then goes to the planner --
 
-    def test_review_failure_retries_on_the_other_worker(self):
+    def test_review_failure_retries_once_on_the_reviewer_then_the_planner(self):
         os.environ["FAKE_OC_NOREVIEW"] = GLM
-        self.config(REVIEWER)
+        self.config(REVIEWER_CFG)
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
-        self.assertIn("retrying with worker1", out)
-        self.assertIn(DS, task.review(1).read_text())
-        self.assertEqual(task.load()["status"], "approved")
-        self.assertEqual(task.load()["worker"], "worker1")
-
-    # -- 6. both reviewers failing never marks the task failed ----------------
-
-    def test_both_reviewers_failing_hands_the_round_back(self):
-        os.environ["FAKE_OC_NOREVIEW"] = f"{DS},{GLM}"
-        self.config(REVIEWER)
-        task = self.new_task()
-        code, out = self.run_dispatch(task)
-        self.assertEqual(code, 0, out)
+        self.assertIn("retrying on the reviewer", out)
+        self.assertNotIn("retrying with worker1", out, "a review never falls back to a worker")
         self.assertIn("Review it yourself", out)
         self.assertFalse(task.review(1).exists())
-        self.assertFalse((task.path / "review-1.invalid.md").exists())
         state = task.load()
         self.assertEqual(state["status"], "awaiting_review")
         self.assertEqual(state["review_failed_round"], 1)
         self.assertEqual(state["worker"], "worker1")
+        reviewer_calls = [c for c in self.calls() if c[c.index("--agent") + 1] == "aaagent-reviewer"]
+        self.assertEqual(len(reviewer_calls), 2, "the failed review is retried once")
 
+        # The planner writes the review itself and dispatch commits as usual.
         task.review(1).write_text(review("approved", 1))
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
         self.assertEqual(task.load()["status"], "committed")
 
-    # -- 7. an invalid verdict is a failed review -----------------------------
+    # -- 6. an invalid verdict is a failed review -----------------------------
 
     def test_invalid_verdict_is_a_failed_review(self):
         os.environ["FAKE_OC_REVIEW"] = "bad"
-        self.config(REVIEWER)
+        self.config(REVIEWER_CFG)
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
-        self.assertIn("retrying with worker1", out)
+        self.assertIn("retrying on the reviewer", out)
         self.assertTrue((task.path / "review-1.invalid.md").is_file())
         self.assertFalse(task.review(1).exists())
         state = task.load()
@@ -253,7 +254,7 @@ class ReviewJobTest(unittest.TestCase):
     # -- 8. the planner can overrule an approval ------------------------------
 
     def test_overruling_an_approval_runs_another_round(self):
-        self.config(REVIEWER)
+        self.config(REVIEWER_CFG)
         task = self.new_task()
         self.run_dispatch(task)
         self.assertEqual(task.verdict(1), "approved")
@@ -269,8 +270,7 @@ class ReviewJobTest(unittest.TestCase):
     # -- 9. a reviewer on Claude Code -----------------------------------------
 
     def test_reviewer_on_claude_gets_the_guard_role(self):
-        self.config('[workers.worker1]\nmodel = "opencode-go/deepseek-v4.1-flash"\n'
-                    '[workers.worker2]\nmodel = "sonnet"\n[flow]\nreviewer = "worker2"\n')
+        self.config('[reviewer]\nmodel = "sonnet"\n')
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
@@ -282,22 +282,43 @@ class ReviewJobTest(unittest.TestCase):
         command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         self.assertTrue(command.endswith("guard_worker.py reviewer"), command)
 
+    def test_claude_reviewer_gets_thinking_as_effort(self):
+        self.config('[reviewer]\nmodel = "sonnet"\nthinking = "high"\n')
+        task = self.new_task()
+        code, out = self.run_dispatch(task)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(task.load()["status"], "approved")
+        calls = self.claude_calls()
+        self.assertEqual(calls[0][calls[0].index("--effort") + 1], "high", calls[0])
+
+    # -- 10. the legacy flow.reviewer still works ------------------------------
+
+    def test_legacy_flow_reviewer_runs_reviewer_jobs_with_the_workers_model(self):
+        self.config(LEGACY_REVIEWER)
+        cfg = Config.load(self.project)
+        self.assertEqual(cfg.reviewer_model, GLM, "worker2's model, not the seed reviewer's")
+        task = self.new_task()
+        code, out = self.run_dispatch(task)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(task.verdict(1), "approved")
+        self.assertIn("by " + GLM, task.review(1).read_text())
+
     # -- 11. the chat's prompt says who reviews -------------------------------
 
     def test_orchestrator_prompt_mentions_the_worker_reviewer(self):
         from aaagent import session
         cfg = Config.load(self.project)
         plain = session.orchestrator_prompt(cfg, self.project)
-        self.assertNotIn("Reviews are written by a worker", plain)
+        self.assertNotIn("Reviews are written by the reviewer", plain)
 
-        self.config(REVIEWER)
+        self.config(REVIEWER_CFG)
         cfg = Config.load(self.project)
         self.new_task("half done")
         prompt = session.orchestrator_prompt(cfg, self.project)
-        self.assertIn("Reviews are written by a worker", prompt)
-        self.assertIn("`worker2`", prompt)
-        self.assertIn(GLM, prompt)
-        self.assertLess(prompt.index("Reviews are written by a worker"),
+        self.assertIn("Reviews are written by the reviewer", prompt)
+        self.assertNotIn("`worker2`", prompt, "the reviewer is its own role now")
+        self.assertIn(f"a separate reviewer ({GLM}) reviews each round", prompt)
+        self.assertLess(prompt.index("Reviews are written by the reviewer"),
                         prompt.index("## Unfinished work from an earlier chat"))
 
     # -- 12. the dashboard says what a review job is doing --------------------

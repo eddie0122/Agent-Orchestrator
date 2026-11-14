@@ -254,7 +254,8 @@ class ThinkingTest(unittest.TestCase):
         lines = out.splitlines()
         self.assertTrue(lines[0].startswith("target"), lines)
         self.assertRegex(lines[1], r"^planner\s+opus\s+default$")
-        self.assertRegex(lines[2], r"^worker1\s+\S+\s+default$")
+        self.assertRegex(lines[2], r"^reviewer\s+planner\s+-$")
+        self.assertRegex(lines[3], r"^worker1\s+\S+\s+default$")
 
     def test_unknown_target_exits_2(self):
         self.assertEqual(self.cli("thinking", "nope", "high")[0], 2)

@@ -24,6 +24,13 @@ WORKER_THINKING_FALLBACK = ["low", "high", "max"]
 # How a worker job runs: in opencode, or in headless Claude Code (`claude -p`).
 BACKENDS = ("opencode", "claude")
 
+# Reserved name: the dedicated queue/daemon that runs review jobs when the reviewer
+# is a model. No worker may be called this.
+REVIEWER = "reviewer"
+
+# Values of `[reviewer].model` that mean "the chat (the planner) reviews each round".
+PLANNER_MODEL_ALIASES = ("planner", "orchestrator", "chat")
+
 
 def infer_backend(model: str) -> str:
     """opencode model ids are `provider/model`; Claude model names have no slash."""
@@ -92,22 +99,98 @@ class Config:
         for source in (user, proj):
             for name, table in _worker_tables(source).items():
                 own[name] = _merge(own[name], table) if name in own else table
+        # `reviewer` is a reserved name: the review queue, never a worker slot.
+        own.pop(REVIEWER, None)
         workers = _worker_tables(default) if not own else own
+        workers.pop(REVIEWER, None)
         settings = {k: v for k, v in data.get("workers", {}).items() if not isinstance(v, dict)}
         data["workers"] = {**settings, **workers}
+        # The default file documents `[reviewer]` with `model = "planner"`. That value
+        # counts as "not set" while neither the user config nor the project config says
+        # anything about `[reviewer].model`, so a legacy `[flow] reviewer = "<worker>"`
+        # keeps working through `reviewer_model`'s fallback.
+        if not any(isinstance(s.get("reviewer"), dict) and "model" in s["reviewer"]
+                   for s in (user, proj)):
+            reviewer = data.get("reviewer")
+            if isinstance(reviewer, dict):
+                reviewer.pop("model", None)
         return cls(data)
 
     # -- workers -----------------------------------------------------------
     def worker_names(self) -> list[str]:
-        return [k for k, v in self.data.get("workers", {}).items() if isinstance(v, dict)]
+        return [k for k, v in self.data.get("workers", {}).items()
+                if isinstance(v, dict) and k != REVIEWER]
+
+    # -- reviewer (its own role, not a worker slot) --------------------------
+    def _reviewer_section(self) -> dict:
+        section = self.data.get("reviewer", {})
+        return section if isinstance(section, dict) else {}
+
+    def _legacy_reviewer_worker(self) -> str | None:
+        """A legacy `[flow] reviewer = "<worker>"` that names a configured worker."""
+        name = str(self.flow.get("reviewer") or "").strip()
+        if name and name not in PLANNER_MODEL_ALIASES and name in self.worker_names():
+            return name
+        return None
+
+    @property
+    def reviewer_model(self) -> str:
+        """The reviewer's model, or "planner" when the chat reviews each round."""
+        model = str(self._reviewer_section().get("model") or "").strip()
+        if model.lower() in PLANNER_MODEL_ALIASES:
+            return "planner"
+        if model:
+            return model
+        legacy = self._legacy_reviewer_worker()
+        return self.worker_model(legacy) if legacy else "planner"
+
+    @property
+    def reviewer_thinking(self) -> str:
+        level = str(self._reviewer_section().get("thinking") or "").strip()
+        if level:
+            return level
+        legacy = self._legacy_reviewer_worker()
+        return self.worker_thinking(legacy) if legacy else ""
+
+    @property
+    def reviewer_backend(self) -> str:
+        """`opencode` or `claude`: the explicit `backend`, else inferred from the model."""
+        backend = self._reviewer_section().get("backend")
+        if backend in BACKENDS:
+            return backend
+        legacy = self._legacy_reviewer_worker()
+        if legacy:
+            return self.worker_backend(legacy)
+        return infer_backend(self.reviewer_model)
+
+    @property
+    def reviewer_is_planner(self) -> bool:
+        """True when the chat (the planner) reviews each round itself."""
+        return self.reviewer_model == "planner"
+
+    @property
+    def reviewer_worker(self) -> str | None:
+        """The queue that runs review jobs: "reviewer", or None when the planner reviews."""
+        return None if self.reviewer_is_planner else REVIEWER
+
+    def _no_reviewer_job(self) -> KeyError:
+        return KeyError(f"'{REVIEWER}' has no job: the planner reviews; there is no reviewer job")
 
     def worker_model(self, name: str) -> str:
+        if name == REVIEWER:
+            if self.reviewer_is_planner:
+                raise self._no_reviewer_job()
+            return self.reviewer_model
         workers = self.data.get("workers", {})
         if name not in workers or not isinstance(workers[name], dict):
             raise KeyError(f"unknown worker '{name}' (configured: {', '.join(self.worker_names())})")
         return workers[name]["model"]
 
     def worker_thinking(self, name: str) -> str:
+        if name == REVIEWER:
+            if self.reviewer_is_planner:
+                raise self._no_reviewer_job()
+            return self.reviewer_thinking
         workers = self.data.get("workers", {})
         if name not in workers or not isinstance(workers[name], dict):
             raise KeyError(f"unknown worker '{name}' (configured: {', '.join(self.worker_names())})")
@@ -121,6 +204,10 @@ class Config:
 
     def worker_backend(self, name: str) -> str:
         """`opencode` or `claude`: the explicit `backend`, else inferred from the model name."""
+        if name == REVIEWER:
+            if self.reviewer_is_planner:
+                raise self._no_reviewer_job()
+            return self.reviewer_backend
         workers = self.data.get("workers", {})
         if name not in workers or not isinstance(workers[name], dict):
             raise KeyError(f"unknown worker '{name}' (configured: {', '.join(self.worker_names())})")
@@ -156,15 +243,12 @@ class Config:
 
     @property
     def reviewer(self) -> str:
-        """Who reviews each round: "orchestrator" (the chat) or a worker's name."""
-        value = str(self.flow.get("reviewer") or "").strip()
-        return "orchestrator" if value in ("", "orchestrator", "planner", "chat") else value
+        """Who reviews each round: "orchestrator" (the chat itself) or "reviewer" (its own job).
 
-    @property
-    def reviewer_worker(self) -> str | None:
-        """The worker that reviews, or None when the orchestrator does (or the name is unknown)."""
-        name = self.reviewer
-        return name if name != "orchestrator" and name in self.worker_names() else None
+        The job reviewer's model lives in `[reviewer]`; a legacy `[flow] reviewer =
+        "<worker>"` still names a worker whose model the reviewer copies.
+        """
+        return "orchestrator" if self.reviewer_is_planner else REVIEWER
 
     @property
     def default_worker(self) -> str:
@@ -186,7 +270,9 @@ class Config:
         return names[(names.index(default) + 1) % len(names)]
 
     def alternate(self, worker: str) -> str | None:
-        """The worker to hand over to when `worker` fails."""
+        """The worker to hand over to when `worker` fails; the reviewer has no fallback."""
+        if worker == REVIEWER:
+            return None
         alt = self.fallback_worker if worker != self.fallback_worker else self.default_worker
         return alt if alt != worker and alt in self.worker_names() else None
 

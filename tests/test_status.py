@@ -254,8 +254,17 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(row.detail, "planner (the chat)")
         self.assertEqual(row.indent, 1)
         self.assertTrue(row.selectable)
+        d["reviewer"] = "reviewer"
+        d["review"] = {"planner_reviews": False, "model": "opencode-go/glm-5.3-flash",
+                       "thinking": "", "backend": "opencode", "pid": None, "state": "stopped",
+                       "job": None, "queued": 0, "log": "/none"}
+        self.assertEqual(status.rows(d)[2].detail, "reviewer · glm-5.3-flash")
+        d["review"]["thinking"] = "high"
+        self.assertEqual(status.rows(d)[2].detail, "reviewer · glm-5.3-flash · high")
+        del d["review"]
         d["reviewer"] = "worker2"
-        self.assertEqual(status.rows(d)[2].detail, "worker2 · glm-5.3-flash")
+        self.assertEqual(status.rows(d)[2].detail, "worker2 · glm-5.3-flash",
+                         "old status data without a review entry still works")
         d["reviewer"] = "missing"
         self.assertEqual(status.rows(d)[2].detail, "missing")
 
@@ -685,15 +694,17 @@ class ActTest(unittest.TestCase):
         self.dash.act(("reviewer_save", "worker2", "project"))
         path = self.project / ".aaagent" / "config.toml"
         self.assertTrue(path.is_file())
-        self.assertIn('reviewer = "worker2"', path.read_text())
-        self.assertEqual(self.dash.data["reviewer"], "worker2")
-        self.assertIn("reviewer: worker2", self.dash.ui.message)
+        self.assertIn('model = "opencode-go/glm-5.3-flash"', path.read_text(),
+                      "picking a worker copies its model into [reviewer]")
+        self.assertEqual(self.dash.data["reviewer"], "reviewer")
+        self.assertIn("reviewer: reviewer (opencode-go/glm-5.3-flash)", self.dash.ui.message)
 
     def test_reviewer_picker_marks_the_worker_that_reviews(self):
         self.dash.act(("reviewer_save", "worker2", "user"))
         self.dash.act(("reviewer",))
         self.assertEqual(self.dash.ui.picker.items[0][2], "")
-        self.assertEqual(self.dash.ui.picker.items[2][2], "current")
+        self.assertEqual(self.dash.ui.picker.items[2][2], "current",
+                         "worker2's model is the reviewer's, so worker2 is marked")
 
     def test_errors_go_to_the_message(self):
         self.dash.act(("model_save", "planner", "  ", "project"))

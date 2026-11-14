@@ -3,8 +3,8 @@
 Layout inside a project:
     .aaagent/tasks/NNN-slug/plan.md        written by the orchestrator
     .aaagent/tasks/NNN-slug/report-N.md    written by the worker (round N)
-    .aaagent/tasks/NNN-slug/review-N.md    written by the reviewer (the orchestrator,
-                                           or a worker when `flow.reviewer` names one)
+    .aaagent/tasks/NNN-slug/review-N.md    written by the reviewer (the planner, or the
+                                           dedicated reviewer when `[reviewer]` sets a model)
     .aaagent/tasks/NNN-slug/state.json     bookkeeping
     .aaagent/tasks/NNN-slug/logs/          raw worker output
 """

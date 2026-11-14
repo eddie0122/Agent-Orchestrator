@@ -50,6 +50,9 @@ def cmd_model(args) -> int:
         worker_choices += [name for name in models.claude_choices() if name not in worker_choices]
         print(json.dumps({
             "planner": {"model": cfg.planner_model, "choices": models.choices(cfg, models.PLANNER)},
+            "reviewer": {"model": cfg.reviewer_model, "thinking": cfg.reviewer_thinking,
+                         "backend": None if cfg.reviewer_is_planner else cfg.reviewer_backend,
+                         "choices": models.choices(cfg, models.REVIEWER)},
             "workers": {name: {"model": cfg.worker_model(name),
                                "backend": cfg.worker_backend(name)}
                         for name in cfg.worker_names()},
@@ -64,13 +67,14 @@ def cmd_model(args) -> int:
         return 0
     if args.target:
         return _set_or_pick(args, project, cfg, models.resolve_target(cfg, args.target))
-    rows = [(models.PLANNER, cfg.planner_model)]
+    rows = [(models.PLANNER, cfg.planner_model), (models.REVIEWER, cfg.reviewer_model)]
     rows += [(name, cfg.worker_model(name)) for name in cfg.worker_names()]
     width = max(len(name) for name, _ in rows)
     for name, model in rows:
         print(f"{name:<{width}}  {model}")
     if sys.stdin.isatty():
-        answer = input(f"change which? (planner/{'/'.join(cfg.worker_names())}, enter = none): ")
+        answer = input(f"change which? (planner/reviewer/{'/'.join(cfg.worker_names())}, "
+                       "enter = none): ")
         if answer.strip():
             target = models.resolve_target(cfg, answer.strip())
             return _set_or_pick(args, project, cfg, target)
@@ -99,6 +103,9 @@ def cmd_thinking(args) -> int:
         print(json.dumps({
             "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking,
                         "choices": models.thinking_choices(cfg, models.PLANNER)},
+            "reviewer": {"model": cfg.reviewer_model, "thinking": cfg.reviewer_thinking,
+                         "backend": None if cfg.reviewer_is_planner else cfg.reviewer_backend,
+                         "choices": models.thinking_choices(cfg, models.REVIEWER)},
             "workers": {name: {"model": cfg.worker_model(name),
                                "thinking": cfg.worker_thinking(name),
                                "backend": cfg.worker_backend(name),
@@ -115,14 +122,17 @@ def cmd_thinking(args) -> int:
     if args.target:
         return _set_or_pick_thinking(args, project, cfg, models.resolve_target(cfg, args.target))
     rows = [("target", "model", "thinking"),
-            (models.PLANNER, cfg.planner_model, cfg.planner_thinking or "default")]
+            (models.PLANNER, cfg.planner_model, cfg.planner_thinking or "default"),
+            (models.REVIEWER, cfg.reviewer_model,
+             (cfg.reviewer_thinking or "default") if not cfg.reviewer_is_planner else "-")]
     rows += [(name, cfg.worker_model(name), cfg.worker_thinking(name) or "default")
              for name in cfg.worker_names()]
     widths = [max(len(row[i]) for row in rows) for i in range(3)]
     for row in rows:
         print(f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]}")
     if sys.stdin.isatty():
-        answer = input(f"change which? (planner/{'/'.join(cfg.worker_names())}, enter = none): ")
+        answer = input(f"change which? (planner/reviewer/{'/'.join(cfg.worker_names())}, "
+                       "enter = none): ")
         if answer.strip():
             target = models.resolve_target(cfg, answer.strip())
             return _set_or_pick_thinking(args, project, cfg, target)
@@ -149,9 +159,12 @@ def cmd_reviewer(args) -> int:
     cfg = Config.load(project)
     if args.json:
         print(json.dumps({
-            "reviewer": cfg.reviewer_worker or models.ORCHESTRATOR,
-            "configured": cfg.reviewer,
-            "choices": models.reviewer_choices(cfg),
+            "reviewer": cfg.reviewer,
+            "planner_reviews": cfg.reviewer_is_planner,
+            "model": cfg.reviewer_model,
+            "thinking": cfg.reviewer_thinking,
+            "backend": None if cfg.reviewer_is_planner else cfg.reviewer_backend,
+            "choices": models.choices(cfg, models.REVIEWER),
             "workers": {name: {"model": cfg.worker_model(name),
                                "backend": cfg.worker_backend(name)}
                         for name in cfg.worker_names()},
@@ -159,13 +172,17 @@ def cmd_reviewer(args) -> int:
         return 0
     if args.name:
         print("\n".join(models.set_reviewer(project, args.project, args.name)))
+        if args.thinking:
+            print("\n".join(models.set_thinking(project, args.project, models.REVIEWER,
+                                                args.thinking)))
         return 0
     print(f"reviewer: {models.reviewer_label(cfg)}")
-    if cfg.reviewer != models.ORCHESTRATOR and cfg.reviewer_worker is None:
-        print(f'warning: flow.reviewer = "{cfg.reviewer}" is not a configured worker, '
-              "so the chat reviews")
+    raw = str(cfg.flow.get("reviewer") or "").strip()
+    if raw and raw not in ("orchestrator", "planner", "chat") and raw not in cfg.worker_names():
+        print(f'warning: flow.reviewer = "{raw}" is not a configured worker, so the chat reviews')
     if sys.stdin.isatty():
-        answer = input(f"change to? (orchestrator/{'/'.join(cfg.worker_names())}, enter = none): ")
+        answer = input(f"change to? (planner/{'/'.join(cfg.worker_names())}/<model>, "
+                       "enter = none): ")
         if answer.strip():
             print("\n".join(models.set_reviewer(project, args.project, answer.strip())))
     return 0
@@ -326,8 +343,19 @@ def cmd_status(args) -> int:
             label += " [claude]"
         print(f"  {name:<9} {label:<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
               f"{doing}{f', {queued} queued' if queued else ''}")
-    if cfg.reviewer_worker:
-        print(f"reviewer: {cfg.reviewer_worker}")
+    print(f"reviewer: {models.reviewer_label(cfg)}")
+    if not cfg.reviewer_is_planner:
+        pid = worker.worker_pid(project, models.REVIEWER)
+        job = worker.running_job(project, models.REVIEWER)
+        queued = (len(worker.pending_jobs(project, models.REVIEWER))
+                  if worker.queue_dir(project, models.REVIEWER).is_dir() else 0)
+        doing = (f"running {job['phase']} {job['task']} r{job['round']}" if job
+                 else ("idle" if pid else "-"))
+        label = cfg.worker_label(models.REVIEWER)
+        if cfg.reviewer_backend == "claude":
+            label += " [claude]"
+        print(f"  {'reviewer':<9} {label:<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
+              f"{doing}{f', {queued} queued' if queued else ''}")
     all_tasks = tasks.all_tasks(project)
     if not args.all:
         all_tasks = [t for t in all_tasks if t.load().get("status") not in tasks.FINAL_STATUSES] or all_tasks[-3:]
@@ -413,9 +441,11 @@ def cmd_logs(args) -> int:
 def cmd_stop(args) -> int:
     project = project_root()
     cfg = Config.load(project)
-    for name in args.workers or cfg.worker_names():
-        if name not in cfg.worker_names():
-            raise FlowError(f"unknown worker '{name}' (configured: {', '.join(cfg.worker_names())})")
+    known = [*cfg.worker_names(), models.REVIEWER]
+    for name in args.workers or known:
+        if name not in known:
+            raise FlowError(f"unknown worker '{name}' (configured: "
+                            f"{', '.join(cfg.worker_names())}; `reviewer` stops the review daemon)")
         if worker.stop(project, name):
             print(f"stopped {name}")
     return 0
@@ -469,9 +499,14 @@ def cmd_doctor(args) -> int:
                            "install Claude Code or set workers.claude_bin")
         elif oc:
             good &= _check(model in model_list, f"worker {name}: {model}", "check `opencode models` and your config")
-    if cfg.reviewer != models.ORCHESTRATOR and cfg.reviewer_worker is None:
-        good &= _check(False, f"reviewer '{cfg.reviewer}' is a configured worker",
-                       "run: aaagent reviewer orchestrator (or name a worker)")
+    if not cfg.reviewer_is_planner:
+        model = cfg.reviewer_model
+        if cfg.reviewer_backend == "claude":
+            good &= _check(bool(backends.worker_claude(cfg)), f"reviewer: {model} (claude)",
+                           "install Claude Code or set workers.claude_bin")
+        elif oc:
+            good &= _check(model in model_list, f"reviewer: {model}",
+                           "check `opencode models` and your config")
     if oc:
         agents_dir = Path.home() / ".config" / "opencode" / "agents"
         for agent in (cfg.implement_agent, cfg.commit_agent, cfg.review_agent):
@@ -598,8 +633,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("doctor", help="check the installation")
     s.set_defaults(func=cmd_doctor)
 
-    s = sub.add_parser("model", help="show or change the planner and worker models")
-    s.add_argument("target", nargs="?", help="planner or a worker name")
+    s = sub.add_parser("model", help="show or change the planner, reviewer and worker models")
+    s.add_argument("target", nargs="?", help="planner, reviewer or a worker name")
     s.add_argument("model", nargs="?", help="model name (any name; not checked)")
     s.add_argument("--list", action="store_true", help="print the choices for <target>")
     s.add_argument("--json", action="store_true", help="machine-readable models and choices")
@@ -607,8 +642,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write <project>/.aaagent/config.toml instead of the user config")
     s.set_defaults(func=cmd_model)
 
-    s = sub.add_parser("thinking", help="show or change the planner and worker thinking levels")
-    s.add_argument("target", nargs="?", help="planner or a worker name")
+    s = sub.add_parser("thinking", help="show or change the planner, reviewer and worker thinking levels")
+    s.add_argument("target", nargs="?", help="planner, reviewer or a worker name")
     s.add_argument("level", nargs="?", help="thinking level, or default to clear it")
     s.add_argument("--list", action="store_true", help="print the choices for <target>")
     s.add_argument("--json", action="store_true", help="machine-readable thinking levels and choices")
@@ -616,8 +651,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write <project>/.aaagent/config.toml instead of the user config")
     s.set_defaults(func=cmd_thinking)
 
-    s = sub.add_parser("reviewer", help="show or change who reviews each round (the chat or a worker)")
-    s.add_argument("name", nargs="?", help="orchestrator or a worker name")
+    s = sub.add_parser("reviewer", help="show or change who reviews each round "
+                                        "(the planner, or a model with its own job)")
+    s.add_argument("name", nargs="?", help="a model (Claude name or provider/model), a worker "
+                                           "name to copy its model, or planner")
+    s.add_argument("--thinking", default="", help="thinking level for the reviewer "
+                                                  "(claude --effort or the opencode variant)")
     s.add_argument("--json", action="store_true", help="machine-readable reviewer and choices")
     s.add_argument("--project", action="store_true",
                    help="write <project>/.aaagent/config.toml instead of the user config")

@@ -247,7 +247,8 @@ test("activate() against a real project", async (t) => {
   assert.strictEqual(api.store.data.workers.find((w) => w.name === "worker1").thinking, "max");
   assert.strictEqual(rec.treeViews["aaagent.workers"].description, "planner: sonnet · xhigh");
 
-  // Select Reviewer…: a worker reviewer, saved to this project only.
+  // Select Reviewer…: a worker reviewer (its model is copied into [reviewer]),
+  // saved to this project only.
   rec.answer = undefined;
   rec.quickPicks = [
     (items) => items.find((i) => i.reviewer === "worker2"),
@@ -255,13 +256,13 @@ test("activate() against a real project", async (t) => {
   ];
   await rec.commands.get("aaagent.selectReviewer")();
   assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
-    /reviewer = "worker2"/);
-  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer: worker2/.test(m)),
+    /\[reviewer\]\nmodel = "opencode-go\/glm-5\.3-flash"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer: reviewer \(opencode-go\/glm-5\.3-flash\)/.test(m)),
     JSON.stringify(rec.messages));
   await api.refresh();
-  assert.strictEqual(api.store.data.reviewer, "worker2");
+  assert.strictEqual(api.store.data.reviewer, "reviewer");
   assert.strictEqual(rec.treeViews["aaagent.workers"].description,
-    "planner: sonnet · xhigh · reviewer: worker2");
+    "planner: sonnet · xhigh · reviewer: reviewer");
 
   // Attach Image: one panel, reused on a second call, with a nonce CSP and the file button.
   const panelsBefore = rec.panels.length;

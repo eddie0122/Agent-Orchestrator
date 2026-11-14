@@ -8,31 +8,37 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from .config import (PLANNER_CHOICES, PLANNER_THINKING, WORKER_THINKING_FALLBACK, Config,
-                     file_worker_names, project_config_path, seed_workers, remove_toml_section,
-                     set_toml_value, user_config_path)
+from .config import (PLANNER_CHOICES, PLANNER_THINKING, PLANNER_MODEL_ALIASES, REVIEWER,
+                     BACKENDS, WORKER_THINKING_FALLBACK, Config, file_worker_names,
+                     project_config_path, seed_workers, remove_toml_section, set_toml_value,
+                     user_config_path)
 from .tasks import FlowError
 PLANNER = "planner"
 PLANNER_ALIASES = {"planner", "orchestrator", "claude"}
 ORCHESTRATOR = "orchestrator"
-REVIEWER_ALIASES = {"orchestrator", "planner", "chat"}
 
 # Worker names are generic slots; `add` only ever creates `workerN` names like these.
 WORKER_NAME_RE = r"^[a-z][a-z0-9_-]*$"
 
 
 def resolve_target(cfg: Config, name: str) -> str:
-    """`planner` (or an alias) or the name of a configured worker."""
+    """`planner`, `reviewer`, or the name of a configured worker."""
     if name in PLANNER_ALIASES:
         return PLANNER
+    if name == REVIEWER:
+        return REVIEWER
     if name in cfg.worker_names():
         return name
-    raise FlowError(f"unknown target '{name}': use planner or a worker "
+    raise FlowError(f"unknown target '{name}': use planner, reviewer or a worker "
                     f"({', '.join(cfg.worker_names())})")
 
 
 def current(cfg: Config, target: str) -> str:
-    return cfg.planner_model if target == PLANNER else cfg.worker_model(target)
+    if target == PLANNER:
+        return cfg.planner_model
+    if target == REVIEWER:
+        return cfg.reviewer_model
+    return cfg.worker_model(target)
 
 
 def worker_choices(cfg: Config) -> list[str]:
@@ -54,7 +60,12 @@ def claude_choices() -> list[str]:
 
 def choices(cfg: Config, target: str) -> list[str]:
     """Suggested models for `target`, always including the one in use."""
-    out = list(PLANNER_CHOICES) if target == PLANNER else new_worker_choices(cfg)
+    if target == PLANNER:
+        out = list(PLANNER_CHOICES)
+    elif target == REVIEWER:
+        out = ["planner", *new_worker_choices(cfg)]
+    else:
+        out = new_worker_choices(cfg)
     now = current(cfg, target)
     if now not in out:
         out.insert(0, now)
@@ -73,16 +84,26 @@ def set_model(project: Path, cfg_scope_project: bool, target: str, model: str) -
     model = model.strip()
     if not model:
         raise FlowError("model name is empty")
+    if target == REVIEWER and model.lower() in PLANNER_MODEL_ALIASES:
+        model = "planner"
     path = project_config_path(project) if cfg_scope_project else user_config_path()
     if target == PLANNER:
         section = "orchestrator"
+    elif target == REVIEWER:
+        section = REVIEWER
     else:
         materialize_seed(project)
         section = f"workers.{target}"
     try:
         set_toml_value(path, section, "model", model)
+        if target == REVIEWER:
+            # The backend is inferred from the model: a stale explicit one would run the
+            # new model on the wrong backend, so clear it when the model changes.
+            set_toml_value(path, REVIEWER, "backend", "")
     except ValueError as exc:
         raise FlowError(str(exc)) from exc
+    if target == REVIEWER:
+        return _reviewer_model_notes(project, path, model)
     notes = [f"{target} model: {model}  (saved to {path})"]
     cfg = Config.load(project)
     if current(cfg, target) != model:
@@ -93,6 +114,45 @@ def set_model(project: Path, cfg_scope_project: bool, target: str, model: str) -
     else:
         notes.append("applies from the next dispatch")
         notes.extend(backend_notes(cfg, target, model))
+    return notes
+
+
+def _clear_legacy_flow_reviewer(path: Path) -> str | None:
+    """Empty a legacy `[flow] reviewer = "<worker>"` now that `[reviewer]` holds the model."""
+    if not path.is_file():
+        return None
+    flow = tomllib.loads(path.read_text()).get("flow", {})
+    value = str(flow.get("reviewer") or "").strip()
+    if not value:
+        return None
+    try:
+        set_toml_value(path, "flow", "reviewer", "")
+    except ValueError:
+        return None
+    return f'note: flow.reviewer was "{value}"; cleared ([reviewer] holds the reviewer now)'
+
+
+def _reviewer_model_notes(project: Path, path: Path, model: str) -> list[str]:
+    """The lines `set_model` and `set_reviewer` show after writing `[reviewer].model`."""
+    notes: list[str] = []
+    cleared = _clear_legacy_flow_reviewer(path)
+    cfg = Config.load(project)
+    notes.append(f"reviewer: {reviewer_label(cfg)}  (saved to {path})")
+    if cleared:
+        notes.append(cleared)
+    if current(cfg, REVIEWER) != model:
+        notes.append(f"note: {project_config_path(project)} overrides this; "
+                     "use --project to change it there")
+    notes.append("applies from the next dispatch")
+    if cfg.reviewer_is_planner:
+        notes.append("a chat that is already open learns this from dispatch's messages; "
+                     "new chats are told at the start")
+        return notes
+    notes.append("one dispatch now runs implement → review → fix until approval; "
+                 "the planner still commits")
+    notes.append("a chat that is already open learns this from dispatch's messages; "
+                 "new chats are told at the start")
+    notes.extend(backend_notes(cfg, REVIEWER, model))
     return notes
 
 
@@ -129,56 +189,73 @@ def pick_interactive(cfg: Config, target: str, input_fn=input, print_fn=print) -
 # -- who reviews each round ----------------------------------------------------
 
 def reviewer_choices(cfg: Config) -> list[str]:
-    """`orchestrator` (the chat reviews) and every configured worker."""
+    """`orchestrator` (the chat reviews) and every configured worker.
+
+    Kept for the dashboard's `v` picker and the VSCode Select Reviewer: picking a worker
+    copies that worker's model into `[reviewer]`.
+    """
     return [ORCHESTRATOR, *cfg.worker_names()]
 
 
-def resolve_reviewer(cfg: Config, name: str) -> str:
-    """A worker name wins over an alias; anything else is an error."""
-    name = (name or "").strip()
-    if name in cfg.worker_names():
-        return name
-    if name in REVIEWER_ALIASES:
-        return ORCHESTRATOR
-    raise FlowError(f"unknown reviewer '{name}': use orchestrator or a worker "
-                    f"({', '.join(cfg.worker_names())})")
-
-
 def reviewer_label(cfg: Config) -> str:
-    """`orchestrator (the chat reviews each round)` or `worker1 (opencode-go/glm-5.3-flash)`."""
-    worker = cfg.reviewer_worker
-    if worker:
-        return f"{worker} ({cfg.worker_model(worker)})"
-    return f"{ORCHESTRATOR} (the chat reviews each round)"
+    """`planner (the chat reviews each round)` or `reviewer (<model>[, thinking <level>])`."""
+    if cfg.reviewer_is_planner:
+        return f"{PLANNER} (the chat reviews each round)"
+    return f"{REVIEWER} ({cfg.worker_label(REVIEWER)})"
 
 
-def set_reviewer(project: Path, cfg_scope_project: bool, name: str) -> list[str]:
-    """Save `flow.reviewer` and return the lines to show the user."""
-    value = resolve_reviewer(Config.load(project), name)
-    path = project_config_path(project) if cfg_scope_project else user_config_path()
-    try:
-        set_toml_value(path, "flow", "reviewer", value)
-    except ValueError as exc:
-        raise FlowError(str(exc)) from exc
+def set_reviewer(project: Path, cfg_scope_project: bool, value: str) -> list[str]:
+    """Set who reviews each round and return the lines to show the user.
+
+    `planner` (or an alias) makes the chat review again; a configured worker's name
+    copies that worker's model and thinking into `[reviewer]` (a snapshot, not a link);
+    anything else is a model id for `[reviewer].model`.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise FlowError("name the reviewer: planner, a worker, or a model")
     cfg = Config.load(project)
-    notes = [f"reviewer: {reviewer_label(cfg)}  (saved to {path})"]
-    if cfg.reviewer != value:
-        notes.append(f"note: {project_config_path(project)} overrides this; "
-                     "use --project to change it there")
-    notes.append("applies from the next dispatch")
-    if cfg.reviewer_worker:
+    if value in cfg.worker_names():      # a worker name wins over an alias
+        path = project_config_path(project) if cfg_scope_project else user_config_path()
+        model = cfg.worker_model(value)
+        thinking = cfg.worker_thinking(value)
+        backend = (cfg.data.get("workers", {}).get(value) or {}).get("backend")
+        try:
+            set_toml_value(path, REVIEWER, "model", model)
+            # Always write both, even when empty: a level or backend left over from the
+            # previous reviewer must not survive (an old `backend = "claude"` would run
+            # an opencode model on Claude Code).
+            set_toml_value(path, REVIEWER, "thinking", thinking)
+            set_toml_value(path, REVIEWER, "backend", backend if backend in BACKENDS else "")
+        except ValueError as exc:
+            raise FlowError(str(exc)) from exc
+        notes: list[str] = []
+        cleared = _clear_legacy_flow_reviewer(path)
+        if cleared:
+            notes.append(cleared)
+        notes.append(f"reviewer: {reviewer_label(Config.load(project))}  (saved to {path})")
+        notes.append(f"reviewer now uses {value}'s model {model} "
+                     f"(a copy; changing {value} later does not change the reviewer)")
+        notes.append("applies from the next dispatch")
         notes.append("one dispatch now runs implement → review → fix until approval; "
                      "the planner still commits")
-    notes.append("a chat that is already open learns this from dispatch's messages; "
-                 "new chats are told at the start")
-    return notes
+        notes.append("a chat that is already open learns this from dispatch's messages; "
+                     "new chats are told at the start")
+        return notes
+    if value.lower() in PLANNER_MODEL_ALIASES:
+        return set_model(project, cfg_scope_project, REVIEWER, "planner")
+    return set_model(project, cfg_scope_project, REVIEWER, value)
 
 
 # -- thinking levels -----------------------------------------------------------
 
 def thinking_current(cfg: Config, target: str) -> str:
     """The thinking level in use for `target`; "" means the tool's own default."""
-    return cfg.planner_thinking if target == PLANNER else cfg.worker_thinking(target)
+    if target == PLANNER:
+        return cfg.planner_thinking
+    if target == REVIEWER:
+        return cfg.reviewer_thinking
+    return cfg.worker_thinking(target)
 
 
 def worker_thinking_choices(cfg: Config, model: str) -> list[str]:
@@ -213,6 +290,12 @@ def thinking_choices(cfg: Config, target: str) -> list[str]:
     """Suggested thinking levels for `target`."""
     if target == PLANNER:
         return list(PLANNER_THINKING)
+    if target == REVIEWER:
+        if cfg.reviewer_is_planner:
+            return []
+        if cfg.reviewer_backend == "claude":
+            return list(PLANNER_THINKING)
+        return worker_thinking_choices(cfg, cfg.reviewer_model)
     if cfg.worker_backend(target) == "claude":
         return list(PLANNER_THINKING)
     return worker_thinking_choices(cfg, cfg.worker_model(target))
@@ -226,6 +309,10 @@ def set_thinking(project: Path, cfg_scope_project: bool, target: str, level: str
     path = project_config_path(project) if cfg_scope_project else user_config_path()
     if target == PLANNER:
         section = "orchestrator"
+    elif target == REVIEWER:
+        if Config.load(project).reviewer_is_planner:
+            raise FlowError("the planner reviews; change the planner's thinking instead")
+        section = REVIEWER
     else:
         materialize_seed(project)
         section = f"workers.{target}"

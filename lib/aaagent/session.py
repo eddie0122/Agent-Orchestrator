@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import attach, dispatch, gitutil, sessions, tasks, worker
 from .backends import find_claude
-from .config import ROOT, Config
+from .config import REVIEWER, ROOT, Config
 
 AAAGENT_BIN = ROOT / "bin" / "aaagent"
 HOOKS = ROOT / "claude" / "hooks"
@@ -35,7 +35,7 @@ def orchestrator_prompt(cfg: Config, project: Path | None = None) -> str:
     reviewer = cfg.reviewer_worker
     if reviewer:
         note = (ROOT / "prompts" / "orchestrator-worker-review.md").read_text()
-        text += note.replace("{reviewer}", reviewer).replace("{model}", cfg.worker_model(reviewer))
+        text += note.replace("{model}", cfg.worker_label(REVIEWER))
     pending = unfinished_tasks(project, cfg) if project else []
     if pending:
         text += ("\n## Unfinished work from an earlier chat\n"
@@ -197,6 +197,7 @@ def launch(start: Path, first_prompt: str | None = None, use_tmux: bool = True,
     finally:
         for name in names:
             worker.stop(project, name)
+        worker.stop(project, REVIEWER)      # ignore False: only runs when a model reviews
 
 
 def _write_chat_script(project: Path, claude_cmd: list[str], env: dict, close: str) -> Path:

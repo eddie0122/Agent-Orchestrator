@@ -14,10 +14,28 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__, sessions, tasks, worker
-from .config import Config
+from .config import REVIEWER, Config
 from .tasks import FINAL_STATUSES, FlowError
 
 PHASE_VERB = {"implement": "implementing", "fix": "fixing", "review": "reviewing", "commit": "committing"}
+
+
+def _review_entry(project: Path, cfg: Config) -> dict:
+    """The `review` entry of status_data: the reviewer as it would appear among the workers."""
+    if cfg.reviewer_is_planner:
+        return {"planner_reviews": True, "model": "planner", "thinking": "", "backend": None,
+                "pid": None, "state": "stopped", "job": None, "queued": 0,
+                "log": str(worker.log_file(project, REVIEWER))}
+    pid = worker.worker_pid(project, REVIEWER)
+    job = worker.running_job(project, REVIEWER)
+    queued = (len(worker.pending_jobs(project, REVIEWER))
+              if worker.queue_dir(project, REVIEWER).is_dir() else 0)
+    return {"planner_reviews": False, "model": cfg.reviewer_model,
+            "thinking": cfg.reviewer_thinking, "backend": cfg.reviewer_backend,
+            "pid": pid,
+            "state": "running" if job else ("idle" if pid else "stopped"),
+            "job": {k: job[k] for k in ("task", "phase", "round", "created")} if job else None,
+            "queued": queued, "log": str(worker.log_file(project, REVIEWER))}
 
 
 def status_data(project: Path, cfg: Config) -> dict:
@@ -76,7 +94,8 @@ def status_data(project: Path, cfg: Config) -> dict:
         })
     return {"version": __version__, "project": str(project),
             "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking},
-            "reviewer": cfg.reviewer_worker or "orchestrator",
+            "reviewer": cfg.reviewer,
+            "review": _review_entry(project, cfg),
             "workers": workers,
             "tasks": out_tasks, "active_task": tasks.active_task(project),
             "sessions": sessions.list_sessions(project, limit=30),
@@ -174,10 +193,16 @@ def planner_summary(p: dict) -> str:
 
 
 def reviewer_summary(data: dict) -> str:
-    """Who reviews each round: `planner (the chat)` or `worker1 · glm-5.3-flash`."""
+    """Who reviews each round: `planner (the chat)` or `reviewer · <model>[ · <thinking>]`."""
     name = str(data.get("reviewer") or "orchestrator")
     if name == "orchestrator":
         return "planner (the chat)"
+    review = data.get("review")
+    if isinstance(review, dict) and review.get("model"):
+        text = f"reviewer · {str(review['model']).rsplit('/', 1)[-1]}"
+        if review.get("thinking"):
+            text += f" · {review['thinking']}"
+        return text
     worker = next((w for w in data.get("workers") or [] if w.get("name") == name), None)
     model = str((worker or {}).get("model") or "")
     return f"{name} · {model.rsplit('/', 1)[-1]}" if model else name

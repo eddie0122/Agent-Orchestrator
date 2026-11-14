@@ -20,15 +20,19 @@ from pathlib import Path
 
 from . import backends
 from .backends import BOLD, DIM, GREEN, RED, RESET, color_enabled, paint
-from .config import Config, infer_backend
+from .config import REVIEWER, Config, infer_backend
 
 POLL_SECONDS = 1.0
 # One colour per worker, picked by its position in the configured worker list.
 COLOR_PALETTE = ["\033[36m", "\033[35m", "\033[33m", "\033[34m", "\033[32m", "\033[91m"]
+# The reviewer is not a slot in that list: it keeps a fixed bright yellow.
+REVIEWER_COLOR = "\033[93m"
 
 
 def worker_color(cfg: Config, name: str) -> str:
     """The ANSI colour of a worker's `[name]` tag: its index in the worker list."""
+    if name == REVIEWER:
+        return REVIEWER_COLOR
     names = cfg.worker_names()
     if name in names:
         return COLOR_PALETTE[names.index(name) % len(COLOR_PALETTE)]

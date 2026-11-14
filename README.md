@@ -37,16 +37,21 @@ Claude workers use the same Claude subscription and usage limit as the chat. `wo
 
 ### Who reviews
 
-By default the chat (the planner) reviews every round: you run `aaagent dispatch` for the implement/fix round, read the report, write `review-N.md`, and dispatch again. Set a worker as the reviewer and one dispatch does the whole loop by itself:
+By default the planner reviews every round itself: you run `aaagent dispatch` for the implement/fix round, read the report, write `review-N.md`, and dispatch again. Give the reviewer its own model and one dispatch does the whole loop by itself:
 
 ```toml
-[flow]
-reviewer = "worker2"      # a worker name, or "orchestrator" (the default) for the chat
+[reviewer]
+model = "sonnet"          # a Claude model name runs on headless Claude Code
+# model = "opencode-go/glm-5.3-flash"   # an opencode id (provider/model) runs on opencode
+# thinking = "high"       # claude --effort, or the opencode model variant
+# model = "planner"       # the default: the chat (the planner) reviews each round itself
 ```
 
-`aaagent reviewer worker2` sets it (add `--project` to write this project's config only), `aaagent reviewer orchestrator` gives the job back to the chat, and `aaagent reviewer` shows the current one. In the dashboard press `v`, in VSCode run **Select Reviewer…**.
+The reviewer is a role of its own, with its own model, thinking level, queue, daemon and log (`.aaagent/workers/reviewer.log`, `aaagent logs reviewer`) — never one of the worker slots. Like a worker, it runs on headless Claude Code when its model is a Claude name and on opencode when the id has a slash.
 
-With a worker reviewer, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails twice (or writes no valid verdict), the round comes back to the chat to review itself.
+`aaagent reviewer sonnet` sets it (add `--project` to write this project's config only), `aaagent reviewer opencode-go/glm-5.3-flash --thinking high` sets model and level, `aaagent reviewer worker2` copies worker2's model and thinking into `[reviewer]` (a snapshot: changing worker2 later does not change the reviewer), `aaagent reviewer planner` gives the job back to the chat, and `aaagent reviewer` shows the current one. `aaagent model reviewer <model>` and `aaagent thinking reviewer <level>` work too. In the dashboard press `v`, in VSCode run **Select Reviewer…** (picking a worker copies its model). An old `[flow] reviewer = "<worker>"` is still honoured until you set the reviewer again, which clears that key in the written file.
+
+With a reviewer model, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails (or writes no valid verdict) it is retried once on the reviewer itself; if that fails too, the round comes back to the chat to review itself.
 
 ## Install
 
@@ -86,7 +91,7 @@ Other handy commands:
 
 - **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
 - **Select Thinking Level…** (Workers view title, or right-click a worker → **Change Thinking Level…**): set the planner's reasoning effort or a worker's model variant, for all projects or just this one.
-- **Select Reviewer…** (Workers view title): choose who reviews each round: the planner (the chat) or a worker, for all projects or just this one.
+- **Select Reviewer…** (Workers view title): choose who reviews each round: the planner (the chat) or a worker (whose model is then copied to the reviewer), for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
 - **Attach Image…** (Sessions view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
 - **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.
@@ -181,9 +186,9 @@ Opus runs these itself. They are also useful for you:
 | `aaagent wait <task>` | reattach to a running job |
 | `aaagent abandon <task>` | drop a task (its uncommitted changes stay) |
 | `aaagent stop` | stop this project's workers |
-| `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner and worker models |
-| `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner and worker thinking levels |
-| `aaagent reviewer [<name>]` | show or set who reviews each round: orchestrator (the chat) or a worker |
+| `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner, reviewer and worker models |
+| `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner, reviewer and worker thinking levels |
+| `aaagent reviewer [<model\|planner\|worker>] [--thinking LEVEL]` | show or set who reviews each round: a model with its own job, or planner (the chat); a worker name copies its model |
 | `aaagent --model <name>` | start the chat with another planner model for this chat only |
 | `aaagent --session <id>` | reopen a chat session (an id or id prefix from `aaagent sessions`) |
 | `aaagent doctor` | check the installation |
@@ -204,7 +209,7 @@ Code enforces these; they are not just prompt instructions:
 - **Nothing is pushed.** Pushing is up to you.
 - **One active task per working tree**, because workers share the files.
 - **Your own uncommitted changes stay out of the commit.** Files that were already modified when a task started are listed and excluded from its commit.
-- **Escalation:** a failed job is retried once on the fallback worker. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
+- **Escalation:** a failed implement/fix job is retried once on the fallback worker; a failed review is retried once on the reviewer itself, then the round goes back to the planner. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
 
 These are permission rules, not a sandbox. Workers run as your user, so treat this like giving a junior developer a shell on the machine.
 
@@ -224,6 +229,10 @@ thinking = "high"                 # opencode model variant, e.g. low | high | ma
 
 [workers.worker3]                 # add a worker
 model = "opencode-go/kimi-k3"
+
+[reviewer]
+model = "planner"                 # or a Claude model name / opencode id for a reviewer job
+thinking = ""                     # claude --effort or the opencode variant; empty = default
 
 [flow]
 default_worker = "worker1"

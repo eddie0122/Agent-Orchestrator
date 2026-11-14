@@ -57,9 +57,20 @@ max_review_rounds = 3
 fallback_after_failed_reviews = 2
 # Kill a worker job that runs longer than this.
 job_timeout_minutes = 30
-# Who reviews each round: "orchestrator" (the chat) or a worker name such as "worker2".
-# With a worker, one dispatch runs implement → review → fix … until approval.
-reviewer = "orchestrator"
+# Who reviews each round is configured in [reviewer] below. (An old
+# `reviewer = "<worker>"` value here still works; setting the reviewer again clears it.)
+
+[reviewer]
+# Who reviews each round.
+# "planner" = the chat (the planner) reviews each round itself.
+# A model = a separate reviewer runs each review as a job: a Claude model name
+# (sonnet, opus, …) runs on headless Claude Code, an opencode id (provider/model) on opencode.
+# With a reviewer model, one dispatch runs implement → review → fix … until approval;
+# the planner still gives the final go for the commit.
+model = "planner"
+# Thinking level: claude --effort for a Claude model, the opencode variant otherwise. Empty = default.
+thinking = ""
+# backend = "opencode" | "claude"   # optional; inferred from the model like workers
 
 [git]
 # false = .aaagent/ is listed in .git/info/exclude and never committed.

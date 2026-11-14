@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from . import backends, gitutil, tasks, worker
-from .config import ROOT, Config
+from .config import REVIEWER, ROOT, Config
 from .tasks import FlowError, Step, Task
 
 PROMPTS = ROOT / "prompts"
@@ -62,8 +62,9 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
 def _enqueue(project: Path, task: Task, step: Step, cfg: Config, retry_of: str | None = None) -> dict:
     state = task.load()
     backend = cfg.worker_backend(step.worker)
-    session_key = f"{step.worker}:review" if step.phase == "review" else step.worker
-    session = None if step.phase == "commit" else state.get("sessions", {}).get(session_key)
+    # Review jobs keep their own session under the reviewer's name; every other phase
+    # keeps one per worker.
+    session = None if step.phase == "commit" else state.get("sessions", {}).get(step.worker)
     if not backends.session_fits(backend, session):
         session = None
     if step.phase == "commit":
@@ -181,8 +182,7 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
     state = task.load()
     phase, rnd, who = job["phase"], job["round"], job["worker"]
     if result.get("session") and phase != "commit":
-        session_key = f"{who}:review" if phase == "review" else who
-        state.setdefault("sessions", {})[session_key] = result["session"]
+        state.setdefault("sessions", {})[who] = result["session"]
     tok = state.setdefault("tokens", {}).setdefault(who, {"input": 0, "output": 0})
     for k in ("input", "output"):
         tok[k] += int((result.get("tokens") or {}).get(k, 0))
@@ -209,20 +209,27 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         task.log_event(f"{phase} round {rnd} failed", worker=who, error=error)
         print(f"✗ {phase} round {rnd} by {who} failed after {mins:.1f} min: {error}")
         print(f"  log: {task.rel(Path(job['log']))}")
+        if phase == "review":
+            # A review never falls back to a worker: retry once on the reviewer itself,
+            # then hand the round back to the planner.
+            if not job.get("retry_of"):
+                print(f"→ retrying on the reviewer ({cfg.worker_label(who)})", flush=True)
+                step = Step(phase, rnd, who, reason=f"{who} failed")
+                task.update(current_job=None, status="retrying")
+                return _enqueue(project, task, step, cfg, retry_of=job["id"])
+            task.update(current_job=None, status="awaiting_review", review_failed_round=rnd)
+            task.log_event(f"review round {rnd} handed to the planner", worker=who)
+            print(f"The reviewer could not review round {rnd}. Review it yourself: read the report, "
+                  f"inspect `aaagent diff {task.id}`, write {task.rel(task.review(rnd))} with "
+                  f"`verdict: approved` or `verdict: changes_requested`, and run "
+                  f"`aaagent dispatch {task.id}`.")
+            return None
         alt = cfg.alternate(who)
         if alt and not job.get("retry_of"):
             print(f"→ retrying with {alt} ({cfg.worker_label(alt)})", flush=True)
             step = Step(phase, rnd, alt, switched=True, reason=f"{who} failed")
             task.update(current_job=None, status="retrying")
             return _enqueue(project, task, step, cfg, retry_of=job["id"])
-        if phase == "review":
-            task.update(current_job=None, status="awaiting_review", review_failed_round=rnd)
-            task.log_event(f"review round {rnd} handed to the orchestrator", worker=who)
-            print(f"The reviewer could not review round {rnd}. Review it yourself: read the report, "
-                  f"inspect `aaagent diff {task.id}`, write {task.rel(task.review(rnd))} with "
-                  f"`verdict: approved` or `verdict: changes_requested`, and run "
-                  f"`aaagent dispatch {task.id}`.")
-            return None
         task.update(current_job=None, status="failed")
         print(f"Task {task.id} is stopped. Read the log above, then fix the plan and "
               f"`aaagent dispatch {task.id}` again, or tell the user.")
@@ -244,7 +251,8 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         verdict = task.verdict(rnd)
         task.update(current_job=None, status=verdict, review_failed_round=None)
         task.log_event(f"review round {rnd}: {verdict}", worker=who)
-        print(f"✓ review round {rnd} by {who} in {mins:.1f} min: {verdict.replace('_', ' ')}")
+        print(f"✓ review round {rnd} by {who} ({cfg.worker_label(who)}) in {mins:.1f} min: "
+              f"{verdict.replace('_', ' ')}")
         print(f"  review: {task.rel(task.review(rnd))}")
         if verdict == "approved":
             print(f"Next: the reviewer approved round {rnd}. Read the review and the report, look "
@@ -262,7 +270,7 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
     print("  changes since task start:")
     print(gitutil.diff_stat(project, state.get("base_commit")))
     if cfg.reviewer_worker:
-        print(f"Next: {cfg.reviewer_worker} reviews round {rnd} "
+        print(f"Next: the reviewer ({cfg.worker_label(REVIEWER)}) reviews round {rnd} "
               f"(`aaagent dispatch {task.id}` continues if this command was interrupted).")
     else:
         print(f"Next: read the report, inspect `aaagent diff {task.id}`, re-run the validation, then write "

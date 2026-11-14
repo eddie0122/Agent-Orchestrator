@@ -583,13 +583,16 @@ class Dashboard:
         self.ui.picker = Picker("save where?", items, action=action)
 
     def pick_reviewer(self) -> None:
-        """Who reviews each round: the planner (the chat), or one of the workers."""
+        """Who reviews each round: the planner (the chat), or a worker whose model it copies."""
         cfg = Config.load(self.project)
-        current = cfg.reviewer_worker or models.ORCHESTRATOR
+        planner_reviews = cfg.reviewer_is_planner
         items = [("planner (the chat)", models.ORCHESTRATOR,
-                  "current" if current == models.ORCHESTRATOR else "")]
+                  "current" if planner_reviews else "")]
         for name in cfg.worker_names():
-            items.append((name, name, "current" if name == current else cfg.worker_model(name)))
+            model = cfg.worker_model(name)
+            # The reviewer may be a copy of a worker's model: mark that worker.
+            here = not planner_reviews and cfg.reviewer_model == model
+            items.append((name, name, "current" if here else model))
         self.ui.picker = Picker("who reviews each round?", items, action=("reviewer_pick",))
 
     # -- drawing ------------------------------------------------------------------
