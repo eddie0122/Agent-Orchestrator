@@ -105,7 +105,11 @@ class TasksProvider {
   getTreeItem(node) {
     if (node.type === "task") {
       const t = node.task;
-      const expanded = !model.isFinal(t) && t.id === (this.store.data && this.store.data.active_task);
+      const data = this.store.data || {};
+      const active = (Array.isArray(data.active_tasks) && data.active_tasks.length)
+        ? data.active_tasks
+        : (data.active_task ? [data.active_task] : []);
+      const expanded = !model.isFinal(t) && active.includes(t.id);
       return toTreeItem(model.taskItem(t), expanded
         ? vscode.TreeItemCollapsibleState.Expanded
         : vscode.TreeItemCollapsibleState.Collapsed);

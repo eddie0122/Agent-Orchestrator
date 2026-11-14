@@ -399,7 +399,10 @@ function statusBar(data) {
   const tasks = data.tasks || [];
   const running = tasks.find((t) => t.status === "running" || t.status === "retrying");
   const needs = tasks.find((t) => t.attention && !isFinal(t));
-  const active = tasks.find((t) => t.id === data.active_task);
+  const activeIds = (Array.isArray(data.active_tasks) && data.active_tasks.length)
+    ? data.active_tasks
+    : (data.active_task ? [data.active_task] : []);
+  const active = tasks.find((t) => activeIds.includes(t.id));
   let text = "$(hubot) aaagent";
   if (running) {
     text = `$(sync~spin) aaagent: ${String(running.number).padStart(3, "0")} ${taskSummary(running)}`;

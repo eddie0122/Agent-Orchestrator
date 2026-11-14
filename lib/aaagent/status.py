@@ -93,14 +93,16 @@ def status_data(project: Path, cfg: Config) -> dict:
             "commit": state.get("commit"), "created": state.get("created"),
             "session": state.get("chat_session"),
             "updated": task.state_file.stat().st_mtime if task.state_file.exists() else None,
-            "path": str(task.path), "files": files,
+            "path": str(task.path), "files": files, "scope": task.scope(),
         })
+    active = tasks.active_tasks(project)
     return {"version": __version__, "project": str(project),
             "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking},
             "reviewer": cfg.reviewer,
             "review": _review_entry(project, cfg),
             "workers": workers,
-            "tasks": out_tasks, "active_task": tasks.active_task(project),
+            "tasks": out_tasks, "active_task": active[0] if active else None,
+            "active_tasks": active,
             "sessions": sessions.list_sessions(project, limit=30),
             "current_session": sessions.current_session(project)}
 

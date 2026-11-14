@@ -6,6 +6,7 @@ LATEST REPORT: {report}
 Steps:
 1. Run `git status` and `git diff` to see the changes. Read the plan and the report so you can describe the change accurately.
 2. Stage only the files that belong to this task, by explicit path with `git add <path> ...`. Never stage anything inside .aaagent/. Do not stage these files, which already had uncommitted changes before the task started: {preexisting}
+   {scope_note}
 3. Commit with `git commit -m "<subject>" -m "<body>"`:
    - Subject: conventional-commit style `type(scope): summary`, imperative mood, at most 72 characters.
    - Body: a few short bullet points saying what changed and why.{trailer}

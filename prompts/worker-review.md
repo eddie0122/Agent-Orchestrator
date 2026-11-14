@@ -7,7 +7,8 @@ EARLIER ROUNDS (reports and reviews, oldest first): {history}
 
 Steps:
 1. Read the plan completely, then the report. If earlier rounds exist, read them too, and check that every required change of the last review was really addressed.
-2. Look at the whole change since the task started: `git status --short`, `git diff {base}`, and read every new (untracked) file `git status` lists. Ignore `.aaagent/`. These files had uncommitted changes before the task started and are not part of it: {preexisting}
+2. Look at the whole change since the task started: `git status --short -- {pathspec}`, `git diff {base} -- {pathspec}`, and read every new (untracked) file `git status` lists. Ignore `.aaagent/`. These files had uncommitted changes before the task started and are not part of it: {preexisting}
+   {scope_note}
 3. Re-run the plan's validation commands yourself. Do not trust the report's claims.
 4. Check every "Done when" criterion of the plan, and look for bugs, missing requirements and changes outside the plan's scope.
 5. Do not modify, create or delete any file except your review file. Never run git commit, git push, git stash, git reset, git rebase, git clean, or switch branches.

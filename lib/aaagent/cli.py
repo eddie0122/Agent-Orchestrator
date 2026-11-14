@@ -311,10 +311,14 @@ def cmd_new(args) -> int:
     if state["preexisting_dirty"]:
         print("warning: these files already had uncommitted changes and will be kept out of the "
               f"task's commit: {', '.join(state['preexisting_dirty'])}")
-    current = tasks.active_task(project)
-    if current:
-        print(f"note: task {current} is still in progress; it must be committed or abandoned "
-              f"before {task.id} can be dispatched.")
+    active = tasks.active_tasks(project)
+    if active:
+        who = active[0] if len(active) == 1 else ", ".join(active)
+        noun = "task" if len(active) == 1 else "tasks"
+        verb = "is" if len(active) == 1 else "are"
+        print(f"note: {noun} {who} {verb} in progress. To run {task.id} at the same time, give "
+              f"both plans a files: list that does not overlap; otherwise it waits until {who} "
+              f"{verb} committed or abandoned.")
     return 0
 
 
@@ -356,6 +360,9 @@ def cmd_status(args) -> int:
             label += " [claude]"
         print(f"  {'reviewer':<9} {label:<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
               f"{doing}{f', {queued} queued' if queued else ''}")
+    active = tasks.active_tasks(project)
+    if len(active) > 1:
+        print(f"active: {', '.join(active)}")
     all_tasks = tasks.all_tasks(project)
     if not args.all:
         all_tasks = [t for t in all_tasks if t.load().get("status") not in tasks.FINAL_STATUSES] or all_tasks[-3:]
@@ -420,7 +427,9 @@ def cmd_diff(args) -> int:
     project = project_root()
     task = tasks.find(project, args.task)
     base = task.load().get("base_commit")
-    text = gitutil.diff_stat(project, base) if args.stat else gitutil.full_diff(project, base)
+    paths = task.pathspecs()
+    text = (gitutil.diff_stat(project, base, paths) if args.stat
+            else gitutil.full_diff(project, base, paths))
     print(text if text.strip() else "(no changes)")
     return 0
 

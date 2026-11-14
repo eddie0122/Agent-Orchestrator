@@ -488,8 +488,10 @@ class Dashboard:
         self.loaded_at = time.time()
         if self.first_load:
             self.first_load = False
-            if new.get("active_task"):
-                self.ui.expanded.add(new["active_task"])
+            active = new.get("active_tasks") or (
+                [new["active_task"]] if new.get("active_task") else [])
+            for task_id in active:
+                self.ui.expanded.add(task_id)
 
     # -- actions ------------------------------------------------------------------
     def act(self, action: tuple) -> bool:
@@ -508,7 +510,8 @@ class Dashboard:
                 self.ui.view = View(action[2], text.expandtabs(4).splitlines() or ["(empty)"])
             elif name == "diff":
                 task = tasks.find(self.project, action[1])
-                text = gitutil.full_diff(self.project, task.load().get("base_commit"))
+                text = gitutil.full_diff(self.project, task.load().get("base_commit"),
+                                         task.pathspecs())
                 lines = text.expandtabs(4).splitlines() or ["(no changes)"]
                 self.ui.view = View(f"{task.id} / changes since the task started", lines, "diff")
             elif name == "abandon":

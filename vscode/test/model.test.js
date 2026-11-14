@@ -363,6 +363,14 @@ test("statusBar prefers running work, then tasks needing the user", () => {
   assert.strictEqual(model.statusBar(needs).text, "$(warning) aaagent: 004 needs you");
   assert.match(model.statusBar(needs).tooltip, /^planner: opus\n/);
   assert.match(model.statusBar(needs).tooltip, /workers up: deepseek/);
+  const single = { workers, active_task: "004-health",
+    tasks: [task({ status: "awaiting_review", round: 2 })] };
+  assert.strictEqual(model.statusBar(single).text, "$(hubot) aaagent: 004 in review (round 2)");
+  const parallel = { workers, active_tasks: ["004-health", "005-x"], tasks: [
+    task({ id: "005-x", number: 5, status: "awaiting_review", round: 1 }),
+    task({ status: "awaiting_review", round: 2 }),
+  ] };
+  assert.strictEqual(model.statusBar(parallel).text, "$(hubot) aaagent: 005 in review (round 1)");
 });
 
 test("transitions notify on commit, attention, and finished rounds; first load is silent", () => {

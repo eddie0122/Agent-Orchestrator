@@ -203,6 +203,25 @@ Opus runs these itself. They are also useful for you:
 
 Task numbers can be short: `aaagent diff 3` means `003-…`.
 
+### Parallel tasks
+
+Several tasks can run at the same time in one working tree when their plans declare disjoint files. A plan's frontmatter lists everything the task may change:
+
+```markdown
+---
+task: 020-move-the-health-check
+worker:            # optional
+files: lib/aaagent/health.py, tests/test_health.py, docs/
+---
+```
+
+- Entries are repo-relative. `dir/` means everything below that directory; `*`, `?` and `[` make a glob (`lib/aaagent/*.py`). Absolute paths, `..` and `.aaagent/` are refused.
+- `aaagent dispatch` lets a task start only when no other active task's `files:` overlap its own. Overlapping tasks, or a task without `files:` while another is active, are refused with a message that names the other task. A task without `files:` keeps the old behaviour: it needs the working tree to itself.
+- Disjoint tasks go to different workers when one is free: if the default worker is busy with another task, dispatch picks the first idle worker. Fix rounds stay on the task's own worker.
+- `aaagent diff`, the review prompt and the commit job only look at the task's declared files, and a round that changes files outside them is reported as a warning (the reviewer decides what to do).
+- Commits never run at the same time: a task waits while another task is committing, so the shared git index is never touched by two workers at once.
+- Your own uncommitted changes are still kept out of the commits; they are refreshed when the task is first dispatched.
+
 ### Images
 
 The chat runs on the machine where aaagent runs, so an image has to be on that machine first: copy it with `scp`, or drag it into VSCode's Explorer. Then run `aaagent attach shot.png`; it types `@.aaagent/attachments/…` into the chat, and Opus reads the image. You can also type `@path/to/image.png` in the chat yourself. A path from another computer (for example `/Users/me/Downloads/band.jpg` over Remote-SSH) is not a file on the server, so Opus cannot open it: it tells you to attach the image instead, and in VSCode dropping it on the chat with Shift copies it for you. On a desktop Linux session, `xclip -selection clipboard -t image/png -o | aaagent attach -` attaches the clipboard. Attachments live in `.aaagent/attachments/`: they are never committed, and you can delete them at any time.
@@ -215,7 +234,7 @@ Code enforces these; they are not just prompt instructions:
 - **Implementing workers cannot commit.** `aaagent-worker` denies `git commit/push/reset/rebase/clean/stash/checkout/switch`, `sudo`, destructive `docker` commands, files outside the project, `.env` files, and edits to plans and reviews.
 - **The commit step happens only after approval.** `aaagent dispatch` sends a commit job only when the latest review says `verdict: approved`. The `aaagent-committer` agent cannot edit files and can only run git status/diff/log/add/commit; `--amend` and `add -A`/`add .` are denied.
 - **Nothing is pushed.** Pushing is up to you.
-- **One active task per working tree**, because workers share the files.
+- **Parallel tasks only with disjoint `files:`.** Several tasks may be active in one working tree, but only when every plan declares the files it may change and those lists do not overlap; anything else keeps the working tree to one task.
 - **Your own uncommitted changes stay out of the commit.** Files that were already modified when a task started are listed and excluded from its commit.
 - **Escalation:** a failed implement/fix job is retried once on the fallback worker; a failed review is retried once on the reviewer itself, then the round goes back to the planner. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
 
@@ -266,6 +285,7 @@ commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@examp
   workers/          worker pids and logs
   attachments/      images from `aaagent attach`
   fetch/            image copy requests between the chat and VSCode
+  active-tasks.json which tasks are running in this working tree now
   chat.json         the last chat's session id, for `aaagent -c`
   sessions.json     the chat sessions and the tasks each one created
   chat-pane         the tmux pane of the chat, for `aaagent attach`

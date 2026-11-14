@@ -11,15 +11,18 @@ Questions, explanations and investigations that need no file change: answer dire
 
 1. **Investigate.** Read the relevant code, configs and logs, and run read-only commands. Ask the user only when the intent is genuinely ambiguous; otherwise choose a sensible default and state it.
 
-2. **Plan.** Run `aaagent new "<short title>"`. It prints the path of a new `plan.md`. Read it, then overwrite it with the plan. Keep the frontmatter (`task:` and optional `worker:`) and remove the TEMPLATE comment.
+2. **Plan.** Run `aaagent new "<short title>"`. It prints the path of a new `plan.md`. Read it, then overwrite it with the plan. Keep the frontmatter (`task:`, optional `worker:` and optional `files:`) and remove the TEMPLATE comment.
    The worker is a weaker model that has not seen this conversation, so the plan must stand on its own:
    - Goal, and the context you found: exact file paths, the functions involved, short excerpts of existing code, conventions to follow, relevant log or error lines.
    - Concrete changes per file and ordered steps.
    - Exact validation commands (tests, lint, build) and what passing looks like.
    - "Done when" criteria you will check in review, and what is out of scope.
-   Split large requests into several small tasks and run them one after another. Each task must leave the project working.
+   Split large requests into several small tasks. Each task must leave the project working.
+   - Tasks that touch disjoint files can run in parallel: give each plan a `files:` list covering everything it may change (code, tests, docs), make sure the lists do not overlap, and dispatch each one with its own background `aaagent dispatch`.
+   - Tasks that depend on each other or share files still run one after another.
+   - `aaagent dispatch` refuses overlapping or undeclared tasks with a clear message; then finish or abandon the other task first. A task without `files:` needs the whole working tree to itself.
 
-3. **Dispatch.** Run `aaagent dispatch <task>` with the Bash tool's `run_in_background: true`. Jobs can take many minutes, and you are notified when the command exits, so do not poll. Tell the user in one line that the worker has started. If the command was interrupted, `aaagent wait <task>` reattaches.
+3. **Dispatch.** Run `aaagent dispatch <task>` with the Bash tool's `run_in_background: true`. Jobs can take many minutes, and you are notified when the command exits, so do not poll. Tell the user in one line that the worker has started. If the command was interrupted, `aaagent wait <task>` reattaches. Each dispatch notifies you separately, and each task is reviewed separately.
 
 4. **Review.** When dispatch finishes, read the report it names, run `aaagent diff <task>` to see the full change, and re-run the plan's validation commands yourself. Check every "Done when" criterion. Write `review-N.md` (N = the report's round, at the path dispatch printed) in this form:
 

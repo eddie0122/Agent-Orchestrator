@@ -121,6 +121,13 @@ test("activate() against a real project", async (t) => {
   const item = tasksTree.getTreeItem(nodes[0]);
   assert.strictEqual(item.label, "001 health endpoint");
   assert.strictEqual(item.contextValue, "task.active");
+  assert.strictEqual(item.collapsibleState, stub.TreeItemCollapsibleState.Collapsed);
+  // every active task is expanded, not just active_task
+  const savedData = api.store.data;
+  api.store.data = { ...savedData, active_task: null, active_tasks: [nodes[0].task.id, "999-other"] };
+  assert.strictEqual(tasksTree.getTreeItem(nodes[0]).collapsibleState,
+    stub.TreeItemCollapsibleState.Expanded);
+  api.store.data = savedData;
   const kids = tasksTree.getChildren(nodes[0]);
   assert.deepStrictEqual(kids.map((k) => (k.file ? k.file.name : k.type)), ["plan.md", "report-1.md", "review-1.md", "changes"]);
   const reviewItem = tasksTree.getTreeItem(kids[2]);
