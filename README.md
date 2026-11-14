@@ -40,6 +40,8 @@ By default the chat (the planner) reviews every round: you run `aaagent dispatch
 reviewer = "glm"      # a worker name, or "orchestrator" (the default) for the chat
 ```
 
+`aaagent reviewer glm` sets it (add `--project` to write this project's config only), `aaagent reviewer orchestrator` gives the job back to the chat, and `aaagent reviewer` shows the current one. In the dashboard press `v`, in VSCode run **Select Reviewer…**.
+
 With a worker reviewer, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails twice (or writes no valid verdict), the round comes back to the chat to review itself.
 
 ## Install
@@ -80,6 +82,7 @@ Other handy commands:
 
 - **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
 - **Select Thinking Level…** (Workers view title, or right-click a worker → **Change Thinking Level…**): set the planner's reasoning effort or a worker's model variant, for all projects or just this one.
+- **Select Reviewer…** (Workers view title): choose who reviews each round: the planner (the chat) or a worker, for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
 - **Attach Image…** (Sessions view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
 - **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.
@@ -102,6 +105,7 @@ With tmux installed, `aaagent` opens one window: the Opus chat on the left and t
 ┌ Opus chat ─────────────────────┬ aaagent · my-project ─────────────────┐
 │                                │ WORKERS                               │
 │ > add a /health endpoint       │  planner                  opus · high │
+│                                │  reviewer          planner (the chat) │
 │                                │  deepseek          / fixing 003 r2    │
 │                                │  glm               waiting for a plan │
 │                                │ SESSIONS                              │
@@ -129,6 +133,7 @@ Dashboard keys:
 | `l` | choose whose output the bottom pane shows (default: whoever is working) |
 | `m` | change a model: the selected worker's or the planner's, or pick which one; type a name if it is not listed |
 | `t` | the same for a thinking level |
+| `v` | choose who reviews each round: the planner or a worker |
 | `a` | abandon the selected task, after a y/n question |
 | `o` | open the selected session in the chat pane, after a y/n question (shown for a session row in aaagent's tmux layout) |
 | `N` | start a new session (closes this chat; shown in aaagent's tmux layout) |
@@ -166,6 +171,7 @@ Opus runs these itself. They are also useful for you:
 | `aaagent stop` | stop this project's workers |
 | `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner and worker models |
 | `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner and worker thinking levels |
+| `aaagent reviewer [<name>]` | show or set who reviews each round: orchestrator (the chat) or a worker |
 | `aaagent --model <name>` | start the chat with another planner model for this chat only |
 | `aaagent --session <id>` | reopen a chat session (an id or id prefix from `aaagent sessions`) |
 | `aaagent doctor` | check the installation |

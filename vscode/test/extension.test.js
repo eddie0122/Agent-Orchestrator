@@ -247,6 +247,22 @@ test("activate() against a real project", async (t) => {
   assert.strictEqual(api.store.data.workers.find((w) => w.name === "deepseek").thinking, "max");
   assert.strictEqual(rec.treeViews["aaagent.workers"].description, "planner: sonnet · xhigh");
 
+  // Select Reviewer…: a worker reviewer, saved to this project only.
+  rec.answer = undefined;
+  rec.quickPicks = [
+    (items) => items.find((i) => i.reviewer === "glm"),
+    (items) => items.find((i) => i.project === true),
+  ];
+  await rec.commands.get("aaagent.selectReviewer")();
+  assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
+    /reviewer = "glm"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer: glm/.test(m)),
+    JSON.stringify(rec.messages));
+  await api.refresh();
+  assert.strictEqual(api.store.data.reviewer, "glm");
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description,
+    "planner: sonnet · xhigh · reviewer: glm");
+
   // Attach Image: one panel, reused on a second call, with a nonce CSP and the file button.
   const panelsBefore = rec.panels.length;
   await rec.commands.get("aaagent.attachImage")();

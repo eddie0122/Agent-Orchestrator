@@ -230,6 +230,36 @@ function thinkingChoices(info, target) {
   return [{ label: "Default", description: "the model's own setting", level: "default" }, ...entries];
 }
 
+/** Quick-pick entries for Select Reviewer: the planner (the chat), then every worker. */
+function reviewerChoices(data) {
+  const current = (data && data.reviewer) || "orchestrator";
+  const out = [{
+    label: "Planner (the chat)",
+    description: current === "orchestrator" ? "current" : "",
+    reviewer: "orchestrator",
+  }];
+  for (const w of (data && data.workers) || []) {
+    const model = w.model || "";
+    const here = w.name === current;
+    out.push({
+      label: w.name,
+      description: here ? `${model} · current` : model,
+      reviewer: w.name,
+    });
+  }
+  return out;
+}
+
+/** The Workers view description: the planner, plus the reviewer when a worker reviews. */
+function workersDescription(data) {
+  const planner = (data && data.planner) || {};
+  if (!planner.model) return undefined;
+  let text = `planner: ${planner.model}${planner.thinking ? ` · ${planner.thinking}` : ""}`;
+  const reviewer = (data && data.reviewer) || "orchestrator";
+  if (reviewer !== "orchestrator") text += ` · reviewer: ${reviewer}`;
+  return text;
+}
+
 function workerItem(w) {
   let description;
   let icon;
@@ -276,7 +306,8 @@ function statusBar(data) {
   }
   const up = (data.workers || []).filter((w) => w.state !== "stopped").map((w) => w.name);
   const planner = data.planner && data.planner.model ? `planner: ${data.planner.model}\n` : "";
-  const tooltip = `${planner}aaagent: ${up.length ? `workers up: ${up.join(", ")}` : "workers stopped"}\nClick to open the aaagent view`;
+  const reviewer = data.reviewer && data.reviewer !== "orchestrator" ? `reviewer: ${data.reviewer}\n` : "";
+  const tooltip = `${planner}${reviewer}aaagent: ${up.length ? `workers up: ${up.join(", ")}` : "workers stopped"}\nClick to open the aaagent view`;
   return { text, tooltip };
 }
 
@@ -284,6 +315,7 @@ function statusBar(data) {
 function transitions(prev, next) {
   if (!prev || !next) return [];
   const before = new Map((prev.tasks || []).map((t) => [t.id, t]));
+  const reviewer = next.reviewer || "orchestrator";
   const out = [];
   for (const t of next.tasks || []) {
     const old = before.get(t.id);
@@ -293,9 +325,11 @@ function transitions(prev, next) {
       out.push({ level: "info", task: t.id, message: `aaagent: ${label} committed${t.commit ? ` (${t.commit.slice(0, 7)})` : ""}.` });
     } else if (t.attention && t.attention !== old.attention) {
       const why = t.attention === "failed" ? "stopped after both workers failed" : "reached the review round limit";
-      out.push({ level: "warning", task: t.id, message: `aaagent: ${label} ${why}. Opus is waiting for your decision in the chat.` });
-    } else if (t.status === "awaiting_review" && old.status !== "awaiting_review") {
-      out.push({ level: "status", task: t.id, message: `aaagent: ${label}: worker finished round ${t.round}; Opus is reviewing.` });
+      out.push({ level: "warning", task: t.id, message: `aaagent: ${label} ${why}. The planner is waiting for your decision in the chat.` });
+    } else if (t.status === "approved" && old.status !== "approved") {
+      out.push({ level: "status", task: t.id, message: `aaagent: ${label}: approved by the reviewer in round ${t.round}; the planner commits next.` });
+    } else if (t.status === "awaiting_review" && old.status !== "awaiting_review" && reviewer === "orchestrator") {
+      out.push({ level: "status", task: t.id, message: `aaagent: ${label}: worker finished round ${t.round}; the planner is reviewing.` });
     }
   }
   return out;
@@ -378,6 +412,6 @@ function isImagePath(p) {
 module.exports = {
   visibleTasks, taskSummary, taskIcon, taskItem, fileItem, workerItem, statusBar, transitions,
   isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
-  thinkingTargets, thinkingChoices, ago, sessionItem, sessionChoices,
-  IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
+  thinkingTargets, thinkingChoices, reviewerChoices, workersDescription, ago, sessionItem,
+  sessionChoices, IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
 };

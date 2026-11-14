@@ -76,6 +76,7 @@ def status_data(project: Path, cfg: Config) -> dict:
         })
     return {"version": __version__, "project": str(project),
             "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking},
+            "reviewer": cfg.reviewer_worker or "orchestrator",
             "workers": workers,
             "tasks": out_tasks, "active_task": tasks.active_task(project),
             "sessions": sessions.list_sessions(project, limit=30),
@@ -172,6 +173,16 @@ def planner_summary(p: dict) -> str:
     return text
 
 
+def reviewer_summary(data: dict) -> str:
+    """Who reviews each round: `planner (the chat)` or `glm · glm-5.3-flash`."""
+    name = str(data.get("reviewer") or "orchestrator")
+    if name == "orchestrator":
+        return "planner (the chat)"
+    worker = next((w for w in data.get("workers") or [] if w.get("name") == name), None)
+    model = str((worker or {}).get("model") or "")
+    return f"{name} · {model.rsplit('/', 1)[-1]}" if model else name
+
+
 def file_summary(task: dict, f: dict) -> str:
     if f["kind"] == "plan":
         return "" if task.get("plan_written") else "being written"
@@ -257,10 +268,15 @@ def transitions(prev: dict | None, new: dict | None) -> list[dict]:
         elif t.get("attention") and t["attention"] != old.get("attention"):
             why = "stopped after both workers failed" if t["attention"] == "failed" else "reached the review round limit"
             out.append({"level": "warning", "task": t["id"],
-                        "message": f"{label} {why}; Opus is waiting for you in the chat"})
-        elif t["status"] == "awaiting_review" and old["status"] != "awaiting_review":
+                        "message": f"{label} {why}; the planner is waiting for you in the chat"})
+        elif t["status"] == "approved" and old["status"] != "approved":
             out.append({"level": "status", "task": t["id"],
-                        "message": f"{label}: round {t.get('round')} finished; Opus is reviewing"})
+                        "message": f"{label}: approved by the reviewer in round {t.get('round')}; "
+                                   "the planner commits next"})
+        elif (t["status"] == "awaiting_review" and old["status"] != "awaiting_review"
+              and (new.get("reviewer", "orchestrator") == "orchestrator")):
+            out.append({"level": "status", "task": t["id"],
+                        "message": f"{label}: round {t.get('round')} finished; the planner is reviewing"})
     return out
 
 
@@ -279,7 +295,7 @@ class Row:
 
     @property
     def selectable(self) -> bool:
-        return self.kind in ("planner", "worker", "session", "stask", "task", "file")
+        return self.kind in ("planner", "reviewer", "worker", "session", "stask", "task", "file")
 
 
 def visible_sessions(all_sessions: list[dict], keep: int = 5) -> tuple[list[dict], int]:
@@ -301,6 +317,8 @@ def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_f
     out = [Row("header:workers", "header", "WORKERS", style="header")]
     planner = data.get("planner") or {}
     out.append(Row("planner", "planner", "planner", planner_summary(planner), "normal", 1, planner))
+    out.append(Row("reviewer", "reviewer", "reviewer", reviewer_summary(data), "normal", 1,
+                   {"reviewer": data.get("reviewer") or "orchestrator"}))
     for w in data.get("workers") or []:
         style = "running" if w.get("state") == "running" else ("dim" if w.get("state") == "stopped" else "normal")
         out.append(Row(f"worker:{w['name']}", "worker", w["name"], worker_summary(w), style, 1, w))
@@ -334,7 +352,7 @@ def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_f
     out.append(Row("header:tasks", "header", "TASKS", style="header"))
     shown = visible_tasks(data.get("tasks") or [], keep_finished)
     if not shown:
-        out.append(Row("note:empty", "note", "none yet: ask Opus for a change in the chat", style="dim", indent=1))
+        out.append(Row("note:empty", "note", "none yet: ask for a change in the chat", style="dim", indent=1))
     for t in shown:
         mark = "▾" if t["id"] in expanded else "▸"
         out.append(Row(f"task:{t['id']}", "task", f"{mark} {task_label(t)}", task_summary(t),

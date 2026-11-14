@@ -12,6 +12,8 @@ from .tasks import FlowError
 
 PLANNER = "planner"
 PLANNER_ALIASES = {"planner", "orchestrator", "claude"}
+ORCHESTRATOR = "orchestrator"
+REVIEWER_ALIASES = {"orchestrator", "planner", "chat"}
 
 
 def resolve_target(cfg: Config, name: str) -> str:
@@ -108,6 +110,54 @@ def pick_interactive(cfg: Config, target: str, input_fn=input, print_fn=print) -
             continue
         return answer
     return None
+
+
+# -- who reviews each round ----------------------------------------------------
+
+def reviewer_choices(cfg: Config) -> list[str]:
+    """`orchestrator` (the chat reviews) and every configured worker."""
+    return [ORCHESTRATOR, *cfg.worker_names()]
+
+
+def resolve_reviewer(cfg: Config, name: str) -> str:
+    """A worker name wins over an alias; anything else is an error."""
+    name = (name or "").strip()
+    if name in cfg.worker_names():
+        return name
+    if name in REVIEWER_ALIASES:
+        return ORCHESTRATOR
+    raise FlowError(f"unknown reviewer '{name}': use orchestrator or a worker "
+                    f"({', '.join(cfg.worker_names())})")
+
+
+def reviewer_label(cfg: Config) -> str:
+    """`orchestrator (the chat reviews each round)` or `glm (opencode-go/glm-5.3-flash)`."""
+    worker = cfg.reviewer_worker
+    if worker:
+        return f"{worker} ({cfg.worker_model(worker)})"
+    return f"{ORCHESTRATOR} (the chat reviews each round)"
+
+
+def set_reviewer(project: Path, cfg_scope_project: bool, name: str) -> list[str]:
+    """Save `flow.reviewer` and return the lines to show the user."""
+    value = resolve_reviewer(Config.load(project), name)
+    path = project_config_path(project) if cfg_scope_project else user_config_path()
+    try:
+        set_toml_value(path, "flow", "reviewer", value)
+    except ValueError as exc:
+        raise FlowError(str(exc)) from exc
+    cfg = Config.load(project)
+    notes = [f"reviewer: {reviewer_label(cfg)}  (saved to {path})"]
+    if cfg.reviewer != value:
+        notes.append(f"note: {project_config_path(project)} overrides this; "
+                     "use --project to change it there")
+    notes.append("applies from the next dispatch")
+    if cfg.reviewer_worker:
+        notes.append("one dispatch now runs implement → review → fix until approval; "
+                     "the planner still commits")
+    notes.append("a chat that is already open learns this from dispatch's messages; "
+                 "new chats are told at the start")
+    return notes
 
 
 # -- thinking levels -----------------------------------------------------------

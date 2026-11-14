@@ -13,6 +13,7 @@ Chat with Claude Opus as planner and reviewer while opencode workers (DeepSeek, 
 - **Ask Opus…**: type a request; the chat starts if it is not running yet.
 - **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, for all projects or just this one.
 - **Select Thinking Level…** (Workers view title, or right-click a worker → **Change Thinking Level…**): set the planner's reasoning effort or a worker's model variant, for all projects or just this one.
+- **Select Reviewer…** (Workers view title): choose who reviews each round: the planner (the chat) or a worker, for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
 - **Attach Image…** (Sessions view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image goes to `.aaagent/attachments/` and its `@`-mention is typed into the chat input. Works over Remote-SSH; images up to 5 MB (PNG, JPEG, GIF, WebP). Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server.
 - **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.

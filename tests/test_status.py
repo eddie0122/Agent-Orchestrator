@@ -115,6 +115,26 @@ class SummaryTest(unittest.TestCase):
         self.assertTrue(status.is_busy(data([task(status="running")])))
         self.assertTrue(status.is_busy(data(workers=[{"name": "x", "state": "idle", "queued": 1}])))
 
+    def test_transitions_say_the_planner_and_stay_quiet_while_a_worker_reviews(self):
+        before = {"tasks": [task(status="running")]}
+        after = {"tasks": [task(status="awaiting_review", round=2)]}
+        ev = status.transitions(before, after)
+        self.assertIn("the planner is reviewing", ev[0]["message"])
+        self.assertNotIn("Opus", ev[0]["message"])
+
+        before_glm = {"reviewer": "glm", "tasks": [task(status="running")]}
+        after_glm = {"reviewer": "glm", "tasks": [task(status="awaiting_review", round=2)]}
+        self.assertEqual(status.transitions(before_glm, after_glm), [])
+
+        approved = {"reviewer": "glm", "tasks": [task(status="approved", round=2)]}
+        ev = status.transitions(before_glm, approved)
+        self.assertEqual(ev[0]["level"], "status")
+        self.assertEqual(ev[0]["message"],
+                         "004 health: approved by the reviewer in round 2; the planner commits next")
+
+        warning = status.transitions(before, {"tasks": [task(status="failed", attention="failed")]})
+        self.assertIn("the planner is waiting for you in the chat", warning[0]["message"])
+
 
 class SessionSummaryTest(unittest.TestCase):
     NOW = datetime(2026, 11, 13, 12, 0, 0, tzinfo=timezone.utc)
@@ -156,8 +176,9 @@ class RowsTest(unittest.TestCase):
         d = data([task(status="awaiting_review", round=1, files=FILES)])
         rows = status.rows(d)
         self.assertEqual([r.kind for r in rows],
-                         ["header", "planner", "worker", "worker", "header", "note", "header", "task"])
-        self.assertEqual(rows[4].text, "SESSIONS")
+                         ["header", "planner", "reviewer", "worker", "worker", "header", "note",
+                          "header", "task"])
+        self.assertEqual(rows[5].text, "SESSIONS")
         self.assertTrue(rows[-1].text.startswith("▸ 004 health"))
         rows = status.rows(d, {"004-health"})
         self.assertEqual([r.text for r in rows if r.kind == "file"], ["plan.md", "report-1.md", "review-1.md"])
@@ -170,9 +191,9 @@ class RowsTest(unittest.TestCase):
             session_(id="sess-old", short="sess-old", title="fix login", available=False,
                      last_active=recently(hours=3))])
         rows = status.rows(d)
-        self.assertEqual(rows[4].id, "header:sessions")
-        self.assertEqual(rows[4].text, "SESSIONS")
-        current, old = rows[5], rows[6]
+        self.assertEqual(rows[5].id, "header:sessions")
+        self.assertEqual(rows[5].text, "SESSIONS")
+        current, old = rows[6], rows[7]
         self.assertEqual(current.id, "session:sess-current")
         self.assertEqual(current.text, "▸ add a /health endpoint")
         self.assertEqual(current.detail, "open · 1 task")
@@ -181,13 +202,13 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(old.text, "· fix login")
         self.assertEqual(old.detail, "3 h ago · gone")
         self.assertEqual(old.style, "dim")
-        self.assertEqual(rows[7].text, "TASKS")
+        self.assertEqual(rows[8].text, "TASKS")
 
     def test_a_session_shows_its_tasks_when_expanded(self):
         d = data([task(status="awaiting_review", round=1, files=FILES)], sessions=[
             session_(current=True, tasks=["004-health", "999-unknown"])])
         rows = status.rows(d, {"session:sess-current"})
-        self.assertEqual(rows[5].text, "▾ add a /health endpoint")
+        self.assertEqual(rows[6].text, "▾ add a /health endpoint")
         stasks = [r for r in rows if r.kind == "stask"]
         self.assertEqual(len(stasks), 1, "unknown task ids are skipped")
         self.assertEqual(stasks[0].id, "stask:sess-current:004-health")
@@ -223,6 +244,20 @@ class RowsTest(unittest.TestCase):
         self.assertTrue(planner.selectable)
         self.assertEqual(planner.detail, status.planner_summary(d["planner"]))
         self.assertEqual(planner.detail, "opus")
+
+    def test_reviewer_row(self):
+        d = data()
+        row = status.rows(d)[2]
+        self.assertEqual(row.id, "reviewer")
+        self.assertEqual(row.kind, "reviewer")
+        self.assertEqual(row.text, "reviewer")
+        self.assertEqual(row.detail, "planner (the chat)")
+        self.assertEqual(row.indent, 1)
+        self.assertTrue(row.selectable)
+        d["reviewer"] = "glm"
+        self.assertEqual(status.rows(d)[2].detail, "glm · glm-5.3-flash")
+        d["reviewer"] = "missing"
+        self.assertEqual(status.rows(d)[2].detail, "missing")
 
     def test_no_tasks(self):
         self.assertEqual(status.rows(data())[-1].kind, "note")
@@ -367,6 +402,15 @@ class KeysTest(unittest.TestCase):
         self.ui.selected = "task:004-health"
         self.assertEqual(self.press("m"), ("model", None))
         self.assertEqual(self.press("t"), ("thinking", None))
+
+    def test_reviewer_key_and_row(self):
+        self.assertEqual(self.press("v"), ("reviewer",))
+        self.ui.selected = "reviewer"
+        self.assertEqual(self.press(10), ("reviewer",))
+        self.assertEqual(self.press(curses.KEY_RIGHT), ("reviewer",))
+        self.ui.selected = "planner"
+        self.assertIsNone(self.press(10), "enter on the planner row still means nothing")
+        self.assertEqual(self.press("v"), ("reviewer",))
 
     def test_picker_moves_and_returns_the_value(self):
         self.ui.picker = tui.Picker("pick", [("a", "1", ""), ("b", "2", ""), ("c", "3", "")],
@@ -592,6 +636,31 @@ class ActTest(unittest.TestCase):
         self.assertIn("[orchestrator]", text)
         self.assertIn('model = "sonnet"', text)
         self.assertIn("planner model: sonnet", self.dash.ui.message)
+
+    def test_reviewer_picker_and_save(self):
+        self.assertTrue(self.dash.act(("reviewer",)))
+        picker = self.dash.ui.picker
+        self.assertEqual(picker.title, "who reviews each round?")
+        self.assertEqual([i[1] for i in picker.items], ["orchestrator", "deepseek", "glm"])
+        self.assertEqual([i[0] for i in picker.items], ["planner (the chat)", "deepseek", "glm"])
+        self.assertEqual(picker.items[0][2], "current")
+        self.assertEqual(picker.items[2][2], "opencode-go/glm-5.3-flash")
+        self.assertEqual(picker.action, ("reviewer_pick",))
+
+        self.dash.act(("reviewer_pick", "glm"))
+        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["user", "project"])
+        self.dash.act(("reviewer_save", "glm", "project"))
+        path = self.project / ".aaagent" / "config.toml"
+        self.assertTrue(path.is_file())
+        self.assertIn('reviewer = "glm"', path.read_text())
+        self.assertEqual(self.dash.data["reviewer"], "glm")
+        self.assertIn("reviewer: glm", self.dash.ui.message)
+
+    def test_reviewer_picker_marks_the_worker_that_reviews(self):
+        self.dash.act(("reviewer_save", "glm", "user"))
+        self.dash.act(("reviewer",))
+        self.assertEqual(self.dash.ui.picker.items[0][2], "")
+        self.assertEqual(self.dash.ui.picker.items[2][2], "current")
 
     def test_errors_go_to_the_message(self):
         self.dash.act(("model_save", "planner", "  ", "project"))

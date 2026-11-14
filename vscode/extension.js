@@ -117,10 +117,7 @@ function activate(context) {
     workers.refresh();
     sessions.refresh();
     tasks.refresh();
-    const planner = store.data && store.data.planner;
-    workersView.description = planner && planner.model
-      ? `planner: ${planner.model}${planner.thinking ? ` · ${planner.thinking}` : ""}`
-      : undefined;
+    workersView.description = model.workersDescription(store.data);
     sessionsView.description = terminals.chat() ? "open" : undefined;
     const sb = model.statusBar(store.data);
     statusItem.text = sb.text;
@@ -370,6 +367,30 @@ function activate(context) {
     else await vscode.window.showInformationMessage(text);
   }
 
+  /**
+   * Pick who reviews each round (the planner, or a worker) and save it user-wide or for
+   * this project.
+   */
+  async function selectReviewer() {
+    const p = project();
+    if (!p) return;
+    const choice = await vscode.window.showQuickPick(model.reviewerChoices(store.data || {}), {
+      placeHolder: "Who reviews each round?",
+      matchOnDescription: true,
+    });
+    if (!choice) return;
+    const scope = await vscode.window.showQuickPick([
+      { label: "All projects", description: "~/.config/aaagent/config.toml", project: false },
+      { label: "This project only", description: ".aaagent/config.toml", project: true },
+    ], { placeHolder: "Save where?" });
+    if (!scope) return;
+    const out = await cli.exec(p, ["reviewer", choice.reviewer, ...(scope.project ? ["--project"] : [])]);
+    const text = model.short(out, 300);
+    const notable = out.split("\n").some((line) => /^(warning|note):/.test(line.trim()));
+    if (notable) await vscode.window.showWarningMessage(text);
+    else await vscode.window.showInformationMessage(text);
+  }
+
   function command(id, fn) {
     sub(vscode.commands.registerCommand(id, async (...args) => {
       try {
@@ -415,6 +436,8 @@ function activate(context) {
   });
 
   command("aaagent.selectThinking", (node) => selectThinking(node));
+
+  command("aaagent.selectReviewer", () => selectReviewer());
 
   command("aaagent.changeWorkerThinking", async (node) => {
     const w = workerOf(node) || await pickWorker("Change the thinking level of which worker?");

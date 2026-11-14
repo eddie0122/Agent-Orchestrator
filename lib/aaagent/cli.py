@@ -16,7 +16,8 @@ from .config import ROOT, USER_CONFIG, Config
 from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "new", "dispatch", "wait", "status", "diff", "logs", "stop",
-            "abandon", "attach", "doctor", "version", "help", "model", "thinking", "sessions"}
+            "abandon", "attach", "doctor", "version", "help", "model", "thinking", "sessions",
+            "reviewer"}
 # Options of `start` that also work without the word: `aaagent -c`.
 START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model", "--session"}
 
@@ -142,6 +143,33 @@ def _set_or_pick_thinking(args, project: Path, cfg, target: str) -> int:
     return 0
 
 
+def cmd_reviewer(args) -> int:
+    project = project_root()
+    cfg = Config.load(project)
+    if args.json:
+        print(json.dumps({
+            "reviewer": cfg.reviewer_worker or models.ORCHESTRATOR,
+            "configured": cfg.reviewer,
+            "choices": models.reviewer_choices(cfg),
+            "workers": {name: {"model": cfg.worker_model(name),
+                               "backend": cfg.worker_backend(name)}
+                        for name in cfg.worker_names()},
+        }, indent=1))
+        return 0
+    if args.name:
+        print("\n".join(models.set_reviewer(project, args.project, args.name)))
+        return 0
+    print(f"reviewer: {models.reviewer_label(cfg)}")
+    if cfg.reviewer != models.ORCHESTRATOR and cfg.reviewer_worker is None:
+        print(f'warning: flow.reviewer = "{cfg.reviewer}" is not a configured worker, '
+              "so the chat reviews")
+    if sys.stdin.isatty():
+        answer = input(f"change to? (orchestrator/{'/'.join(cfg.worker_names())}, enter = none): ")
+        if answer.strip():
+            print("\n".join(models.set_reviewer(project, args.project, answer.strip())))
+    return 0
+
+
 def cmd_ui(args) -> int:
     project = project_root()
     session.init_project(project, Config.load(project))
@@ -199,6 +227,8 @@ def cmd_status(args) -> int:
             label += " [claude]"
         print(f"  {name:<9} {label:<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
               f"{doing}{f', {queued} queued' if queued else ''}")
+    if cfg.reviewer_worker:
+        print(f"reviewer: {cfg.reviewer_worker}")
     all_tasks = tasks.all_tasks(project)
     if not args.all:
         all_tasks = [t for t in all_tasks if t.load().get("status") not in tasks.FINAL_STATUSES] or all_tasks[-3:]
@@ -310,6 +340,9 @@ def cmd_doctor(args) -> int:
                            "install Claude Code or set workers.claude_bin")
         elif oc:
             good &= _check(model in model_list, f"worker {name}: {model}", "check `opencode models` and your config")
+    if cfg.reviewer != models.ORCHESTRATOR and cfg.reviewer_worker is None:
+        good &= _check(False, f"reviewer '{cfg.reviewer}' is a configured worker",
+                       "run: aaagent reviewer orchestrator (or name a worker)")
     if oc:
         agents_dir = Path.home() / ".config" / "opencode" / "agents"
         for agent in (cfg.implement_agent, cfg.commit_agent, cfg.review_agent):
@@ -443,6 +476,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--project", action="store_true",
                    help="write <project>/.aaagent/config.toml instead of the user config")
     s.set_defaults(func=cmd_thinking)
+
+    s = sub.add_parser("reviewer", help="show or change who reviews each round (the chat or a worker)")
+    s.add_argument("name", nargs="?", help="orchestrator or a worker name")
+    s.add_argument("--json", action="store_true", help="machine-readable reviewer and choices")
+    s.add_argument("--project", action="store_true",
+                   help="write <project>/.aaagent/config.toml instead of the user config")
+    s.set_defaults(func=cmd_reviewer)
 
     s = sub.add_parser("version")
     s.set_defaults(func=lambda a: print(__version__) or 0)

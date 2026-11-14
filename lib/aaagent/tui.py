@@ -36,6 +36,7 @@ HELP = [
     ("l", "switch whose output is shown below"),
     ("m", "change a model: the selected worker's or planner's, or pick which"),
     ("t", "change a thinking level (same)"),
+    ("v", "choose who reviews each round: the planner or a worker"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
     ("o", "open the selected session in the chat pane"),
     ("N", "start a new chat session"),
@@ -135,7 +136,7 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
     """Apply one key press to the UI state. Returns an action for the caller to carry out:
     ("quit",) ("refresh",) ("open", path, title) ("diff", task_id) ("abandon", task_id)
     ("restore",) ("open_session", session_id) ("new_chat",) ("help",) ("model", target)
-    ("thinking", target), or None when the key only changed what is shown.
+    ("thinking", target) ("reviewer",), or None when the key only changed what is shown.
     """
     if key in (-1, curses.KEY_RESIZE):
         return None
@@ -219,6 +220,8 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
         return ("model", _target_of(row))
     if key == ord("t"):
         return ("thinking", _target_of(row))
+    if key == ord("v"):
+        return ("reviewer",)
     if key in (curses.KEY_UP, ord("k")):
         _move(ui, rows, -1)
     elif key in (curses.KEY_DOWN, ord("j")):
@@ -248,6 +251,8 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
             ui.expanded.add(row.task)
         elif row.kind == "file":
             return ("open", row.ref["path"], f"{row.task} / {row.text}")
+        elif row.kind == "reviewer":
+            return ("reviewer",)
         elif row.kind == "worker":
             ui.output_worker = row.text
             ui.message = f"showing {row.text} output"
@@ -497,6 +502,15 @@ class Dashboard:
                     self.pick_scope(("model_save", target, value))
             elif name == "thinking_pick":
                 self.pick_scope(("thinking_save", action[1], action[2]))
+            elif name == "reviewer":
+                self.pick_reviewer()
+            elif name == "reviewer_pick":
+                self.pick_scope(("reviewer_save", action[1]))
+            elif name == "reviewer_save":
+                name, scope = action[1], action[2]
+                notes = models.set_reviewer(self.project, scope == "project", name)
+                self.load()
+                self.ui.message = "; ".join(notes[:2])
             elif name == "model_save":
                 target, model, scope = action[1], action[2], action[3]
                 notes = models.set_model(self.project, scope == "project", target, model)
@@ -550,6 +564,16 @@ class Dashboard:
         items = [("all projects", "user", "~/.config/aaagent/config.toml"),
                  ("this project only", "project", ".aaagent/config.toml")]
         self.ui.picker = Picker("save where?", items, action=action)
+
+    def pick_reviewer(self) -> None:
+        """Who reviews each round: the planner (the chat), or one of the workers."""
+        cfg = Config.load(self.project)
+        current = cfg.reviewer_worker or models.ORCHESTRATOR
+        items = [("planner (the chat)", models.ORCHESTRATOR,
+                  "current" if current == models.ORCHESTRATOR else "")]
+        for name in cfg.worker_names():
+            items.append((name, name, "current" if name == current else cfg.worker_model(name)))
+        self.ui.picker = Picker("who reviews each round?", items, action=("reviewer_pick",))
 
     # -- drawing ------------------------------------------------------------------
     def put(self, y: int, x: int, text: str, attr: int = 0, width: int | None = None) -> None:
@@ -699,7 +723,7 @@ class Dashboard:
         if self.ui.view:
             hints = "↑↓ scroll  space page  q back"
         else:
-            hints = "enter open  d diff  m model  t thinking  a abandon"
+            hints = "enter open  d diff  m model  t thinking  v reviewer  a abandon"
             if self.chat_pane:
                 row = self.selected_row()
                 if row and row.kind == "session":

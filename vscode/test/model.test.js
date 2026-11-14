@@ -129,6 +129,56 @@ test("workerItem shows the thinking level when one is set", () => {
     state: "stopped", queued: 0 }).tooltip, "glm: opencode-go/glm-5.3-flash\nnot running");
 });
 
+test("reviewerChoices lists the planner first, then the workers", () => {
+  const data = {
+    reviewer: "glm",
+    workers: [
+      { name: "deepseek", model: "opencode-go/deepseek-v4.1-flash" },
+      { name: "glm", model: "opencode-go/glm-5.3-flash" },
+    ],
+  };
+  assert.deepStrictEqual(model.reviewerChoices(data), [
+    { label: "Planner (the chat)", description: "", reviewer: "orchestrator" },
+    { label: "deepseek", description: "opencode-go/deepseek-v4.1-flash", reviewer: "deepseek" },
+    { label: "glm", description: "opencode-go/glm-5.3-flash · current", reviewer: "glm" },
+  ]);
+  assert.strictEqual(model.reviewerChoices({})[0].description, "current");
+});
+
+test("workersDescription adds the reviewer when a worker reviews", () => {
+  assert.strictEqual(model.workersDescription({ planner: { model: "opus" } }), "planner: opus");
+  assert.strictEqual(model.workersDescription({ planner: { model: "opus", thinking: "high" },
+    reviewer: "orchestrator" }), "planner: opus · high");
+  assert.strictEqual(model.workersDescription({ planner: { model: "opus" }, reviewer: "glm" }),
+    "planner: opus · reviewer: glm");
+  assert.strictEqual(model.workersDescription({ planner: {} }), undefined);
+  assert.strictEqual(model.workersDescription(null), undefined);
+});
+
+test("statusBar shows the reviewer in its tooltip when a worker reviews", () => {
+  const base = { workers: [], planner: { model: "opus" }, tasks: [] };
+  assert.match(model.statusBar(base).tooltip, /^planner: opus\naaagent:/);
+  assert.match(model.statusBar({ ...base, reviewer: "glm" }).tooltip, /^planner: opus\nreviewer: glm\naaagent:/);
+});
+
+test("transitions say the planner and stay quiet while a worker reviews", () => {
+  const before = { tasks: [task({ status: "running" })] };
+  const after = { tasks: [task({ status: "awaiting_review", round: 2 })] };
+  const ev = model.transitions(before, after);
+  assert.strictEqual(ev[0].level, "status");
+  assert.match(ev[0].message, /worker finished round 2; the planner is reviewing\.$/);
+  assert.ok(!/Opus/.test(ev[0].message));
+  assert.deepStrictEqual(
+    model.transitions({ ...before, reviewer: "glm" }, { ...after, reviewer: "glm" }), []);
+  const approved = model.transitions({ ...before, reviewer: "glm" },
+    { reviewer: "glm", tasks: [task({ status: "approved", round: 2 })] });
+  assert.strictEqual(approved[0].level, "status");
+  assert.strictEqual(approved[0].message,
+    "aaagent: 004 health: approved by the reviewer in round 2; the planner commits next.");
+  const warning = model.transitions(before, { tasks: [task({ status: "failed", attention: "failed" })] });
+  assert.match(warning[0].message, /The planner is waiting for your decision in the chat\.$/);
+});
+
 const modelInfo = () => ({
   planner: { model: "opus", choices: ["sonnet", "opus", "haiku"] },
   workers: {
