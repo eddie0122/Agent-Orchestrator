@@ -2,10 +2,12 @@
 // Minimal stand-in for the `vscode` module: enough to run activate() and record what it does.
 
 const path = require("path");
+const fs = require("fs");
 
 const record = {
   commands: new Map(), executed: [], terminals: [], messages: [], context: {}, treeViews: {},
-  statusItems: [], contentProviders: {}, watchers: [], config: {}, opened: [],
+  statusItems: [], contentProviders: {}, watchers: [], config: {}, opened: [], panels: [],
+  quickPicks: [], inputBoxes: [],
 };
 
 class EventEmitter {
@@ -38,9 +40,11 @@ function makeTerminal(options) {
 const vscode = {
   _record: record,
   EventEmitter, Uri, TreeItem, ThemeIcon, ThemeColor, RelativePattern,
+  env: { remoteName: undefined },
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
   StatusBarAlignment: { Left: 1, Right: 2 },
   TerminalLocation: { Panel: 1, Editor: 2 },
+  ProgressLocation: { SourceControl: 1, Window: 10, Notification: 15 },
   ViewColumn: { Active: -1, Beside: -2 },
   commands: {
     registerCommand(id, fn) { record.commands.set(id, fn); return { dispose() {} }; },
@@ -57,12 +61,29 @@ const vscode = {
     createTreeView(id, opts) { const v = { id, ...opts, dispose() {} }; record.treeViews[id] = v; return v; },
     createStatusBarItem() { const s = { show() { this.visible = true; }, dispose() {} }; record.statusItems.push(s); return s; },
     createTerminal: makeTerminal,
-    showInformationMessage: async (m) => { record.messages.push(["info", m]); },
+    createWebviewPanel(viewType, title, showOptions, options) {
+      const panel = {
+        viewType, title, showOptions,
+        webview: {
+          html: "", cspSource: "vscode-webview:", options, posted: [],
+          postMessage(m) { this.posted.push(m); return Promise.resolve(true); },
+          onDidReceiveMessage(fn) { this._handler = fn; return { dispose() {} }; },
+          asWebviewUri: (u) => u,
+        },
+        reveal() { this.revealed = (this.revealed || 0) + 1; },
+        onDidDispose(fn) { this._onDispose = fn; return { dispose() {} }; },
+        dispose() { this._onDispose && this._onDispose(); },
+      };
+      record.panels.push(panel);
+      return panel;
+    },
+    withProgress: async (opts, fn) => fn({ report() {} }),
+    showInformationMessage: async (m) => { record.messages.push(["info", m]); return record.answer; },
     showWarningMessage: async (m) => { record.messages.push(["warning", m]); return record.answer; },
     showErrorMessage: async (m) => { record.messages.push(["error", m]); },
     setStatusBarMessage: (m) => { record.messages.push(["status", m]); return { dispose() {} }; },
-    showInputBox: async () => record.inputBox,
-    showQuickPick: async (items) => items[0],
+    showInputBox: async () => (record.inputBoxes.length ? record.inputBoxes.shift() : record.inputBox),
+    showQuickPick: async (items) => (record.quickPicks.length ? record.quickPicks.shift()(items) : items[0]),
     showTextDocument: async (doc) => { record.opened.push(doc); },
     onDidChangeActiveTextEditor: () => ({ dispose() {} }),
   },
@@ -79,6 +100,16 @@ const vscode = {
     openTextDocument: async (uri) => ({ uri, text: await record.contentProviders[uri.scheme].provideTextDocumentContent(uri) }),
     onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
     onDidChangeConfiguration: () => ({ dispose() {} }),
+    // A stand-in for the real file system: this machine's disk, whatever the scheme says.
+    fs: {
+      async stat(uri) {
+        const s = await fs.promises.stat(uri.fsPath);
+        return { size: s.size, mtime: s.mtimeMs, type: s.isDirectory() ? 2 : 1 };
+      },
+      async readFile(uri) {
+        return new Uint8Array(await fs.promises.readFile(uri.fsPath));
+      },
+    },
   },
   languages: { setTextDocumentLanguage: async (doc, lang) => { doc.languageId = lang; return doc; } },
   setFolder(p) { vscode.workspace.workspaceFolders = [{ uri: Uri.file(p), name: path.basename(p), index: 0 }]; },

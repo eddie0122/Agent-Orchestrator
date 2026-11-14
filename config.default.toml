@@ -9,6 +9,8 @@ model = "opus"
 claude_bin = ""
 # Extra arguments passed to claude, e.g. ["--effort", "high"].
 extra_args = []
+# Thinking level (claude --effort): low | medium | high | xhigh | max. Empty = Claude Code's default. An --effort in extra_args wins.
+thinking = ""
 
 [workers]
 # Path to the opencode binary. Empty = "opencode" on PATH.
@@ -19,9 +21,13 @@ commit_agent = "aaagent-committer"
 
 [workers.deepseek]
 model = "opencode-go/deepseek-v4.1-flash"
+# Thinking level (opencode model variant), e.g. low | high | max. Empty = the model's default.
+thinking = ""
 
 [workers.glm]
 model = "opencode-go/glm-5.3-flash"
+# Thinking level (opencode model variant), e.g. low | high | max. Empty = the model's default.
+thinking = ""
 
 [flow]
 # Worker that implements plans unless the plan or --worker says otherwise.

@@ -6,11 +6,13 @@ const os = require("os");
 const path = require("path");
 const vscode = require("vscode");
 
+const { AttachPanel } = require("./src/attach");
 const { Cli } = require("./src/cli");
 const { DiffProvider, SCHEME } = require("./src/diff");
+const { LocalFetcher } = require("./src/fetch");
 const model = require("./src/model");
 const { Terminals } = require("./src/terminals");
-const { TasksProvider, WorkersProvider } = require("./src/tree");
+const { SessionsProvider, TasksProvider, WorkersProvider } = require("./src/tree");
 
 const STATE_MESSAGES = {
   noFolder: "Open a folder to use aaagent.",
@@ -29,9 +31,15 @@ function activate(context) {
   const diffs = new DiffProvider(cli);
   const sub = (d) => context.subscriptions.push(d);
 
+  // The chat terminal is open and this is the session it started.
+  const isOpen = (session) => !!terminals.chat() && !!session.current;
+  const sessions = new SessionsProvider(store, { isOpen, tasks });
+
   const workersView = vscode.window.createTreeView("aaagent.workers", { treeDataProvider: workers });
+  const sessionsView = vscode.window.createTreeView("aaagent.sessions", { treeDataProvider: sessions, showCollapseAll: true });
   const tasksView = vscode.window.createTreeView("aaagent.tasks", { treeDataProvider: tasks, showCollapseAll: true });
   sub(workersView);
+  sub(sessionsView);
   sub(tasksView);
   sub(vscode.workspace.registerTextDocumentContentProvider(SCHEME, diffs));
 
@@ -53,17 +61,38 @@ function activate(context) {
   }
 
   let watcher = null;
+  let fetchWatcher = null;
+  let fetcher = null;
   let watchedProject = null;
   function watch(project) {
     if (project === watchedProject) return;
     if (watcher) watcher.dispose();
+    if (fetchWatcher) fetchWatcher.dispose();
     watchedProject = project;
     watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(project), ".aaagent/**"));
     watcher.onDidCreate(scheduleRefresh);
     watcher.onDidChange(scheduleRefresh);
     watcher.onDidDelete(scheduleRefresh);
+    watchFetches(project);
   }
-  sub({ dispose: () => watcher && watcher.dispose() });
+  sub({ dispose: () => { if (watcher) watcher.dispose(); if (fetchWatcher) fetchWatcher.dispose(); } });
+
+  // The chat hook asks us to copy an image that a prompt mentions from the user's computer.
+  function watchFetches(project) {
+    const local = new LocalFetcher({
+      project,
+      onSaved: (rel) => vscode.window.setStatusBarMessage(
+        `aaagent: copied ${path.basename(rel)} from your computer`, 8000),
+      onFailed: (from, message) => vscode.window.showWarningMessage(
+        `aaagent could not copy ${path.basename(from)} from your computer: ${message}`, "Attach Image…")
+        .then((pick) => { if (pick) vscode.commands.executeCommand("aaagent.attachImage"); }),
+    });
+    fetcher = local;
+    fetchWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(project), ".aaagent/fetch/*.request.json"));
+    fetchWatcher.onDidCreate((uri) => local.handle(uri.fsPath));
+    local.scan();
+  }
 
   function notify(events) {
     const level = config().get("notifications", "all");
@@ -73,7 +102,7 @@ function activate(context) {
         if (level === "all") vscode.window.setStatusBarMessage(ev.message, 8000);
       } else if (ev.level === "warning") {
         vscode.window.showWarningMessage(ev.message, "Open Chat").then((pick) => {
-          if (pick) vscode.commands.executeCommand("aaagent.startChat");
+          if (pick) vscode.commands.executeCommand("aaagent.openChat");
         });
       } else {
         vscode.window.showInformationMessage(ev.message, "Show Changes").then((pick) => {
@@ -86,7 +115,13 @@ function activate(context) {
 
   function render() {
     workers.refresh();
+    sessions.refresh();
     tasks.refresh();
+    const planner = store.data && store.data.planner;
+    workersView.description = planner && planner.model
+      ? `planner: ${planner.model}${planner.thinking ? ` · ${planner.thinking}` : ""}`
+      : undefined;
+    sessionsView.description = terminals.chat() ? "open" : undefined;
     const sb = model.statusBar(store.data);
     statusItem.text = sb.text;
     statusItem.tooltip = store.data ? sb.tooltip : (STATE_MESSAGES[store.state] || sb.tooltip);
@@ -136,6 +171,9 @@ function activate(context) {
       store.state = state;
       await vscode.commands.executeCommand("setContext", "aaagent.state", state);
       render();
+      // File watchers drop events under load: the poll and the `.aaagent/**` refresh also look
+      // for image requests still waiting for an answer. `LocalFetcher` skips handled ones.
+      if (fetcher) fetcher.scan();
     }
   }
 
@@ -197,6 +235,141 @@ function activate(context) {
   const taskOf = (node) => (node && node.task) || null;
   const workerOf = (node) => (node && node.name ? node : null);
 
+  /** The session the open chat is running, if a chat is open. */
+  function openSessionId() {
+    return terminals.chat() && store.data ? store.data.current_session || null : null;
+  }
+
+  /** Quick-pick a session that can be reopened, leaving out the one the chat already runs. */
+  async function pickSession(placeHolder) {
+    const choices = model.sessionChoices((store.data && store.data.sessions) || [], openSessionId());
+    if (!choices.length) {
+      vscode.window.showInformationMessage("aaagent: no earlier session to restore.");
+      return null;
+    }
+    const pick = await vscode.window.showQuickPick(choices, { placeHolder, matchOnDescription: true });
+    return pick ? pick.session : null;
+  }
+
+  /** Close the chat and reopen `s`, after a warning when a worker is still busy. */
+  async function restoreSession(p, s) {
+    if (!s.available) {
+      vscode.window.showWarningMessage("this session's conversation is gone and cannot be reopened");
+      return;
+    }
+    if (terminals.chat() && model.isBusy(store.data)) {
+      const ok = await vscode.window.showWarningMessage(
+        "Switch to this session? The current chat closes.",
+        {
+          modal: true,
+          detail: "A worker is still running. Its job keeps going, and the new chat lists the unfinished task so Opus can pick it up.",
+        },
+        "Switch");
+      if (ok !== "Switch") return;
+    }
+    await terminals.openSession(p, s.id);
+  }
+
+  /** Type `text` into the chat's input, starting a chat first if there is none. */
+  async function sendToChat(p, text) {
+    if (!terminals.chat()) {
+      await terminals.startChat(p);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    await terminals.send(text, { submit: false });
+  }
+
+  /**
+   * Pick a model for the planner or a worker (from a list or typed) and save it
+   * user-wide or for this project. `node` is a worker tree item, which skips the
+   * target step.
+   */
+  async function selectModel(node) {
+    const p = project();
+    if (!p) return;
+    let info;
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: "aaagent: loading models…" },
+      async () => { info = JSON.parse(await cli.exec(p, ["model", "--json"], { timeout: 70000 })); });
+    let target = node && node.name;
+    if (!target) {
+      const pick = await vscode.window.showQuickPick(model.modelTargets(info), { placeHolder: "Change which model?" });
+      if (!pick) return;
+      target = pick.target;
+    }
+    const current = target === "planner"
+      ? (info.planner || {}).model
+      : ((info.workers || {})[target] || {}).model;
+    const choice = await vscode.window.showQuickPick(model.modelChoices(info, target), {
+      placeHolder: `Model for ${target} (current: ${current})`,
+      matchOnDescription: true,
+    });
+    if (!choice) return;
+    let chosen;
+    if (choice.typed) {
+      const answer = await vscode.window.showInputBox({
+        prompt: target === "planner" ? "Model name" : "Model name (opencode model id, e.g. opencode-go/kimi-k3)",
+        value: current,
+        ignoreFocusOut: true,
+      });
+      chosen = (answer || "").trim();
+      if (!chosen || chosen === current) return;
+    } else {
+      chosen = choice.model;
+    }
+    if (!chosen) return;
+    const scope = await vscode.window.showQuickPick([
+      { label: "All projects", description: "~/.config/aaagent/config.toml", project: false },
+      { label: "This project only", description: ".aaagent/config.toml", project: true },
+    ], { placeHolder: "Save where?" });
+    if (!scope) return;
+    const out = await cli.exec(p, ["model", target, chosen, ...(scope.project ? ["--project"] : [])]);
+    const text = model.short(out, 300);
+    const notable = out.split("\n").some((line) => /^(warning|note):/.test(line.trim()));
+    const buttons = target === "planner" && terminals.chat() ? ["Apply to Current Chat"] : [];
+    const answer = notable
+      ? await vscode.window.showWarningMessage(text, ...buttons)
+      : await vscode.window.showInformationMessage(text, ...buttons);
+    if (answer === "Apply to Current Chat") await terminals.send(`/model ${chosen}`, { submit: true });
+  }
+
+  /**
+   * Pick a thinking level for the planner or a worker and save it user-wide or for this
+   * project. `node` is a worker tree item, which skips the target step.
+   */
+  async function selectThinking(node) {
+    const p = project();
+    if (!p) return;
+    let info;
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: "aaagent: loading thinking levels…" },
+      async () => { info = JSON.parse(await cli.exec(p, ["thinking", "--json"], { timeout: 70000 })); });
+    let target = node && node.name;
+    if (!target) {
+      const pick = await vscode.window.showQuickPick(model.thinkingTargets(info),
+        { placeHolder: "Change the thinking level of what?" });
+      if (!pick) return;
+      target = pick.target;
+    }
+    const entry = target === "planner" ? (info.planner || {}) : ((info.workers || {})[target] || {});
+    const current = entry.thinking || "default";
+    const choice = await vscode.window.showQuickPick(model.thinkingChoices(info, target), {
+      placeHolder: `Thinking level for ${target} (current: ${current})`,
+      matchOnDescription: true,
+    });
+    if (!choice) return;
+    const scope = await vscode.window.showQuickPick([
+      { label: "All projects", description: "~/.config/aaagent/config.toml", project: false },
+      { label: "This project only", description: ".aaagent/config.toml", project: true },
+    ], { placeHolder: "Save where?" });
+    if (!scope) return;
+    const out = await cli.exec(p, ["thinking", target, choice.level, ...(scope.project ? ["--project"] : [])]);
+    const text = model.short(out, 300);
+    const notable = out.split("\n").some((line) => /^(warning|note):/.test(line.trim()));
+    if (notable) await vscode.window.showWarningMessage(text);
+    else await vscode.window.showInformationMessage(text);
+  }
+
   function command(id, fn) {
     sub(vscode.commands.registerCommand(id, async (...args) => {
       try {
@@ -213,14 +386,59 @@ function activate(context) {
 
   command("aaagent.refresh", () => refresh());
 
-  command("aaagent.startChat", async () => {
+  command("aaagent.newChat", async () => {
+    const p = project();
+    if (!p) return;
+    if (terminals.chat() && model.isBusy(store.data)) {
+      const ok = await vscode.window.showWarningMessage(
+        "Start a new chat? The current chat closes.",
+        {
+          modal: true,
+          detail: "A worker is still running. Its job keeps going, and the new chat lists the unfinished task so Opus can pick it up.",
+        },
+        "New Chat");
+      if (ok !== "New Chat") return;
+    }
+    await terminals.newChat(p);
+  });
+
+  command("aaagent.openChat", async () => {
     const p = project();
     if (p) await terminals.startChat(p);
   });
 
+  command("aaagent.selectModel", (node) => selectModel(node));
+
+  command("aaagent.changeWorkerModel", async (node) => {
+    const w = workerOf(node) || await pickWorker("Change the model of which worker?");
+    if (w) await selectModel(w);
+  });
+
+  command("aaagent.selectThinking", (node) => selectThinking(node));
+
+  command("aaagent.changeWorkerThinking", async (node) => {
+    const w = workerOf(node) || await pickWorker("Change the thinking level of which worker?");
+    if (w) await selectThinking(w);
+  });
+
   command("aaagent.resumeChat", async () => {
     const p = project();
-    if (p) await terminals.startChat(p, undefined, { resume: true });
+    if (!p) return;
+    const s = await pickSession("Restore which session?");
+    if (s) await restoreSession(p, s);
+  });
+
+  command("aaagent.openSession", async (node) => {
+    const p = project();
+    if (!p) return;
+    const s = (node && node.session) || await pickSession("Open which session?");
+    if (!s) return;
+    if (isOpen(s)) {
+      const chat = terminals.chat();
+      if (chat) chat.show(false);
+      return;
+    }
+    await restoreSession(p, s);
   });
 
   command("aaagent.ask", async () => {
@@ -250,11 +468,51 @@ function activate(context) {
     const ref = sel.isEmpty
       ? model.mention(rel)
       : model.mention(rel, sel.start.line + 1, sel.end.character === 0 && sel.end.line > sel.start.line ? sel.end.line : sel.end.line + 1);
-    if (!terminals.chat()) {
-      await terminals.startChat(p);
-      await new Promise((r) => setTimeout(r, 5000));
+    await sendToChat(p, ref);
+  });
+
+  command("aaagent.attachImage", async () => {
+    const p = project();
+    if (!p) return;
+    AttachPanel.show(context, {
+      project: p,
+      onAttached: (rel) => sendToChat(p, model.mention(rel)),
+    });
+  });
+
+  command("aaagent.attachFile", async (uri, uris) => {
+    const p = project();
+    if (!p) return;
+    const list = Array.isArray(uris) && uris.length ? uris : uri ? [uri]
+      : vscode.window.activeTextEditor ? [vscode.window.activeTextEditor.document.uri] : [];
+    const refs = [];
+    for (const u of list) {
+      if (!u || u.scheme !== "file") continue;
+      const rel = path.relative(p, u.fsPath);
+      if (rel.startsWith("..") || path.isAbsolute(rel)) {
+        vscode.window.showWarningMessage("aaagent: this file is outside the project.");
+        continue;
+      }
+      const name = path.basename(u.fsPath);
+      if (!model.isImagePath(u.fsPath)) {
+        vscode.window.showWarningMessage(`aaagent: ${name} is not an image.`);
+        continue;
+      }
+      let size;
+      try {
+        size = fs.statSync(u.fsPath).size;
+      } catch (err) {
+        vscode.window.showWarningMessage(`aaagent: ${name}: ${err.message}`);
+        continue;
+      }
+      if (size > model.MAX_IMAGE_BYTES) {
+        vscode.window.showWarningMessage(
+          `aaagent: ${name} is ${(size / (1024 * 1024)).toFixed(1)} MB; the limit is ${model.MAX_IMAGE_BYTES / (1024 * 1024)} MB`);
+        continue;
+      }
+      refs.push(model.mention(rel.split(path.sep).join("/")));
     }
-    await terminals.send(ref, { submit: false });
+    if (refs.length) await sendToChat(p, refs.join(""));
   });
 
   command("aaagent.showDiff", async (node) => {

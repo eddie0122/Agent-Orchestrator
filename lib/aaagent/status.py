@@ -7,11 +7,13 @@ Nothing here touches the terminal, so it can be unit-tested directly.
 
 from __future__ import annotations
 
+import time
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
-from . import __version__, tasks, worker
+from . import __version__, sessions, tasks, worker
 from .config import Config
 from .tasks import FINAL_STATUSES, FlowError
 
@@ -26,7 +28,8 @@ def status_data(project: Path, cfg: Config) -> dict:
         job = worker.running_job(project, name)
         queued = len(worker.pending_jobs(project, name)) if worker.queue_dir(project, name).is_dir() else 0
         workers.append({
-            "name": name, "model": cfg.worker_model(name), "pid": pid,
+            "name": name, "model": cfg.worker_model(name), "thinking": cfg.worker_thinking(name),
+            "pid": pid,
             "state": "running" if job else ("idle" if pid else "stopped"),
             "job": {k: job[k] for k in ("task", "phase", "round", "created")} if job else None,
             "queued": queued, "log": str(worker.log_file(project, name)),
@@ -66,11 +69,16 @@ def status_data(project: Path, cfg: Config) -> dict:
             "job": {k: job.get(k) for k in ("phase", "round", "worker")} if job else None,
             "next": nxt, "blocked": blocked, "attention": attention,
             "commit": state.get("commit"), "created": state.get("created"),
+            "session": state.get("chat_session"),
             "updated": task.state_file.stat().st_mtime if task.state_file.exists() else None,
             "path": str(task.path), "files": files,
         })
-    return {"version": __version__, "project": str(project), "workers": workers,
-            "tasks": out_tasks, "active_task": tasks.active_task(project)}
+    return {"version": __version__, "project": str(project),
+            "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking},
+            "workers": workers,
+            "tasks": out_tasks, "active_task": tasks.active_task(project),
+            "sessions": sessions.list_sessions(project, limit=30),
+            "current_session": sessions.current_session(project)}
 
 
 # -- what to say about a task or worker ----------------------------------------
@@ -145,8 +153,21 @@ def worker_summary(w: dict) -> str:
         text = "waiting for a plan"
     else:
         text = "stopped"
+    model = str(w.get("model") or "")
+    if model:
+        text += f" · {model.rsplit('/', 1)[-1]}"
+    if w.get("thinking"):
+        text += f" · {w['thinking']}"
     if w.get("queued"):
         text += f" · {w['queued']} queued"
+    return text
+
+
+def planner_summary(p: dict) -> str:
+    """The planner's model, with its thinking level when one is set."""
+    text = str(p.get("model") or "?")
+    if p.get("thinking"):
+        text += f" · {p['thinking']}"
     return text
 
 
@@ -158,6 +179,56 @@ def file_summary(task: dict, f: dict) -> str:
     if f["kind"] == "review":
         return (f.get("verdict") or "no verdict").replace("_", " ")
     return ""
+
+
+# -- what to say about a chat session -------------------------------------------
+
+def _timestamp(iso) -> float | None:
+    """A `2026-11-13T21:43:50+0900` timestamp as seconds since the epoch, or None."""
+    text = str(iso or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except ValueError:
+        return None
+
+
+def ago(iso, now: float | None = None) -> str:
+    """How long ago a timestamp was, as the VSCode extension says it: "just now",
+    "5 min ago", "3 h ago", "2 days ago", else the date. Unreadable timestamps say nothing."""
+    when = _timestamp(iso)
+    if when is None:
+        return ""
+    secs = max(0.0, (time.time() if now is None else now) - when)
+    if secs < 60:
+        return "just now"
+    mins = round(secs / 60)
+    if mins < 60:
+        return f"{mins} min ago"
+    hours = round(mins / 60)
+    if hours < 24:
+        return f"{hours} h ago"
+    days = round(hours / 24)
+    if days < 14:
+        return f"{days} day{'s' if days > 1 else ''} ago"
+    return datetime.fromtimestamp(when).strftime("%Y-%m-%d")
+
+
+def session_label(session: dict) -> str:
+    """A chat session's name: the first prompt of its conversation."""
+    return session.get("title") or "(no messages yet)"
+
+
+def session_summary(session: dict, open_now: bool = False) -> str:
+    """When a chat session was last used, how many tasks it made, and whether it is gone."""
+    count = len(session.get("tasks") or [])
+    parts = ["open" if open_now else ago(session.get("last_active"))]
+    if count:
+        parts.append(f"{count} task" if count == 1 else f"{count} tasks")
+    if not session.get("available", True):
+        parts.append("gone")
+    return " · ".join(part for part in parts if part)
 
 
 def is_busy(data: dict | None) -> bool:
@@ -197,27 +268,68 @@ def transitions(prev: dict | None, new: dict | None) -> list[dict]:
 @dataclass
 class Row:
     id: str
-    kind: str                 # header | worker | task | file | note
+    kind: str                 # header | worker | session | stask | task | file | note
     text: str
     detail: str = ""
     style: str = "normal"     # normal | header | running | ok | warn | dim
     indent: int = 0
     ref: dict = field(default_factory=dict)
-    task: str | None = None   # task id for task and file rows
+    task: str | None = None   # task id for session task, task and file rows
 
     @property
     def selectable(self) -> bool:
-        return self.kind in ("worker", "task", "file")
+        return self.kind in ("planner", "worker", "session", "stask", "task", "file")
 
 
-def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_finished: int = 10) -> list[Row]:
-    """The flat list shown in the dashboard: workers, then tasks with the files of expanded ones."""
+def visible_sessions(all_sessions: list[dict], keep: int = 5) -> tuple[list[dict], int]:
+    """The newest `keep` chat sessions plus the one that is open now, and how many are left out."""
+    known = list(all_sessions or [])
+    shown = known[:max(0, keep)]
+    current = next((s for s in known if s.get("current")), None)
+    if current and all(s is not current for s in shown):
+        shown.append(current)
+    return shown, max(0, len(known) - len(shown))
+
+
+def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_finished: int = 10,
+         keep_sessions: int = 5) -> list[Row]:
+    """The flat list shown in the dashboard: workers, chat sessions, then tasks (with the files
+    and the tasks of the expanded ones)."""
     if not data:
         return []
     out = [Row("header:workers", "header", "WORKERS", style="header")]
+    planner = data.get("planner") or {}
+    out.append(Row("planner", "planner", "planner", planner_summary(planner), "normal", 1, planner))
     for w in data.get("workers") or []:
         style = "running" if w.get("state") == "running" else ("dim" if w.get("state") == "stopped" else "normal")
         out.append(Row(f"worker:{w['name']}", "worker", w["name"], worker_summary(w), style, 1, w))
+    out.append(Row("header:sessions", "header", "SESSIONS", style="header"))
+    all_sessions = data.get("sessions") or []
+    if not all_sessions:
+        out.append(Row("note:sessions", "note", "none yet: start the chat with aaagent",
+                       style="dim", indent=1))
+    sessions_shown, more = visible_sessions(all_sessions, keep_sessions)
+    tasks_by_id = {t["id"]: t for t in data.get("tasks") or []}
+    for s in sessions_shown:
+        sid = s["id"]
+        key = f"session:{sid}"
+        ids = s.get("tasks") or []
+        if ids:
+            mark = "▾" if key in expanded else "▸"
+        else:
+            mark = "·"
+        style = "ok" if s.get("current") else ("dim" if not s.get("available", True) else "normal")
+        out.append(Row(key, "session", f"{mark} {session_label(s)}",
+                       session_summary(s, bool(s.get("current"))), style, 1, s))
+        if ids and key in expanded:
+            for tid in ids:
+                t = tasks_by_id.get(tid)
+                if t:
+                    out.append(Row(f"stask:{sid}:{tid}", "stask", task_label(t), task_summary(t),
+                                   task_style(t), 3, t, tid))
+    if more:
+        out.append(Row("note:sessions-more", "note", f"… {more} more: aaagent sessions",
+                       style="dim", indent=1))
     out.append(Row("header:tasks", "header", "TASKS", style="header"))
     shown = visible_tasks(data.get("tasks") or [], keep_finished)
     if not shown:

@@ -46,16 +46,21 @@ It also cleans up an install from before the rename (the `aa` command, `aa-*` ag
 After installing, run **Developer: Reload Window** once. Then:
 
 1. Open a project folder (a git repository) and click the **aaagent** icon in the activity bar.
-2. Click **Start Chat** (or run `aaagent: Ask Opus…` from the command palette and type the request). **Resume Last Chat** (in the Tasks view's `…` menu) reopens the previous conversation instead.
+2. Click **New Session** (or run `aaagent: Ask Opus…` from the command palette and type the request). **New Session** closes the open chat and starts a fresh one; **Restore Previous Session…** reopens an earlier one, and **Open Chat** is in the Sessions view's `…` menu.
    The Opus chat opens as an editor tab, and the DeepSeek and GLM workers open as split terminals in the panel.
 3. Talk to Opus. The sidebar follows along:
    - **Workers**: who is running what. Inline buttons show a worker's output or stop it.
-   - **Tasks**: newest first, with the current stage (planning, implementing, in review, committed…). Expand a task to open its `plan.md`, `report-N.md` and `review-N.md`, or **Changes** for the diff.
+   - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it. **New Session**, **Restore Previous Session…**, **Ask Opus…** and **Attach Image…** are in its title bar.
+   - **Tasks**: all tasks, newest first, with the current stage (planning, implementing, in review, committed…). Expand a task to open its `plan.md`, `report-N.md` and `review-N.md`, or **Changes** for the diff.
    - The **status bar** shows what is happening now. A notification appears when a task is committed or needs your decision.
 
 Other handy commands:
 
+- **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
+- **Select Thinking Level…** (Workers view title, or right-click a worker → **Change Thinking Level…**): set the planner's reasoning effort or a worker's model variant, for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
+- **Attach Image…** (Sessions view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
+- **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.
 - **Show Task Changes**, **Abandon Task…**, **Stop All Workers**, **Check Installation**, **Open Configuration**.
 
 Settings: `aaagent.chatLocation` (`editor` or `panel`), `aaagent.notifications` (`all`, `important`, `off`), `aaagent.finishedTasksShown`, `aaagent.path`.
@@ -74,8 +79,13 @@ With tmux installed, `aaagent` opens one window: the Opus chat on the left and t
 ```
 ┌ Opus chat ─────────────────────┬ aaagent · my-project ─────────────────┐
 │                                │ WORKERS                               │
-│ > add a /health endpoint       │  deepseek          / fixing 003 r2    │
+│ > add a /health endpoint       │  planner                  opus · high │
+│                                │  deepseek          / fixing 003 r2    │
 │                                │  glm               waiting for a plan │
+│                                │ SESSIONS                              │
+│                                │  ▾ add a /health endpoint  open · 2 t…│
+│                                │     003 add health        / fixing …  │
+│                                │  · fix login              2 h ago     │
 │                                │ TASKS                                 │
 │                                │  ▾ 003 add health  / fixing · deepseek│
 │                                │     plan.md                           │
@@ -92,18 +102,26 @@ Dashboard keys:
 | key | does |
 |---|---|
 | `↑` `↓` / `j` `k` | move |
-| `enter` | task: show or hide its plan, reports and reviews · file: read it · worker: show its output |
-| `d` | the selected task's diff |
+| `enter` | task: show or hide its plan, reports and reviews · session: show its tasks · a session's task: jump to it in TASKS · file: read it · worker: show its output |
+| `d` | the selected task's diff (also from a session's task) |
 | `l` | choose whose output the bottom pane shows (default: whoever is working) |
+| `m` | change a model: the selected worker's or the planner's, or pick which one; type a name if it is not listed |
+| `t` | the same for a thinking level |
 | `a` | abandon the selected task, after a y/n question |
-| `R` | reopen the previous chat in the chat pane (shown when there is one) |
+| `o` | open the selected session in the chat pane, after a y/n question (shown for a session row in aaagent's tmux layout) |
+| `N` | start a new session (closes this chat; shown in aaagent's tmux layout) |
+| `R` | restore an earlier session, picked from a list (shown in aaagent's tmux layout) |
 | `?` | all keys · `q` closes a view, or quits the dashboard |
+
+**SESSIONS** lists the chat sessions newest first, the open one marked `open`, with the tasks each one created. `enter` on a session shows those tasks; `enter` on one of them jumps to it in TASKS, so its plan, reports, reviews and diff are there too. `N` starts a new session, `R` picks an earlier one from a list, and `o` reopens the one that is selected.
 
 The dashboard beeps and says so in its bottom line when a task is committed or needs you.
 
-### Chats
+### Sessions
 
-Each `aaagent` starts a new chat. `aaagent -c` reopens the last one for this project, and `/resume` inside the chat lists older ones. aaagent remembers its own chat in `.aaagent/chat.json`, so `-c` never picks up an unrelated Claude Code conversation from the same folder. When a new chat starts while tasks are unfinished, Opus is told about them and asks you whether to continue.
+Each `aaagent` starts a new chat session, and a session can create many tasks: `aaagent status` shows each task's session, and `aaagent sessions` lists the sessions with the tasks they created. `aaagent --session <id>` reopens one (the id, or a unique prefix of it, is in that list); `aaagent -c` reopens the last one for this project, and `/resume` inside the chat lists older ones. aaagent remembers its own chats in `.aaagent/sessions.json` (and the last one in `.aaagent/chat.json`), so `-c` never picks up an unrelated Claude Code conversation from the same folder. When a new chat starts while tasks are unfinished, Opus is told about them and asks you whether to continue.
+
+To start a fresh conversation in the middle of things, press `N` in the dashboard (in the tmux layout) or type `/clear` in the chat; quitting and running `aaagent` again does the same.
 
 Just talk to Opus. Questions get a direct answer; change requests go through the pipeline. You can steer at any point ("use glm for this", "stop after the plan", "split it into two tasks").
 
@@ -115,16 +133,26 @@ Opus runs these itself. They are also useful for you:
 |---|---|
 | `aaagent ui` | the dashboard, in any terminal |
 | `aaagent status [--all]` | workers and tasks, with each task's next step |
+| `aaagent sessions [--all]` | this project's chat sessions, with the tasks each created |
 | `aaagent diff <task> [--stat]` | everything changed since the task started |
 | `aaagent logs <worker> [-f]` | worker output |
+| `aaagent attach <file\|-> […] [--no-send]` | copy images into `.aaagent/attachments/` and add them to the chat |
 | `aaagent new "<title>"` | create a task folder with a plan template |
 | `aaagent dispatch <task> [--worker glm] [--force]` | run the next phase (implement / fix / commit) and wait |
 | `aaagent wait <task>` | reattach to a running job |
 | `aaagent abandon <task>` | drop a task (its uncommitted changes stay) |
 | `aaagent stop` | stop this project's workers |
+| `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner and worker models |
+| `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner and worker thinking levels |
+| `aaagent --model <name>` | start the chat with another planner model for this chat only |
+| `aaagent --session <id>` | reopen a chat session (an id or id prefix from `aaagent sessions`) |
 | `aaagent doctor` | check the installation |
 
 Task numbers can be short: `aaagent diff 3` means `003-…`.
+
+### Images
+
+The chat runs on the machine where aaagent runs, so an image has to be on that machine first: copy it with `scp`, or drag it into VSCode's Explorer. Then run `aaagent attach shot.png`; it types `@.aaagent/attachments/…` into the chat, and Opus reads the image. You can also type `@path/to/image.png` in the chat yourself. A path from another computer (for example `/Users/me/Downloads/band.jpg` over Remote-SSH) is not a file on the server, so Opus cannot open it: it tells you to attach the image instead, and in VSCode dropping it on the chat with Shift copies it for you. On a desktop Linux session, `xclip -selection clipboard -t image/png -o | aaagent attach -` attaches the clipboard. Attachments live in `.aaagent/attachments/`: they are never committed, and you can delete them at any time.
 
 ## Safety rules
 
@@ -142,15 +170,17 @@ These are permission rules, not a sandbox. Workers run as your user, so treat th
 
 ## Configuration
 
-Put overrides in `~/.config/aaagent/config.toml`, or in `<project>/.aaagent/config.toml` for one project. All options and their defaults are in [config.default.toml](config.default.toml).
+Put overrides in `~/.config/aaagent/config.toml`, or in `<project>/.aaagent/config.toml` for one project. All options and their defaults are in [config.default.toml](config.default.toml). `aaagent model` and `aaagent thinking` edit these files for you: `aaagent model planner sonnet`, `aaagent thinking planner xhigh`, and `--project` for the project config.
 
 ```toml
 [orchestrator]
 model = "opus"                    # any Claude Code model alias or id
-extra_args = ["--effort", "high"]
+thinking = "high"                 # claude --effort: low, medium, high, xhigh or max; empty = the default
+extra_args = []                   # any other claude arguments (an --effort here wins over `thinking`)
 
 [workers.deepseek]
 model = "opencode-go/deepseek-v4-pro"   # swap a model
+thinking = "high"                 # opencode model variant, e.g. low | high | max; empty = the model's default
 
 [workers.kimi]                    # add a worker
 model = "opencode-go/kimi-k3"
@@ -177,7 +207,11 @@ commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@examp
     logs/    raw worker transcripts (jsonl) and job results
   queue/<worker>/   pending and running jobs
   workers/          worker pids and logs
+  attachments/      images from `aaagent attach`
+  fetch/            image copy requests between the chat and VSCode
   chat.json         the last chat's session id, for `aaagent -c`
+  sessions.json     the chat sessions and the tasks each one created
+  chat-pane         the tmux pane of the chat, for `aaagent attach`
 ```
 
 ## Development
@@ -192,6 +226,7 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 |---|---|
 | `lib/aaagent/cli.py` | commands |
 | `lib/aaagent/session.py` | launches Claude and the workers (tmux or background), chat restore |
+| `lib/aaagent/sessions.py` | the chat sessions: history, and which session created each task |
 | `lib/aaagent/tui.py` | the terminal dashboard (`aaagent ui`) |
 | `lib/aaagent/status.py` | status data and the dashboard's view logic |
 | `lib/aaagent/worker.py` | worker daemon and file queue |
@@ -203,3 +238,4 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | `opencode/agents/` | worker agent definitions and permissions |
 | `claude/hooks/guard_edit.py` | blocks Opus edits outside `.aaagent/` |
 | `claude/hooks/record_session.py` | records the chat's session id for `aaagent -c` |
+| `claude/hooks/local_images.py` | copies images from the user's computer that a prompt mentions (VSCode) |

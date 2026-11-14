@@ -186,7 +186,10 @@ def describe(event: dict, project: Path) -> str | None:
 
 
 def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
-    cmd = [cfg.opencode_bin, "run", "--auto", "--agent", job["agent"], "-m", job["model"],
+    model = job["model"]
+    if job.get("thinking"):
+        model += "#" + job["thinking"]
+    cmd = [cfg.opencode_bin, "run", "--auto", "--agent", job["agent"], "-m", model,
            "--format", "json", "--title", f"aaagent {job['task']} {job['phase']} r{job['round']}"]
     if job.get("session"):
         cmd += ["--session", job["session"]]
@@ -262,7 +265,7 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
 
 def serve(project: Path, worker: str, once: bool = False, quiet_wait: bool = False) -> int:
     cfg = Config.load(project)
-    model = cfg.worker_model(worker)
+    model = cfg.worker_label(worker)
     other = worker_pid(project, worker)
     if other and other != os.getpid():
         print(f"[{worker}] already running (pid {other}).")

@@ -7,8 +7,12 @@ const model = require("./model");
 const CHAT_NAME = "aaagent: chat";
 const workerName = (name) => `aaagent: ${name}`;
 
+// Terminals we disposed ourselves. VSCode can keep a disposed terminal in `window.terminals`
+// for a moment, so a "new chat" must not mistake it for the open one.
+const closing = new WeakSet();
+
 function findTerminal(name) {
-  return vscode.window.terminals.find((t) => t.name === name && t.exitStatus === undefined);
+  return vscode.window.terminals.find((t) => t.name === name && t.exitStatus === undefined && !closing.has(t));
 }
 
 function sleep(ms) {
@@ -31,6 +35,15 @@ class Terminals {
 
   env(project) {
     return { AAAGENT_PROJECT: project };
+  }
+
+  /**
+   * The chat's own env: `AAAGENT_VSCODE` tells the UserPromptSubmit hook
+   * (`claude/hooks/local_images.py`) that the extension can copy the user's images here.
+   * Workers do not get it; only the chat can ask for a file.
+   */
+  chatEnv(project) {
+    return { AAAGENT_PROJECT: project, AAAGENT_VSCODE: "1" };
   }
 
   /**
@@ -76,8 +89,9 @@ class Terminals {
   /**
    * Open (or show) the chat. A first prompt is passed as an argument, which is reliable at startup.
    * resume: reopen this project's last aaagent chat (`aaagent start --continue`).
+   * session: reopen one known session instead (`aaagent start --session <id>`).
    */
-  async startChat(project, firstPrompt, { resume = false } = {}) {
+  async startChat(project, firstPrompt, { resume = false, session = null } = {}) {
     const existing = this.chat();
     if (existing) {
       existing.show(false);
@@ -88,14 +102,15 @@ class Terminals {
     await this.ensureWorkers(project);
     const where = vscode.workspace.getConfiguration("aaagent").get("chatLocation", "editor");
     const args = ["start", "--no-workers"];
-    if (resume) args.push("--continue");
+    if (session) args.push("--session", session);
+    else if (resume) args.push("--continue");
     if (firstPrompt) args.push(firstPrompt);
     const term = vscode.window.createTerminal({
       name: CHAT_NAME,
       shellPath: bin,
       shellArgs: args,
       cwd: project,
-      env: this.env(project),
+      env: this.chatEnv(project),
       iconPath: new vscode.ThemeIcon("hubot"),
       location: where === "panel"
         ? vscode.TerminalLocation.Panel
@@ -103,6 +118,33 @@ class Terminals {
     });
     term.show(false);
     return term;
+  }
+
+  /** Close the chat, if one is open. True when a chat was closed. */
+  async closeChat() {
+    const existing = this.chat();
+    if (!existing) return false;
+    closing.add(existing);
+    existing.dispose();
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      if (existing.exitStatus !== undefined) break;
+      if (!vscode.window.terminals.includes(existing)) break;
+      await sleep(100);
+    }
+    return true;
+  }
+
+  /** Close the current chat and open a fresh one (a running worker job keeps going). */
+  async newChat(project, firstPrompt) {
+    await this.closeChat();
+    return this.startChat(project, firstPrompt);
+  }
+
+  /** Close the current chat and reopen the session `sessionId` (a running job keeps going). */
+  async openSession(project, sessionId) {
+    await this.closeChat();
+    return this.startChat(project, undefined, { session: sessionId });
   }
 
   /** Type text into the running chat. Multi-line text arrives as one paste. */

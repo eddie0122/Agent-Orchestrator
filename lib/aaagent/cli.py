@@ -10,14 +10,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, dispatch, gitutil, session, status, tasks, tui, worker
+from . import __version__, attach, dispatch, gitutil, models, session, sessions, status, tasks, tui, worker
 from .config import ROOT, USER_CONFIG, Config
 from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "new", "dispatch", "wait", "status", "diff", "logs", "stop",
-            "abandon", "doctor", "version", "help"}
+            "abandon", "attach", "doctor", "version", "help", "model", "thinking", "sessions"}
 # Options of `start` that also work without the word: `aaagent -c`.
-START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers"}
+START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model", "--session"}
 
 
 def project_root() -> Path:
@@ -35,7 +35,105 @@ def project_root() -> Path:
 def cmd_start(args) -> int:
     prompt = " ".join(args.prompt) if args.prompt else None
     return session.launch(Path.cwd(), prompt, use_tmux=not (args.no_tmux or args.no_workers),
-                          manage_workers=not args.no_workers, resume=args.resume)
+                          manage_workers=not args.no_workers, resume=args.resume,
+                          model=args.model, session_ref=args.session)
+
+
+def cmd_model(args) -> int:
+    project = project_root()
+    cfg = Config.load(project)
+    if args.json:
+        print(json.dumps({
+            "planner": {"model": cfg.planner_model, "choices": models.choices(cfg, models.PLANNER)},
+            "workers": {name: {"model": cfg.worker_model(name)} for name in cfg.worker_names()},
+            "worker_choices": models.worker_choices(cfg),
+        }, indent=1))
+        return 0
+    if args.list:
+        if not args.target:
+            raise FlowError("--list needs a target: use `aaagent model --list planner|worker`")
+        for name in models.choices(cfg, models.resolve_target(cfg, args.target)):
+            print(name)
+        return 0
+    if args.target:
+        return _set_or_pick(args, project, cfg, models.resolve_target(cfg, args.target))
+    rows = [(models.PLANNER, cfg.planner_model)]
+    rows += [(name, cfg.worker_model(name)) for name in cfg.worker_names()]
+    width = max(len(name) for name, _ in rows)
+    for name, model in rows:
+        print(f"{name:<{width}}  {model}")
+    if sys.stdin.isatty():
+        answer = input(f"change which? (planner/{'/'.join(cfg.worker_names())}, enter = none): ")
+        if answer.strip():
+            target = models.resolve_target(cfg, answer.strip())
+            return _set_or_pick(args, project, cfg, target)
+    return 0
+
+
+def _set_or_pick(args, project: Path, cfg, target: str) -> int:
+    """With a model, set it; otherwise pick one from a list on a terminal."""
+    if args.model:
+        print("\n".join(models.set_model(project, args.project, target, args.model)))
+        return 0
+    if not sys.stdin.isatty():
+        raise FlowError("no model given; use `aaagent model <target> <model>`")
+    chosen = models.pick_interactive(cfg, target)
+    if chosen is None:
+        print("unchanged")
+        return 0
+    print("\n".join(models.set_model(project, args.project, target, chosen)))
+    return 0
+
+
+def cmd_thinking(args) -> int:
+    project = project_root()
+    cfg = Config.load(project)
+    if args.json:
+        print(json.dumps({
+            "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking,
+                        "choices": models.thinking_choices(cfg, models.PLANNER)},
+            "workers": {name: {"model": cfg.worker_model(name),
+                               "thinking": cfg.worker_thinking(name),
+                               "choices": models.thinking_choices(cfg, name)}
+                        for name in cfg.worker_names()},
+        }, indent=1))
+        return 0
+    if args.list:
+        if not args.target:
+            raise FlowError("--list needs a target: use `aaagent thinking --list planner|worker`")
+        for level in models.thinking_choices(cfg, models.resolve_target(cfg, args.target)):
+            print(level)
+        return 0
+    if args.target:
+        return _set_or_pick_thinking(args, project, cfg, models.resolve_target(cfg, args.target))
+    rows = [("target", "model", "thinking"),
+            (models.PLANNER, cfg.planner_model, cfg.planner_thinking or "default")]
+    rows += [(name, cfg.worker_model(name), cfg.worker_thinking(name) or "default")
+             for name in cfg.worker_names()]
+    widths = [max(len(row[i]) for row in rows) for i in range(3)]
+    for row in rows:
+        print(f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]}")
+    if sys.stdin.isatty():
+        answer = input(f"change which? (planner/{'/'.join(cfg.worker_names())}, enter = none): ")
+        if answer.strip():
+            target = models.resolve_target(cfg, answer.strip())
+            return _set_or_pick_thinking(args, project, cfg, target)
+    return 0
+
+
+def _set_or_pick_thinking(args, project: Path, cfg, target: str) -> int:
+    """With a level, set it; otherwise pick one from a list on a terminal."""
+    if args.level:
+        print("\n".join(models.set_thinking(project, args.project, target, args.level)))
+        return 0
+    if not sys.stdin.isatty():
+        raise FlowError("no thinking level given; use `aaagent thinking <target> <level>`")
+    chosen = models.pick_thinking_interactive(cfg, target)
+    if chosen is None:
+        print("unchanged")
+        return 0
+    print("\n".join(models.set_thinking(project, args.project, target, chosen)))
+    return 0
 
 
 def cmd_ui(args) -> int:
@@ -90,7 +188,7 @@ def cmd_status(args) -> int:
         job = worker.running_job(project, name)
         queued = len(worker.pending_jobs(project, name)) if worker.queue_dir(project, name).is_dir() else 0
         doing = f"running {job['phase']} {job['task']} r{job['round']}" if job else ("idle" if pid else "-")
-        print(f"  {name:<9} {cfg.worker_model(name):<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
+        print(f"  {name:<9} {cfg.worker_label(name):<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
               f"{doing}{f', {queued} queued' if queued else ''}")
     all_tasks = tasks.all_tasks(project)
     if not args.all:
@@ -98,6 +196,27 @@ def cmd_status(args) -> int:
     print("tasks:" if all_tasks else "tasks: none yet")
     for task in all_tasks:
         dispatch.print_status_line(task, cfg)
+    return 0
+
+
+def cmd_sessions(args) -> int:
+    project = project_root()
+    known = sessions.list_sessions(project, limit=None if args.all else 20)
+    if args.json:
+        print(json.dumps(known, indent=1))
+        return 0
+    if not known:
+        print("no chat sessions yet; run `aaagent` to start one.")
+        return 0
+    for session in known:
+        mark = "*" if session["current"] else " "
+        when = (session["last_active"] or "")[:16].replace("T", " ")
+        count = f"{len(session['tasks'])} tasks" if session["tasks"] else "no tasks"
+        title = session["title"] or "(no messages yet)"
+        if not session["available"]:
+            title += " (gone)"
+        print(f"{mark} {session['short']}  {when}  {count:<8}  {title}")
+    print("\nreopen one with: aaagent --session <id>")
     return 0
 
 
@@ -136,6 +255,21 @@ def cmd_stop(args) -> int:
 
 def cmd_abandon(args) -> int:
     print(dispatch.abandon(project_root(), args.task))
+    return 0
+
+
+def cmd_attach(args) -> int:
+    project = project_root()
+    session.init_project(project, Config.load(project))
+    data = sys.stdin.buffer.read() if "-" in args.files else None
+    paths = attach.attach_files(project, args.files, data, args.name)
+    for path in paths:
+        print(f"attached {Path(os.path.relpath(path, project)).as_posix()}")
+    mentions = "".join(attach.mention(project, path) for path in paths)
+    if not args.no_send and attach.type_into_chat(project, mentions):
+        print(f"typed into the chat input: {mentions.strip()}")
+    else:
+        print(f"paste this into the chat: {mentions.strip()}")
     return 0
 
 
@@ -199,6 +333,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only open the chat; workers run elsewhere (used by the VSCode extension)")
     s.add_argument("-c", "--continue", "--resume", dest="resume", action="store_true",
                    help="reopen this project's last aaagent chat instead of starting a new one")
+    s.add_argument("--session", metavar="ref",
+                   help="reopen the chat session <ref> (an id or id prefix from `aaagent sessions`)")
+    s.add_argument("--model", help="planner model for this chat only")
     s.set_defaults(func=cmd_start)
 
     s = sub.add_parser("ui", help="dashboard: workers, tasks and live worker output")
@@ -231,6 +368,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help="machine-readable output with every task")
     s.set_defaults(func=cmd_status)
 
+    s = sub.add_parser("sessions", help="this project's chat sessions, newest first")
+    s.add_argument("--all", action="store_true", help="show every session, not just the latest 20")
+    s.add_argument("--json", action="store_true", help="machine-readable list")
+    s.set_defaults(func=cmd_sessions)
+
     s = sub.add_parser("diff", help="all changes since the task started")
     s.add_argument("task")
     s.add_argument("--stat", action="store_true")
@@ -250,8 +392,42 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.set_defaults(func=cmd_abandon)
 
+    s = sub.add_parser(
+        "attach",
+        help="copy images into .aaagent/attachments/ and mention them in the chat",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=("copy images (PNG, JPEG, GIF, WebP; up to 5 MB) into .aaagent/attachments/ "
+                     "and add them to the chat"),
+        epilog=("-          read one image from stdin, e.g. "
+                "`xclip -selection clipboard -t image/png -o | aaagent attach -`\n"
+                "--name     file name for stdin data (default pasted.png)\n"
+                "--no-send  only print the @-mentions; do not type them into the chat pane"))
+    s.add_argument("files", nargs="+", metavar="file", help="an image file, or - for stdin")
+    s.add_argument("--name", help="file name for stdin data (default pasted.png)")
+    s.add_argument("--no-send", action="store_true",
+                   help="only print the @-mentions; do not type them into the chat pane")
+    s.set_defaults(func=cmd_attach)
+
     s = sub.add_parser("doctor", help="check the installation")
     s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("model", help="show or change the planner and worker models")
+    s.add_argument("target", nargs="?", help="planner or a worker name")
+    s.add_argument("model", nargs="?", help="model name (any name; not checked)")
+    s.add_argument("--list", action="store_true", help="print the choices for <target>")
+    s.add_argument("--json", action="store_true", help="machine-readable models and choices")
+    s.add_argument("--project", action="store_true",
+                   help="write <project>/.aaagent/config.toml instead of the user config")
+    s.set_defaults(func=cmd_model)
+
+    s = sub.add_parser("thinking", help="show or change the planner and worker thinking levels")
+    s.add_argument("target", nargs="?", help="planner or a worker name")
+    s.add_argument("level", nargs="?", help="thinking level, or default to clear it")
+    s.add_argument("--list", action="store_true", help="print the choices for <target>")
+    s.add_argument("--json", action="store_true", help="machine-readable thinking levels and choices")
+    s.add_argument("--project", action="store_true",
+                   help="write <project>/.aaagent/config.toml instead of the user config")
+    s.set_defaults(func=cmd_thinking)
 
     s = sub.add_parser("version")
     s.set_defaults(func=lambda a: print(__version__) or 0)

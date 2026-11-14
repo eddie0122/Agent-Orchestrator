@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import dispatch, gitutil, tasks, worker
+from . import attach, dispatch, gitutil, sessions, tasks, worker
 from .config import ROOT, Config
 
 AAAGENT_BIN = ROOT / "bin" / "aaagent"
@@ -80,22 +80,32 @@ def claude_settings(project: Path) -> dict:
                 "matcher": "Edit|Write|MultiEdit|NotebookEdit",
                 "hooks": [{"type": "command", "command": _hook("guard_edit.py")}],
             }],
-            # Remembers the chat's session id in .aaagent/chat.json for `aaagent -c`.
+            # Remembers the chat's session id in .aaagent/chat.json for `aaagent -c`, and the
+            # project's chat sessions in .aaagent/sessions.json.
             "SessionStart": [{"hooks": [{"type": "command", "command": _hook("record_session.py")}]}],
+            # Copies images the prompt mentions from the user's computer (VSCode Remote-SSH),
+            # and titles the chat session in .aaagent/sessions.json.
+            "UserPromptSubmit": [{"hooks": [
+                {"type": "command", "command": _hook("local_images.py"), "timeout": 30},
+                {"type": "command", "command": _hook("record_session.py")},
+            ]}],
         },
     }
 
 
 def claude_command(project: Path, cfg: Config, claude: str, first_prompt: str | None,
-                   resume_id: str | None = None) -> list[str]:
-    cmd = [claude, "--model", cfg.orchestrator.get("model", "opus"),
+                   resume_id: str | None = None, model: str | None = None) -> list[str]:
+    cmd = [claude, "--model", model or cfg.planner_model,
            "--permission-mode", "acceptEdits",
            "--settings", json.dumps(claude_settings(project)),
            "--append-system-prompt", orchestrator_prompt(cfg, project),
            "-n", f"aaagent {project.name}"]
     if resume_id:
         cmd += ["--resume", resume_id]
-    cmd += [str(a) for a in cfg.orchestrator.get("extra_args", [])]
+    extra_args = [str(a) for a in cfg.orchestrator.get("extra_args", [])]
+    if cfg.planner_thinking and "--effort" not in extra_args:
+        cmd += ["--effort", cfg.planner_thinking]
+    cmd += extra_args
     if first_prompt:
         cmd.append(first_prompt)
     return cmd
@@ -156,19 +166,22 @@ def ensure_repo(start: Path) -> Path | None:
 
 
 def init_project(project: Path, cfg: Config) -> None:
-    for sub in ("tasks", "queue", "results", "workers"):
+    for sub in ("tasks", "queue", "results", "workers", "attachments", "fetch"):
         (project / ".aaagent" / sub).mkdir(parents=True, exist_ok=True)
     if not cfg.track_agent_dir:
         gitutil.ensure_excluded(project)
 
 
 def launch(start: Path, first_prompt: str | None = None, use_tmux: bool = True,
-           manage_workers: bool = True, resume: bool = False) -> int:
+           manage_workers: bool = True, resume: bool = False, model: str | None = None,
+           session_ref: str | None = None) -> int:
     """Open the orchestrator chat.
 
     manage_workers=False: only run the chat; something else (the VSCode extension's worker
     terminals) runs the workers.
     resume=True: reopen the last aaagent chat of this project instead of starting a new one.
+    model: planner model for this chat only (default: the configured one).
+    session_ref: reopen this chat session (an id or id prefix from `aaagent sessions`).
     """
     project = ensure_repo(start)
     if project is None:
@@ -182,9 +195,11 @@ def launch(start: Path, first_prompt: str | None = None, use_tmux: bool = True,
         return 1
     env = session_env(project)
     resume_id = last_chat(project) if resume else None
-    if resume and not resume_id:
+    if session_ref:
+        resume_id = sessions.find(project, session_ref)["id"]
+    elif resume and not resume_id:
         print("no earlier aaagent chat for this project; starting a new one.")
-    cmd = claude_command(project, cfg, claude, first_prompt, resume_id)
+    cmd = claude_command(project, cfg, claude, first_prompt, resume_id, model)
     names = cfg.worker_names()
 
     if not manage_workers:
@@ -245,6 +260,7 @@ def _launch_tmux(project: Path, claude_cmd: list[str], names: list[str], env: di
         new = ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session, "-n", "aaagent",
                "-x", "220", "-y", "50", "-c", str(project), main]
     chat_pane = subprocess.run(["tmux", *new], capture_output=True, text=True, check=True).stdout.strip()
+    attach.chat_pane_file(project).write_text(chat_pane + "\n")
     subprocess.run(["tmux", "set-option", "-w", "-t", chat_pane, "remain-on-exit", "off"],
                    capture_output=True)
     if not inside:
@@ -261,8 +277,9 @@ def _launch_tmux(project: Path, claude_cmd: list[str], names: list[str], env: di
     return subprocess.call(["tmux", "attach", "-t", session])
 
 
-def respawn_chat(project: Path, chat_pane: str, resume_id: str, close: str) -> None:
-    """Restart the chat pane on an earlier conversation (the dashboard's `R` key)."""
+def respawn_chat(project: Path, chat_pane: str, resume_id: str | None, close: str) -> None:
+    """Restart the chat pane on an earlier conversation (the dashboard's `R` key), or on a
+    fresh chat when resume_id is None (the `N` key)."""
     cfg = Config.load(project)
     claude = find_claude(cfg)
     if not claude:
