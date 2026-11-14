@@ -280,6 +280,201 @@ class SessionsTest(unittest.TestCase):
         with self.assertRaisesRegex(FlowError, "can no longer be reopened"):
             sessions.find(self.project, "gone0000-cccc")
 
+    def test_lookup_finds_a_gone_session_but_find_refuses_it(self):
+        sessions.record_start(self.project, S1, str(Path(self.tmp.name) / f"{S1}.jsonl"))
+        self.assertEqual(sessions.lookup(self.project, S1)["id"], S1)
+        self.assertEqual(sessions.lookup(self.project, S1[:8])["id"], S1)
+        with self.assertRaisesRegex(FlowError, "can no longer be reopened"):
+            sessions.find(self.project, S1[:8])
+        with self.assertRaisesRegex(FlowError, "no session matches"):
+            sessions.lookup(self.project, "nope-nope")
+
+    # -- deleting sessions ---------------------------------------------------
+
+    def two_sessions(self) -> tuple[str, str]:
+        """A current chat (S2) and an earlier one (S1), each with a real `<id>.jsonl`."""
+        first = self.transcript(f"{S1}.jsonl")
+        sessions.record_start(self.project, S1, first, now="2026-11-13T21:00:00+0900")
+        sessions.record_prompt(self.project, S1, "first job", now="2026-11-13T21:01:00+0900")
+        second = self.transcript(f"{S2}.jsonl")
+        sessions.record_start(self.project, S2, second, now="2026-11-13T22:00:00+0900")
+        return first, second
+
+    def test_delete_forgets_a_session_and_removes_its_conversation(self):
+        first, second = self.two_sessions()
+        removed = sessions.delete(self.project, S1[:8])
+        self.assertEqual(removed["id"], S1)
+        self.assertTrue(removed["conversation_deleted"])
+        self.assertFalse(Path(first).exists())
+        self.assertTrue(Path(second).exists(), "the other conversation stays")
+        data = sessions.load(self.project)
+        self.assertEqual([s["id"] for s in data["sessions"]], [S2])
+        self.assertEqual(data["current"], S2, "the current chat is unchanged")
+
+    def test_delete_keeps_the_conversation_when_asked(self):
+        first, _ = self.two_sessions()
+        removed = sessions.delete(self.project, S1[:8], keep_conversation=True)
+        self.assertFalse(removed["conversation_deleted"])
+        self.assertTrue(Path(first).exists())
+        self.assertEqual([s["id"] for s in sessions.list_sessions(self.project)], [S2])
+
+    def test_delete_only_removes_a_file_named_after_the_session(self):
+        other = self.transcript("some-other-name.jsonl")
+        sessions.record_start(self.project, S1, other)
+        removed = sessions.delete(self.project, S1, keep_conversation=False, force=True)
+        self.assertFalse(removed["conversation_deleted"])
+        self.assertTrue(Path(other).exists(), "a conversation with another name is never deleted")
+        self.assertEqual(sessions.load(self.project)["sessions"], [], "the session is still forgotten")
+
+    def test_delete_removes_the_conversations_folder(self):
+        first = self.transcript(f"{S1}.jsonl")
+        folder = Path(first).with_name(S1)
+        folder.mkdir()
+        (folder / "agent.jsonl").write_text("{}\n")
+        sessions.record_start(self.project, S1, first)
+        removed = sessions.delete(self.project, S1, force=True)
+        self.assertTrue(removed["conversation_deleted"])
+        self.assertFalse(folder.exists())
+
+    def test_delete_refuses_the_current_session_without_force(self):
+        first, _ = self.two_sessions()
+        with self.assertRaisesRegex(FlowError, "current chat's session"):
+            sessions.delete(self.project, S2)
+        self.assertTrue(Path(first).exists())
+        self.assertEqual(sessions.load(self.project)["current"], S2)
+
+        removed = sessions.delete(self.project, S2, force=True)
+        self.assertTrue(removed["conversation_deleted"])
+        self.assertIsNone(sessions.load(self.project)["current"])
+        self.assertEqual([s["id"] for s in sessions.list_sessions(self.project)], [S1])
+
+    def test_delete_keeps_chat_json_in_step(self):
+        from aaagent import session
+
+        first, second = self.two_sessions()
+        chat = self.agent / "chat.json"
+
+        def entry(path: str) -> dict:
+            return {"session_id": Path(path).stem, "transcript_path": path,
+                    "at": "2026-11-13T22:00:00+0900"}
+
+        # Deleting the chat chat.json names promotes the previous one.
+        chat.write_text(json.dumps({**entry(second), "previous": entry(first)}))
+        sessions.delete(self.project, S2, force=True)
+        record = json.loads(chat.read_text())
+        self.assertEqual(record["session_id"], S1, "the previous chat is promoted")
+        self.assertIsNone(record["previous"])
+        self.assertEqual(session.last_chat(self.project), S1, "`aaagent -c` no longer reopens it")
+
+        # Deleting only the previous chat clears it.
+        third = self.transcript(f"{S3}.jsonl")
+        sessions.record_start(self.project, S3, third, now="2026-11-13T23:00:00+0900")
+        chat.write_text(json.dumps({**entry(third), "previous": entry(first)}))
+        sessions.delete(self.project, S1)
+        record = json.loads(chat.read_text())
+        self.assertEqual(record["session_id"], S3)
+        self.assertIsNone(record["previous"])
+
+        # Deleting the only chat removes chat.json.
+        chat.write_text(json.dumps({**entry(third), "previous": None}))
+        sessions.delete(self.project, S3, force=True)
+        self.assertFalse(chat.exists(), "with nothing left, chat.json is removed")
+
+    def test_delete_leaves_the_tasks_of_the_session(self):
+        self.two_sessions()
+        task = tasks.create(self.project, "from the deleted session")
+        self.assertEqual(task.load()["chat_session"], S2)
+        sessions.delete(self.project, S2, force=True)
+        self.assertEqual([t.id for t in tasks.all_tasks(self.project)], [task.id])
+
+    def test_delete_gone_removes_only_unavailable_non_current_sessions(self):
+        first = self.transcript(f"{S1}.jsonl")
+        sessions.record_start(self.project, S1, first, now="2026-11-13T21:00:00+0900")
+        sessions.record_start(self.project, S2, str(Path(self.tmp.name) / f"{S2}.jsonl"),
+                              now="2026-11-13T22:00:00+0900")
+        sessions.record_start(self.project, S3, str(Path(self.tmp.name) / f"{S3}.jsonl"),
+                              now="2026-11-13T23:00:00+0900")
+        removed = sessions.delete_gone(self.project)
+        self.assertEqual([s["id"] for s in removed], [S2], "S3 is gone too but is the current chat")
+        self.assertEqual([s["id"] for s in sessions.list_sessions(self.project)], [S3, S1])
+        self.assertEqual(sessions.delete_gone(self.project), [])
+
+    def test_sessions_delete_command(self):
+        first, second = self.two_sessions()
+
+        code, out = self.cli("sessions", "delete", S1[:8])
+        self.assertEqual(code, 0)
+        self.assertIn(f"deleted session {S1[:8]}  first job", out)
+        self.assertIn("(conversation file removed)", out)
+        self.assertFalse(Path(first).exists())
+        self.assertEqual([s["id"] for s in sessions.list_sessions(self.project)], [S2])
+
+        code, out = self.cli("sessions", "delete", S2[:8])
+        self.assertEqual(code, 2, "the current chat's session needs --force")
+        self.assertIn(S2, [s["id"] for s in sessions.list_sessions(self.project)])
+        code, out = self.cli("sessions", "delete", S2[:8], "--force")
+        self.assertEqual(code, 0)
+        self.assertFalse(Path(second).exists())
+        self.assertEqual(sessions.list_sessions(self.project), [])
+
+    def test_sessions_delete_several_ids_and_a_wrong_one_deletes_nothing(self):
+        self.two_sessions()
+        third = self.transcript(f"{S3}.jsonl")
+        sessions.record_start(self.project, S3, third, now="2026-11-13T23:00:00+0900")
+
+        code, _out = self.cli("sessions", "delete", S1[:8], "nope-nope")
+        self.assertEqual(code, 2)
+        self.assertEqual(len(sessions.list_sessions(self.project)), 3,
+                         "a wrong ref aborts before anything is deleted")
+
+        code, out = self.cli("sessions", "delete", S1[:8], S2[:8], S1)
+        self.assertEqual(code, 0, "the same session named twice is deleted once")
+        self.assertEqual(out.count("deleted session"), 2)
+        self.assertEqual([s["id"] for s in sessions.list_sessions(self.project)], [S3])
+
+    def test_sessions_delete_without_ids_says_what_to_do(self):
+        code, out = self.cli("sessions", "delete")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+
+    def test_sessions_delete_gone_and_keep_conversation(self):
+        first = self.transcript(f"{S1}.jsonl")
+        sessions.record_start(self.project, S1, first, now="2026-11-13T21:00:00+0900")
+        sessions.record_start(self.project, S3, str(Path(self.tmp.name) / f"{S3}.jsonl"),
+                              now="2026-11-13T22:00:00+0900")
+        sessions.record_start(self.project, S2, str(Path(self.tmp.name) / f"{S2}.jsonl"),
+                              now="2026-11-13T23:00:00+0900")
+
+        code, out = self.cli("sessions", "delete", "--gone")
+        self.assertEqual(code, 0)
+        self.assertIn(f"deleted session {S3[:8]}", out)
+        self.assertNotIn(S2[:8], out, "the current chat's session stays")
+        self.assertEqual([s["id"] for s in sessions.list_sessions(self.project)], [S2, S1])
+
+        code, out = self.cli("sessions", "delete", "--gone")
+        self.assertEqual((code, out.strip()), (0, "no gone sessions"))
+
+        code, out = self.cli("sessions", "delete", S1[:8], "--keep-conversation")
+        self.assertEqual(code, 0)
+        self.assertIn("(conversation kept)", out)
+        self.assertTrue(Path(first).exists())
+
+    def test_sessions_delete_json_and_the_listing_hint(self):
+        self.two_sessions()
+        code, out = self.cli("sessions", "delete", S1[:8], "--json")
+        self.assertEqual(code, 0)
+        removed = json.loads(out)
+        self.assertEqual([s["id"] for s in removed], [S1])
+        self.assertTrue(removed[0]["conversation_deleted"])
+        self.assertEqual([s["short"] for s in removed], [S1[:8]])
+
+        code, out = self.cli("sessions")
+        self.assertEqual(code, 0)
+        self.assertIn("delete one with: aaagent sessions delete <id>", out)
+        code, out = self.cli("sessions", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual([s["id"] for s in json.loads(out)], [S2])
+
     # -- the hook ------------------------------------------------------------
 
     HOOK = ROOT / "claude" / "hooks" / "record_session.py"

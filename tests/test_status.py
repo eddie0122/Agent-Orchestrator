@@ -540,6 +540,39 @@ class SessionKeysTest(unittest.TestCase):
         self.assertIsNone(self.press("o"))
         self.assertEqual(self.ui.message, "select a session to open")
 
+    def test_x_on_another_row_asks_for_a_session(self):
+        self.ui.selected = "task:004-health"
+        self.assertIsNone(self.press("x"))
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "select a session to delete")
+
+    def test_x_on_the_current_session_suggests_force(self):
+        self.ui.selected = "session:sess-current"
+        self.assertIsNone(self.press("x"))
+        self.assertIsNone(self.ui.confirm)
+        self.assertIn("current chat's session", self.ui.message)
+        self.assertIn("aaagent sessions delete sess-cur --force", self.ui.message)
+
+    def test_x_on_another_session_asks_first(self):
+        self.ui.selected = "session:sess-old"
+        self.assertIsNone(self.press("x"))
+        self.assertIn('Delete session "fix login"', self.ui.confirm.prompt)
+        self.assertIn("conversation file is deleted too", self.ui.confirm.prompt)
+        self.assertEqual(self.press("y"), ("delete_session", "sess-old"))
+
+    def test_x_on_a_gone_session_works_too(self):
+        self.ui.selected = "session:sess-gone"
+        self.press("x")
+        self.assertEqual(self.ui.confirm.action, ("delete_session", "sess-gone"))
+
+    def test_x_can_be_cancelled(self):
+        self.ui.selected = "session:sess-old"
+        self.press("x")
+        self.assertIsNotNone(self.ui.confirm)
+        self.assertIsNone(self.press("n"))
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "cancelled")
+
 
 class FakeScreen:
     """Just enough of a curses screen for Dashboard in tests."""
@@ -736,6 +769,23 @@ class ActSessionsTest(unittest.TestCase):
             self.assertTrue(self.dash.act(("open_session", "sess-old")))
         respawn.assert_not_called()
         self.assertIn("tmux layout", self.dash.ui.message)
+
+    def test_delete_session_forgets_it_and_says_so(self):
+        from aaagent import sessions
+        transcript = Path(self.tmp.name) / "sess-old.jsonl"
+        transcript.write_text("{}\n")
+        sessions.record_start(self.project, "sess-old", str(transcript),
+                              now="2026-11-13T20:00:00+0900")
+        sessions.record_start(self.project, "sess-current", None,
+                              now="2026-11-13T21:00:00+0900")
+        self.dash.load()
+        self.assertEqual([s["id"] for s in self.dash.data["sessions"]],
+                         ["sess-current", "sess-old"])
+
+        self.assertTrue(self.dash.act(("delete_session", "sess-old")))
+        self.assertEqual([s["id"] for s in self.dash.data["sessions"]], ["sess-current"])
+        self.assertFalse(transcript.exists())
+        self.assertEqual(self.dash.ui.message, "deleted session sess-old")
 
 
 class TailTest(unittest.TestCase):

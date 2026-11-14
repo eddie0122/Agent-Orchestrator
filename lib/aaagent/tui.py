@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gitutil, models, session, status, tasks, worker
+from . import dispatch, gitutil, models, session, sessions, status, tasks, worker
 from .config import Config
 from .status import Row
 from .tasks import FlowError
@@ -39,6 +39,7 @@ HELP = [
     ("v", "choose who reviews each round: the planner or a worker"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
     ("o", "open the selected session in the chat pane"),
+    ("x", "delete the selected session (its conversation file too)"),
     ("N", "start a new chat session"),
     ("R", "restore an earlier session (pick from a list)"),
     ("r", "refresh now"),
@@ -135,8 +136,9 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
                has_chat_pane: bool = False) -> tuple | None:
     """Apply one key press to the UI state. Returns an action for the caller to carry out:
     ("quit",) ("refresh",) ("open", path, title) ("diff", task_id) ("abandon", task_id)
-    ("restore",) ("open_session", session_id) ("new_chat",) ("help",) ("model", target)
-    ("thinking", target) ("reviewer",), or None when the key only changed what is shown.
+    ("restore",) ("open_session", session_id) ("delete_session", session_id) ("new_chat",)
+    ("help",) ("model", target) ("thinking", target) ("reviewer",), or None when the key only
+    changed what is shown.
     """
     if key in (-1, curses.KEY_RESIZE):
         return None
@@ -297,6 +299,17 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
             ui.confirm = Confirm(f'Open session "{label}" in the chat pane? '
                                  "The current chat closes. (y/n)",
                                  ("open_session", row.ref["id"]))
+    elif key == ord("x"):
+        if not row or row.kind != "session":
+            ui.message = "select a session to delete"
+        elif row.ref.get("current"):
+            ui.message = (f"this is the current chat's session; close the chat, then: "
+                          f"aaagent sessions delete {row.ref['short']} --force")
+        else:
+            label = status.clip(status.session_label(row.ref), 40)
+            ui.confirm = Confirm(f'Delete session "{label}"? '
+                                 "Its conversation file is deleted too. (y/n)",
+                                 ("delete_session", row.ref["id"]))
     elif key == ord("N"):
         if has_chat_pane:
             ui.confirm = Confirm("Close this chat and start a new session? (y/n)", ("new_chat",))
@@ -488,6 +501,10 @@ class Dashboard:
                                          os.environ.get("AAAGENT_TMUX_CLOSE") or "tmux kill-window")
                     self.ui.message = f"opened session {action[1][:8]}"
                     self.load()
+            elif name == "delete_session":
+                removed = sessions.delete(self.project, action[1])
+                self.load()
+                self.ui.message = f"deleted session {removed['short']}"
             elif name in ("model", "thinking"):
                 if action[1]:
                     self.pick_values(name, action[1])
@@ -724,8 +741,10 @@ class Dashboard:
             hints = "↑↓ scroll  space page  q back"
         else:
             hints = "enter open  d diff  m model  t thinking  v reviewer  a abandon"
+            row = self.selected_row()
+            if row and row.kind == "session":
+                hints += "  x delete"
             if self.chat_pane:
-                row = self.selected_row()
                 if row and row.kind == "session":
                     hints += "  o open session"
                 hints += "  N new session  R restore"

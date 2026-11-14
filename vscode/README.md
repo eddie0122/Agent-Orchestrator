@@ -4,12 +4,13 @@ Chat with Claude Opus as planner and reviewer while opencode workers (DeepSeek, 
 
 - **Sidebar** (aaagent icon in the activity bar), with three views:
   - **Workers**: the workers and what they are doing.
-  - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it.
+  - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it, and right-click → **Delete Session…** (or the trash button) deletes a session that is not the open chat.
   - **Tasks**: all tasks with their plan, reports, reviews and Changes.
 - **New Session** (Sessions view title): opens a fresh Opus chat as an editor tab, with one terminal per worker in the panel. Any open chat closes first.
 - **Open Chat**: shows the open chat, or starts one if there is none (Sessions view `…` menu).
 - **Restore Previous Session…** (Sessions view title): reopens one of this project's earlier chats (`aaagent start --session <id>`).
 - **Open Session**: the ↻ button on a session in the Sessions view reopens it; from the command palette it asks which one.
+- **Delete Session…**: right-click a session (or use the trash button) to remove it and its conversation, after a modal confirmation. The open chat cannot be deleted.
 - **Ask Opus…**: type a request; the chat starts if it is not running yet.
 - **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, for all projects or just this one.
 - **Select Thinking Level…** (Workers view title, or right-click a worker → **Change Thinking Level…**): set the planner's reasoning effort or a worker's model variant, for all projects or just this one.

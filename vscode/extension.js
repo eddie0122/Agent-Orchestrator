@@ -464,6 +464,27 @@ function activate(context) {
     await restoreSession(p, s);
   });
 
+  command("aaagent.deleteSession", async (node) => {
+    const s = node && node.session;
+    const p = project();
+    if (!s || !p) return;
+    if (openSessionId() === s.id) {
+      vscode.window.showInformationMessage(
+        "aaagent: this session is the open chat. Close the chat or start a new session first.");
+      return;
+    }
+    const ok = await vscode.window.showWarningMessage(
+      `Delete session "${model.short(s.title || "(no messages yet)", 60)}"?`,
+      {
+        modal: true,
+        detail: "Its conversation is deleted and cannot be restored. The tasks it created stay.",
+      },
+      "Delete");
+    if (ok !== "Delete") return;
+    const out = await cli.exec(p, ["sessions", "delete", s.id, "--force"]);
+    vscode.window.showInformationMessage(`aaagent: ${model.short(out, 200)}`);
+  });
+
   command("aaagent.ask", async () => {
     const p = project();
     if (!p) return;

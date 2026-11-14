@@ -8,13 +8,14 @@ One session is one Claude conversation (the Opus chat); a session can create man
 
 The file itself holds the sessions oldest first. It is written by
 `claude/hooks/record_session.py` and read by `aaagent sessions`, `aaagent status` and
-`aaagent --session`.
+`aaagent --session`. `aaagent sessions delete` forgets a session and removes its conversation.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -259,7 +260,7 @@ def list_sessions(project: Path, limit: int | None = None) -> list[dict]:
     return out[:limit] if limit is not None else out
 
 
-def find(project: Path, ref: str) -> dict:
+def lookup(project: Path, ref: str) -> dict:
     """One session by full id or by an id prefix of at least PREFIX_MIN characters."""
     from . import tasks
 
@@ -267,18 +268,97 @@ def find(project: Path, ref: str) -> dict:
     known = list_sessions(project)
     exact = [s for s in known if s["id"] == ref]
     if exact:
-        match = exact[0]
-    elif len(ref) < PREFIX_MIN:
+        return exact[0]
+    if len(ref) < PREFIX_MIN:
         raise tasks.FlowError(f"no session matches '{ref}'; see aaagent sessions")
-    else:
-        matches = [s for s in known if s["id"].startswith(ref)]
-        if not matches:
-            raise tasks.FlowError(f"no session matches '{ref}'; see aaagent sessions")
-        if len(matches) > 1:
-            raise tasks.FlowError(
-                f"'{ref}' matches several sessions: {', '.join(s['short'] for s in matches)}")
-        match = matches[0]
+    matches = [s for s in known if s["id"].startswith(ref)]
+    if not matches:
+        raise tasks.FlowError(f"no session matches '{ref}'; see aaagent sessions")
+    if len(matches) > 1:
+        raise tasks.FlowError(
+            f"'{ref}' matches several sessions: {', '.join(s['short'] for s in matches)}")
+    return matches[0]
+
+
+def find(project: Path, ref: str) -> dict:
+    """One session by full id or by an id prefix of at least PREFIX_MIN characters."""
+    from . import tasks
+
+    match = lookup(project, ref)
     if not match["available"]:
         raise tasks.FlowError(
             f"session {match['short']} can no longer be reopened: its conversation file is gone")
     return match
+
+
+def _write_chat(project: Path, record: dict) -> None:
+    path = _chat_file(project)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(record, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def _forget_chat(project: Path, session_id: str) -> None:
+    """Take a session out of chat.json, so `aaagent -c` no longer reopens it."""
+    path = _chat_file(project)
+    record = _read_json(path)
+    if not record:
+        return
+    previous = record.get("previous")
+    try:
+        if record.get("session_id") == session_id:
+            if isinstance(previous, dict) and previous.get("session_id"):
+                _write_chat(project, {**previous, "previous": None})
+            else:
+                path.unlink()
+        elif isinstance(previous, dict) and previous.get("session_id") == session_id:
+            _write_chat(project, {**record, "previous": None})
+    except OSError:
+        pass
+
+
+def _delete_conversation(transcript: str | None, session_id: str) -> bool:
+    """Remove Claude Code's `<session id>.jsonl` (and its `<session id>/` folder), nothing else."""
+    if not transcript:
+        return False
+    path = Path(transcript)
+    if path.name != f"{session_id}.jsonl" or not path.is_file():
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    folder = path.with_name(session_id)
+    if folder.is_dir():
+        try:
+            shutil.rmtree(folder)
+        except OSError:
+            pass
+    return True
+
+
+def delete(project: Path, ref: str, keep_conversation: bool = False, force: bool = False) -> dict:
+    """Forget a session and delete its conversation file. Returns the session's listing entry
+    with `conversation_deleted` (bool) added."""
+    from . import tasks
+
+    match = lookup(project, ref)
+    if match["current"] and not force:
+        raise tasks.FlowError(f"session {match['short']} is the current chat's session; "
+                              "close the chat first, then pass --force")
+    session_id = match["id"]
+    data = load(project)
+    data["sessions"] = [s for s in data["sessions"] if s.get("id") != session_id]
+    if data.get("current") == session_id:
+        data["current"] = None
+    _write(project, data)
+    _forget_chat(project, session_id)
+    match["conversation_deleted"] = (
+        False if keep_conversation else _delete_conversation(match.get("transcript_path"), session_id))
+    return match
+
+
+def delete_gone(project: Path) -> list[dict]:
+    """Delete every session whose conversation file is gone, except the current chat's."""
+    gone = [s for s in list_sessions(project) if not s.get("available") and not s.get("current")]
+    return [delete(project, s["id"]) for s in gone]

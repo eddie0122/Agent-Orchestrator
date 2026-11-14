@@ -74,7 +74,7 @@ After installing, run **Developer: Reload Window** once. Then:
    The Opus chat opens as an editor tab, and the DeepSeek and GLM workers open as split terminals in the panel.
 3. Talk to Opus. The sidebar follows along:
    - **Workers**: who is running what. Inline buttons show a worker's output or stop it.
-   - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it. **New Session**, **Restore Previous Session…**, **Ask Opus…** and **Attach Image…** are in its title bar.
+   - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it, and right-click → **Delete Session…** (or the trash button) deletes a session that is not the open chat. **New Session**, **Restore Previous Session…**, **Ask Opus…** and **Attach Image…** are in its title bar.
    - **Tasks**: all tasks, newest first, with the current stage (planning, implementing, in review, committed…). Expand a task to open its `plan.md`, `report-N.md` and `review-N.md`, or **Changes** for the diff.
    - The **status bar** shows what is happening now. A notification appears when a task is committed or needs your decision.
 
@@ -136,6 +136,7 @@ Dashboard keys:
 | `v` | choose who reviews each round: the planner or a worker |
 | `a` | abandon the selected task, after a y/n question |
 | `o` | open the selected session in the chat pane, after a y/n question (shown for a session row in aaagent's tmux layout) |
+| `x` | delete the selected session and its conversation, after a y/n question |
 | `N` | start a new session (closes this chat; shown in aaagent's tmux layout) |
 | `R` | restore an earlier session, picked from a list (shown in aaagent's tmux layout) |
 | `?` | all keys · `q` closes a view, or quits the dashboard |
@@ -147,6 +148,8 @@ The dashboard beeps and says so in its bottom line when a task is committed or n
 ### Sessions
 
 Each `aaagent` starts a new chat session, and a session can create many tasks: `aaagent status` shows each task's session, and `aaagent sessions` lists the sessions with the tasks they created. `aaagent --session <id>` reopens one (the id, or a unique prefix of it, is in that list); `aaagent -c` reopens the last one for this project, and `/resume` inside the chat lists older ones. aaagent remembers its own chats in `.aaagent/sessions.json` (and the last one in `.aaagent/chat.json`), so `-c` never picks up an unrelated Claude Code conversation from the same folder. When a new chat starts while tasks are unfinished, Opus is told about them and asks you whether to continue.
+
+`aaagent sessions delete <id>` (an id or id prefix; several ids allowed) removes a session from the list and deletes its Claude Code conversation too, so the list does not grow forever; `--keep-conversation` only forgets the session and leaves the conversation on disk. `aaagent sessions delete --gone` clears every session whose conversation is already gone. The current chat's session needs `--force` (close the chat first), and the tasks a session created stay.
 
 To start a fresh conversation in the middle of things, press `N` in the dashboard (in the tmux layout) or type `/clear` in the chat; quitting and running `aaagent` again does the same.
 
@@ -161,6 +164,7 @@ Opus runs these itself. They are also useful for you:
 | `aaagent ui` | the dashboard, in any terminal |
 | `aaagent status [--all]` | workers and tasks, with each task's next step |
 | `aaagent sessions [--all]` | this project's chat sessions, with the tasks each created |
+| `aaagent sessions delete <id>… [--gone]` | delete chat sessions (and their conversations) |
 | `aaagent diff <task> [--stat]` | everything changed since the task started |
 | `aaagent logs <worker> [-f]` | worker output |
 | `aaagent attach <file\|-> […] [--no-send]` | copy images into `.aaagent/attachments/` and add them to the chat |

@@ -240,6 +240,8 @@ def cmd_status(args) -> int:
 
 def cmd_sessions(args) -> int:
     project = project_root()
+    if args.action == "delete":
+        return _delete_sessions(args, project)
     known = sessions.list_sessions(project, limit=None if args.all else 20)
     if args.json:
         print(json.dumps(known, indent=1))
@@ -256,6 +258,34 @@ def cmd_sessions(args) -> int:
             title += " (gone)"
         print(f"{mark} {session['short']}  {when}  {count:<8}  {title}")
     print("\nreopen one with: aaagent --session <id>")
+    print("delete one with: aaagent sessions delete <id>")
+    return 0
+
+
+def _delete_sessions(args, project: Path) -> int:
+    if not args.refs and not args.gone:
+        raise FlowError("name a session to delete: aaagent sessions delete <id> (ids are listed by "
+                        "`aaagent sessions`), or use --gone")
+    # Resolve every ref first: a wrong one aborts before anything is deleted.
+    ids = list(dict.fromkeys(sessions.lookup(project, ref)["id"] for ref in args.refs))
+    removed = [sessions.delete(project, session_id, keep_conversation=args.keep_conversation,
+                               force=args.force)
+               for session_id in ids]
+    if args.gone:
+        removed += sessions.delete_gone(project)
+    if args.json:
+        print(json.dumps(removed, indent=1))
+        return 0
+    if not removed:
+        print("no gone sessions")
+        return 0
+    for entry in removed:
+        line = f"deleted session {entry['short']}  {entry['title'] or '(no messages yet)'}"
+        if entry["conversation_deleted"]:
+            line += " (conversation file removed)"
+        elif args.keep_conversation:
+            line += " (conversation kept)"
+        print(line)
     return 0
 
 
@@ -416,9 +446,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help="machine-readable output with every task")
     s.set_defaults(func=cmd_status)
 
-    s = sub.add_parser("sessions", help="this project's chat sessions, newest first")
+    s = sub.add_parser("sessions", help="this project's chat sessions, newest first; "
+                                        "`sessions delete <id>…` removes some")
+    s.add_argument("action", nargs="?", choices=["delete"],
+                   help="`delete` to remove sessions: `aaagent sessions delete <id>…`")
+    s.add_argument("refs", nargs="*", metavar="id",
+                   help="sessions to delete (ids or id prefixes from `aaagent sessions`)")
     s.add_argument("--all", action="store_true", help="show every session, not just the latest 20")
     s.add_argument("--json", action="store_true", help="machine-readable list")
+    s.add_argument("--gone", action="store_true",
+                   help="delete every session whose conversation is gone")
+    s.add_argument("--keep-conversation", action="store_true",
+                   help="only forget the session; keep Claude's conversation file")
+    s.add_argument("--force", action="store_true", help="also delete the current chat's session")
     s.set_defaults(func=cmd_sessions)
 
     s = sub.add_parser("diff", help="all changes since the task started")

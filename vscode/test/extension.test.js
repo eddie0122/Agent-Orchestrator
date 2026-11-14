@@ -436,6 +436,33 @@ test("activate() against a real project", async (t) => {
   assert.deepStrictEqual(chat5.creationOptions.shellArgs, ["start", "--no-workers", "--session", otherId]);
   assert.ok(chat4.exitStatus !== undefined, "the old chat is closed");
   assert.ok(!rec.messages.some(([lvl]) => lvl === "error"), JSON.stringify(rec.messages));
+
+  // Delete Session…: the open chat's session is refused; another one asks first, in a modal.
+  await api.refresh();
+  const readSessions = () => JSON.parse(fs.readFileSync(sessionsFile, "utf8")).sessions;
+  const openSessionNode = sessionsTree.getChildren().find((n) => n.session.id === resumeId);
+  assert.strictEqual(sessionsTree.getTreeItem(openSessionNode).contextValue, "session.open");
+  const beforeRefusal = rec.messages.length;
+  await rec.commands.get("aaagent.deleteSession")(openSessionNode);
+  assert.ok(rec.messages.slice(beforeRefusal).some(([lvl, m]) => lvl === "info" && /open chat/.test(m)),
+    JSON.stringify(rec.messages.slice(beforeRefusal)));
+  assert.ok(readSessions().some((s) => s.id === resumeId), "the open session stays");
+
+  // Dismissed: nothing is deleted.
+  const otherNode = sessionsTree.getChildren().find((n) => n.session.id === otherId);
+  rec.answer = undefined;
+  await rec.commands.get("aaagent.deleteSession")(otherNode);
+  await api.refresh();
+  assert.ok(readSessions().some((s) => s.id === otherId), "a dismissed modal deletes nothing");
+
+  // Confirmed: the session leaves the history.
+  rec.answer = "Delete";
+  await rec.commands.get("aaagent.deleteSession")(otherNode);
+  await api.refresh();
+  assert.deepStrictEqual(readSessions().map((s) => s.id), [resumeId]);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /deleted session bbbbbbbb/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
+  rec.answer = undefined;
 });
 
 test("not a git repository and missing CLI show the right welcome state", async (t) => {
