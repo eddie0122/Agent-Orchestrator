@@ -22,12 +22,16 @@ implement_agent = "aaagent-worker"
 commit_agent = "aaagent-committer"
 review_agent = "aaagent-reviewer"
 
-[workers.deepseek]
+# Workers are generic slots: worker1, worker2, worker3, …, and any of them may run any
+# model. The two tables below are only a starting set, used while neither the user config
+# (~/.config/aaagent/config.toml) nor the project config (<project>/.aaagent/config.toml)
+# defines any worker of its own. `aaagent workers add|remove` edits the list.
+[workers.worker1]
 model = "opencode-go/deepseek-v4.1-flash"
 # Thinking level (opencode model variant), e.g. low | high | max. Empty = the model's default.
 thinking = ""
 
-[workers.glm]
+[workers.worker2]
 model = "opencode-go/glm-5.3-flash"
 # Thinking level (opencode model variant), e.g. low | high | max. Empty = the model's default.
 thinking = ""
@@ -41,16 +45,19 @@ thinking = ""
 
 [flow]
 # Worker that implements plans unless the plan or --worker says otherwise.
-default_worker = "deepseek"
+# Empty = the first worker in the list.
+default_worker = ""
 # Worker that takes over when the default one fails or keeps failing review.
-fallback_worker = "glm"
+# Empty = the worker after the default one in the list (or the default itself when
+# there is only one worker, which means no fallback).
+fallback_worker = ""
 # Stop and ask the user after this many implement/fix rounds without approval.
 max_review_rounds = 3
 # Hand the task to the fallback worker after this many rejected reviews in a row.
 fallback_after_failed_reviews = 2
 # Kill a worker job that runs longer than this.
 job_timeout_minutes = 30
-# Who reviews each round: "orchestrator" (the chat) or a worker name such as "glm".
+# Who reviews each round: "orchestrator" (the chat) or a worker name such as "worker2".
 # With a worker, one dispatch runs implement → review → fix … until approval.
 reviewer = "orchestrator"
 

@@ -54,8 +54,8 @@ def data(tasks=None, workers=None, sessions=None):
     return {"project": "/p", "active_task": None,
             "planner": {"model": "opus", "thinking": ""},
             "workers": workers if workers is not None else [
-                worker("deepseek", "idle"),
-                worker("glm", "stopped", model="opencode-go/glm-5.3-flash")],
+                worker("worker1", "idle"),
+                worker("worker2", "stopped", model="opencode-go/glm-5.3-flash")],
             "tasks": tasks or [], "sessions": sessions or []}
 
 
@@ -72,8 +72,8 @@ class SummaryTest(unittest.TestCase):
         s = status.task_summary
         self.assertEqual(s(task(plan_written=False)), "planning")
         self.assertEqual(s(task(next={"phase": "implement"})), "plan ready")
-        self.assertEqual(s(task(status="running", job={"phase": "implement", "worker": "deepseek"})),
-                         "implementing · deepseek")
+        self.assertEqual(s(task(status="running", job={"phase": "implement", "worker": "worker1"})),
+                         "implementing · worker1")
         self.assertEqual(s(task(status="awaiting_review", round=2)), "in review (round 2)")
         self.assertEqual(s(task(status="committed", commit="abcdef123456")), "committed abcdef1")
         self.assertEqual(s(task(status="failed", attention="failed")), "failed: needs you")
@@ -81,17 +81,17 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(s(task(status="x", next={"phase": "commit"})), "approved, ready to commit")
 
     def test_worker_summary(self):
-        w = {"name": "deepseek", "state": "running", "queued": 1,
+        w = {"name": "worker1", "state": "running", "queued": 1,
              "job": {"task": "004-health", "phase": "fix", "round": 2}}
         self.assertEqual(status.worker_summary(w), "fixing 004 r2 · 1 queued")
         self.assertEqual(status.worker_summary({"state": "stopped", "queued": 0}), "stopped")
         self.assertEqual(status.worker_summary({"state": "idle", "queued": 0}), "waiting for a plan")
 
     def test_worker_summary_shows_the_short_model_and_thinking(self):
-        w = worker("deepseek", "idle", thinking="high",
+        w = worker("worker1", "idle", thinking="high",
                    model="opencode-go/deepseek-v4.1-flash")
         self.assertEqual(status.worker_summary(w), "waiting for a plan · deepseek-v4.1-flash · high")
-        w = worker("deepseek", "stopped", thinking="")
+        w = worker("worker1", "stopped", thinking="")
         self.assertEqual(status.worker_summary(w), "stopped · deepseek-v4.1-flash")
 
     def test_planner_summary(self):
@@ -122,11 +122,11 @@ class SummaryTest(unittest.TestCase):
         self.assertIn("the planner is reviewing", ev[0]["message"])
         self.assertNotIn("Opus", ev[0]["message"])
 
-        before_glm = {"reviewer": "glm", "tasks": [task(status="running")]}
-        after_glm = {"reviewer": "glm", "tasks": [task(status="awaiting_review", round=2)]}
+        before_glm = {"reviewer": "worker2", "tasks": [task(status="running")]}
+        after_glm = {"reviewer": "worker2", "tasks": [task(status="awaiting_review", round=2)]}
         self.assertEqual(status.transitions(before_glm, after_glm), [])
 
-        approved = {"reviewer": "glm", "tasks": [task(status="approved", round=2)]}
+        approved = {"reviewer": "worker2", "tasks": [task(status="approved", round=2)]}
         ev = status.transitions(before_glm, approved)
         self.assertEqual(ev[0]["level"], "status")
         self.assertEqual(ev[0]["message"],
@@ -254,8 +254,8 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(row.detail, "planner (the chat)")
         self.assertEqual(row.indent, 1)
         self.assertTrue(row.selectable)
-        d["reviewer"] = "glm"
-        self.assertEqual(status.rows(d)[2].detail, "glm · glm-5.3-flash")
+        d["reviewer"] = "worker2"
+        self.assertEqual(status.rows(d)[2].detail, "worker2 · glm-5.3-flash")
         d["reviewer"] = "missing"
         self.assertEqual(status.rows(d)[2].detail, "missing")
 
@@ -279,10 +279,10 @@ class TextTest(unittest.TestCase):
         self.assertEqual(status.wrap("x", 0), [""])
 
     def test_format_row_puts_detail_on_the_right(self):
-        row = status.Row("w", "worker", "deepseek", "waiting for a plan", indent=1)
+        row = status.Row("w", "worker", "worker1", "waiting for a plan", indent=1)
         line = status.format_row(row, 40)
         self.assertEqual(status.text_width(line), 40)
-        self.assertTrue(line.startswith(" deepseek") and line.endswith("waiting for a plan"))
+        self.assertTrue(line.startswith(" worker1") and line.endswith("waiting for a plan"))
         self.assertLessEqual(status.text_width(status.format_row(row, 12)), 12)
 
 
@@ -295,7 +295,7 @@ class KeysTest(unittest.TestCase):
     def press(self, key, has_chat_pane=False):
         rows = status.rows(self.data, self.ui.expanded)
         k = ord(key) if isinstance(key, str) else key
-        return tui.handle_key(self.ui, k, rows, ("deepseek", "glm"), has_chat_pane)
+        return tui.handle_key(self.ui, k, rows, ("worker1", "worker2"), has_chat_pane)
 
     def test_starts_on_the_open_task_and_moves(self):
         rows = status.rows(self.data)
@@ -340,13 +340,13 @@ class KeysTest(unittest.TestCase):
 
     def test_output_worker_cycles(self):
         self.press("l")
-        self.assertEqual(self.ui.output_worker, "deepseek")
+        self.assertEqual(self.ui.output_worker, "worker1")
         self.press("l")
         self.press("l")
         self.assertIsNone(self.ui.output_worker)
-        self.ui.selected = "worker:glm"
+        self.ui.selected = "worker:worker2"
         self.press(10)
-        self.assertEqual(self.ui.output_worker, "glm")
+        self.assertEqual(self.ui.output_worker, "worker2")
 
     def test_view_scrolls_and_closes(self):
         self.ui.view = tui.View("t", ["x"] * 50)
@@ -383,19 +383,19 @@ class KeysTest(unittest.TestCase):
         self.assertEqual(self.press("y"), ("new_chat",))
 
     def test_output_follows_the_running_worker(self):
-        d = data(workers=[{"name": "deepseek", "state": "idle", "log": "/none"},
-                          {"name": "glm", "state": "running", "log": "/none"}])
-        self.assertEqual(tui.output_worker(self.ui, d), "glm")
-        self.ui.output_worker = "deepseek"
-        self.assertEqual(tui.output_worker(self.ui, d), "deepseek")
-        idle = data(workers=[{"name": "deepseek", "state": "idle", "log": "/none"},
-                             {"name": "glm", "state": "idle", "log": "/none"}])
-        self.assertEqual(tui.output_worker(tui.UI(), idle, task(worker="glm")), "glm")
+        d = data(workers=[{"name": "worker1", "state": "idle", "log": "/none"},
+                          {"name": "worker2", "state": "running", "log": "/none"}])
+        self.assertEqual(tui.output_worker(self.ui, d), "worker2")
+        self.ui.output_worker = "worker1"
+        self.assertEqual(tui.output_worker(self.ui, d), "worker1")
+        idle = data(workers=[{"name": "worker1", "state": "idle", "log": "/none"},
+                             {"name": "worker2", "state": "idle", "log": "/none"}])
+        self.assertEqual(tui.output_worker(tui.UI(), idle, task(worker="worker2")), "worker2")
 
     def test_model_and_thinking_keys_use_the_selected_row(self):
-        self.ui.selected = "worker:deepseek"
-        self.assertEqual(self.press("m"), ("model", "deepseek"))
-        self.assertEqual(self.press("t"), ("thinking", "deepseek"))
+        self.ui.selected = "worker:worker1"
+        self.assertEqual(self.press("m"), ("model", "worker1"))
+        self.assertEqual(self.press("t"), ("thinking", "worker1"))
         self.ui.selected = "planner"
         self.assertEqual(self.press("m"), ("model", "planner"))
         self.assertEqual(self.press("t"), ("thinking", "planner"))
@@ -472,7 +472,7 @@ class SessionKeysTest(unittest.TestCase):
     def press(self, key, has_chat_pane=False):
         rows = status.rows(self.data, self.ui.expanded)
         k = ord(key) if isinstance(key, str) else key
-        return tui.handle_key(self.ui, k, rows, ("deepseek", "glm"), has_chat_pane)
+        return tui.handle_key(self.ui, k, rows, ("worker1", "worker2"), has_chat_pane)
 
     def test_enter_shows_a_sessions_tasks(self):
         self.ui.selected = "session:sess-current"
@@ -638,27 +638,27 @@ class ActTest(unittest.TestCase):
     def test_picker_can_pick_which_target(self):
         self.dash.act(("model", None))
         picker = self.dash.ui.picker
-        self.assertEqual([i[1] for i in picker.items], ["planner", "deepseek", "glm"])
+        self.assertEqual([i[1] for i in picker.items], ["planner", "worker1", "worker2"])
         self.assertEqual(picker.items[1][2], "opencode-go/deepseek-v4.1-flash")
         self.dash.act(("thinking", None))
-        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["planner", "deepseek", "glm"])
+        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["planner", "worker1", "worker2"])
         self.assertEqual(self.dash.ui.picker.items[1][2], "default")
 
     def test_thinking_picker_lists_the_levels(self):
         with mock.patch.object(models, "thinking_choices", return_value=["low", "high", "max"]):
-            self.dash.act(("thinking", "deepseek"))
+            self.dash.act(("thinking", "worker1"))
         picker = self.dash.ui.picker
-        self.assertEqual(picker.title, "thinking for deepseek")
+        self.assertEqual(picker.title, "thinking for worker1")
         self.assertEqual([i[1] for i in picker.items], ["default", "low", "high", "max"])
         self.assertEqual(picker.items[0][2], "the model's own setting")
 
     def test_thinking_save_writes_the_user_config(self):
         with mock.patch.object(models, "thinking_choices", return_value=["low", "high", "max"]):
-            self.dash.act(("thinking_save", "deepseek", "high", "user"))
+            self.dash.act(("thinking_save", "worker1", "high", "user"))
         text = self.user.read_text()
-        self.assertIn("[workers.deepseek]", text)
+        self.assertIn("[workers.worker1]", text)
         self.assertIn('thinking = "high"', text)
-        self.assertIn("deepseek thinking: high", self.dash.ui.message)
+        self.assertIn("worker1 thinking: high", self.dash.ui.message)
         self.assertEqual(self.dash.data["planner"]["model"], "opus")
 
     def test_model_save_writes_the_project_config(self):
@@ -674,23 +674,23 @@ class ActTest(unittest.TestCase):
         self.assertTrue(self.dash.act(("reviewer",)))
         picker = self.dash.ui.picker
         self.assertEqual(picker.title, "who reviews each round?")
-        self.assertEqual([i[1] for i in picker.items], ["orchestrator", "deepseek", "glm"])
-        self.assertEqual([i[0] for i in picker.items], ["planner (the chat)", "deepseek", "glm"])
+        self.assertEqual([i[1] for i in picker.items], ["orchestrator", "worker1", "worker2"])
+        self.assertEqual([i[0] for i in picker.items], ["planner (the chat)", "worker1", "worker2"])
         self.assertEqual(picker.items[0][2], "current")
         self.assertEqual(picker.items[2][2], "opencode-go/glm-5.3-flash")
         self.assertEqual(picker.action, ("reviewer_pick",))
 
-        self.dash.act(("reviewer_pick", "glm"))
+        self.dash.act(("reviewer_pick", "worker2"))
         self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["user", "project"])
-        self.dash.act(("reviewer_save", "glm", "project"))
+        self.dash.act(("reviewer_save", "worker2", "project"))
         path = self.project / ".aaagent" / "config.toml"
         self.assertTrue(path.is_file())
-        self.assertIn('reviewer = "glm"', path.read_text())
-        self.assertEqual(self.dash.data["reviewer"], "glm")
-        self.assertIn("reviewer: glm", self.dash.ui.message)
+        self.assertIn('reviewer = "worker2"', path.read_text())
+        self.assertEqual(self.dash.data["reviewer"], "worker2")
+        self.assertIn("reviewer: worker2", self.dash.ui.message)
 
     def test_reviewer_picker_marks_the_worker_that_reviews(self):
-        self.dash.act(("reviewer_save", "glm", "user"))
+        self.dash.act(("reviewer_save", "worker2", "user"))
         self.dash.act(("reviewer",))
         self.assertEqual(self.dash.ui.picker.items[0][2], "")
         self.assertEqual(self.dash.ui.picker.items[2][2], "current")

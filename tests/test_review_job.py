@@ -30,7 +30,7 @@ worker:
 Append the model name to work.txt.
 """
 
-REVIEWER = '[flow]\nreviewer = "glm"\n'
+REVIEWER = '[flow]\nreviewer = "worker2"\n'
 
 
 def review(verdict: str, rnd: int) -> str:
@@ -66,10 +66,10 @@ class ReviewJobTest(unittest.TestCase):
         session.init_project(self.project, Config.load(self.project))
 
     def stop_workers(self):
-        for name in ("deepseek", "glm"):
+        for name in ("worker1", "worker2"):
             worker.stop(self.project, name)
         for _ in range(50):
-            if not any(worker.worker_pid(self.project, n) for n in ("deepseek", "glm")):
+            if not any(worker.worker_pid(self.project, n) for n in ("worker1", "worker2")):
                 break
             time.sleep(0.1)
 
@@ -128,8 +128,8 @@ class ReviewJobTest(unittest.TestCase):
 
         self.config(REVIEWER)
         cfg = Config.load(self.project)
-        self.assertEqual(cfg.reviewer, "glm")
-        self.assertEqual(cfg.reviewer_worker, "glm")
+        self.assertEqual(cfg.reviewer, "worker2")
+        self.assertEqual(cfg.reviewer_worker, "worker2")
 
     # -- 2. one dispatch runs the whole round --------------------------------
 
@@ -144,7 +144,7 @@ class ReviewJobTest(unittest.TestCase):
         self.assertEqual(task.verdict(1), "approved")
         state = task.load()
         self.assertEqual(state["status"], "approved")
-        self.assertEqual(state["worker"], "deepseek", "a review never changes the implementing worker")
+        self.assertEqual(state["worker"], "worker1", "a review never changes the implementing worker")
         self.assertIn("the reviewer approved", out)
         agents = [c[c.index("--agent") + 1] for c in self.calls()]
         self.assertEqual(agents, ["aaagent-worker", "aaagent-reviewer"])
@@ -170,9 +170,9 @@ class ReviewJobTest(unittest.TestCase):
         self.assertTrue(task.report(2).is_file())
         state = task.load()
         self.assertEqual(state["status"], "approved")
-        self.assertEqual(state["worker"], "deepseek")
-        self.assertIn("deepseek", state["sessions"])
-        self.assertIn("glm:review", state["sessions"], "the reviewer keeps its own session")
+        self.assertEqual(state["worker"], "worker1")
+        self.assertIn("worker1", state["sessions"])
+        self.assertIn("worker2:review", state["sessions"], "the reviewer keeps its own session")
 
         reviewer_calls = [c for c in self.calls() if c[c.index("--agent") + 1] == "aaagent-reviewer"]
         self.assertEqual(len(reviewer_calls), 2)
@@ -209,10 +209,10 @@ class ReviewJobTest(unittest.TestCase):
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
-        self.assertIn("retrying with deepseek", out)
+        self.assertIn("retrying with worker1", out)
         self.assertIn(DS, task.review(1).read_text())
         self.assertEqual(task.load()["status"], "approved")
-        self.assertEqual(task.load()["worker"], "deepseek")
+        self.assertEqual(task.load()["worker"], "worker1")
 
     # -- 6. both reviewers failing never marks the task failed ----------------
 
@@ -228,7 +228,7 @@ class ReviewJobTest(unittest.TestCase):
         state = task.load()
         self.assertEqual(state["status"], "awaiting_review")
         self.assertEqual(state["review_failed_round"], 1)
-        self.assertEqual(state["worker"], "deepseek")
+        self.assertEqual(state["worker"], "worker1")
 
         task.review(1).write_text(review("approved", 1))
         code, out = self.run_dispatch(task)
@@ -243,7 +243,7 @@ class ReviewJobTest(unittest.TestCase):
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
-        self.assertIn("retrying with deepseek", out)
+        self.assertIn("retrying with worker1", out)
         self.assertTrue((task.path / "review-1.invalid.md").is_file())
         self.assertFalse(task.review(1).exists())
         state = task.load()
@@ -269,7 +269,8 @@ class ReviewJobTest(unittest.TestCase):
     # -- 9. a reviewer on Claude Code -----------------------------------------
 
     def test_reviewer_on_claude_gets_the_guard_role(self):
-        self.config('[workers.glm]\nmodel = "sonnet"\n[flow]\nreviewer = "glm"\n')
+        self.config('[workers.worker1]\nmodel = "opencode-go/deepseek-v4.1-flash"\n'
+                    '[workers.worker2]\nmodel = "sonnet"\n[flow]\nreviewer = "worker2"\n')
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
@@ -294,7 +295,7 @@ class ReviewJobTest(unittest.TestCase):
         self.new_task("half done")
         prompt = session.orchestrator_prompt(cfg, self.project)
         self.assertIn("Reviews are written by a worker", prompt)
-        self.assertIn("`glm`", prompt)
+        self.assertIn("`worker2`", prompt)
         self.assertIn(GLM, prompt)
         self.assertLess(prompt.index("Reviews are written by a worker"),
                         prompt.index("## Unfinished work from an earlier chat"))
@@ -303,10 +304,10 @@ class ReviewJobTest(unittest.TestCase):
 
     def test_status_summary_of_a_review_job(self):
         t = {"id": "001-x", "number": 1, "title": "x", "status": "running", "round": 1,
-             "worker": "deepseek", "verdict": None, "plan_written": True,
-             "job": {"phase": "review", "round": 1, "worker": "glm"},
+             "worker": "worker1", "verdict": None, "plan_written": True,
+             "job": {"phase": "review", "round": 1, "worker": "worker2"},
              "next": None, "blocked": None, "attention": None, "commit": None, "files": []}
-        self.assertEqual(status.task_summary(t), "reviewing · glm")
+        self.assertEqual(status.task_summary(t), "reviewing · worker2")
 
     # -- the default flow is unchanged ---------------------------------------
 

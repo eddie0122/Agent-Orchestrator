@@ -62,10 +62,10 @@ class BackendTest(unittest.TestCase):
         session.init_project(self.project, Config.load(self.project))
 
     def tearDown(self):
-        for name in ("deepseek", "glm"):
+        for name in ("worker1", "worker2"):
             worker.stop(self.project, name)
         for _ in range(50):
-            if not any(worker.worker_pid(self.project, n) for n in ("deepseek", "glm")):
+            if not any(worker.worker_pid(self.project, n) for n in ("worker1", "worker2")):
                 break
             time.sleep(0.1)
         os.environ.clear()
@@ -90,7 +90,7 @@ class BackendTest(unittest.TestCase):
         report = self.project / ".aaagent" / "tasks" / "001-x" / "report-1.md"
         report.parent.mkdir(parents=True, exist_ok=True)
         job = {
-            "id": "j1", "task": "001-x", "phase": phase, "round": 1, "worker": "deepseek",
+            "id": "j1", "task": "001-x", "phase": phase, "round": 1, "worker": "worker1",
             "model": DS, "thinking": "", "agent": "aaagent-worker",
             "prompt": f"Write your report to: {report}\nround: 1\n",
             "log": str(report.parent / "log.jsonl"), "timeout": 30,
@@ -130,17 +130,17 @@ class BackendTest(unittest.TestCase):
             Config.load(self.project).worker_backend("nope")
 
         cfg = Config.load(self.project)
-        self.assertEqual(cfg.worker_backend("deepseek"), "opencode")
-        self.assertEqual(cfg.worker_backend("glm"), "opencode")
+        self.assertEqual(cfg.worker_backend("worker1"), "opencode")
+        self.assertEqual(cfg.worker_backend("worker2"), "opencode")
 
-        self.config('[workers.deepseek]\nmodel = "sonnet"\n')
-        self.assertEqual(Config.load(self.project).worker_backend("deepseek"), "claude")
+        self.config('[workers.worker1]\nmodel = "sonnet"\n')
+        self.assertEqual(Config.load(self.project).worker_backend("worker1"), "claude")
 
-        self.config('[workers.deepseek]\nbackend = "claude"\n')
-        self.assertEqual(Config.load(self.project).worker_backend("deepseek"), "claude")
+        self.config('[workers.worker1]\nmodel = "sonnet"\nbackend = "claude"\n')
+        self.assertEqual(Config.load(self.project).worker_backend("worker1"), "claude")
 
-        self.config('[workers.deepseek]\nbackend = "x"\n')
-        self.assertEqual(Config.load(self.project).worker_backend("deepseek"), "opencode")
+        self.config('[workers.worker1]\nmodel = "opencode-go/deepseek-v4.1-flash"\nbackend = "x"\n')
+        self.assertEqual(Config.load(self.project).worker_backend("worker1"), "opencode")
 
     # -- 2. the opencode command is unchanged --------------------------------
 
@@ -213,7 +213,7 @@ class BackendTest(unittest.TestCase):
     # -- 5. the whole flow on claude -----------------------------------------
 
     def test_full_flow_on_claude(self):
-        self.config('[workers.deepseek]\nmodel = "sonnet"\n')
+        self.config('[workers.worker1]\nmodel = "sonnet"\n')
         task = self.new_task()
         head0 = self.git("rev-parse", "HEAD").strip()
         code, out = self.run_dispatch(task)
@@ -236,14 +236,15 @@ class BackendTest(unittest.TestCase):
     # -- 6. a failed claude job falls back -----------------------------------
 
     def test_failed_claude_job_falls_back_to_opencode(self):
-        self.config('[workers.deepseek]\nmodel = "sonnet"\n')
+        self.config('[workers.worker1]\nmodel = "sonnet"\n'
+                    '[workers.worker2]\nmodel = "opencode-go/glm-5.3-flash"\n')
         os.environ["FAKE_CLAUDE_FAIL"] = "sonnet"
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
-        self.assertIn("retrying with glm", out)
+        self.assertIn("retrying with worker2", out)
         self.assertIn(GLM, task.report(1).read_text())
-        self.assertEqual(task.load()["worker"], "glm")
+        self.assertEqual(task.load()["worker"], "worker2")
         self.assertEqual(task.load()["status"], "awaiting_review")
 
     # -- 7. sessions only continue on their own backend ----------------------
@@ -261,33 +262,34 @@ class BackendTest(unittest.TestCase):
 
     def test_worker_choices_include_claude(self):
         cfg = Config.load(self.project)
-        names = models.choices(cfg, "deepseek")
+        names = models.choices(cfg, "worker1")
         self.assertIn("opencode-go/kimi-k3", names)
         self.assertIn("sonnet", names)
         self.assertEqual(len(names), len(set(names)))
         self.assertNotIn("sonnet", models.worker_choices(cfg))
 
     def test_claude_worker_has_claude_thinking(self):
-        self.config('[workers.deepseek]\nmodel = "sonnet"\n')
+        self.config('[workers.worker1]\nmodel = "sonnet"\n'
+                    '[workers.worker2]\nmodel = "opencode-go/glm-5.3-flash"\n')
         cfg = Config.load(self.project)
-        self.assertEqual(models.thinking_choices(cfg, "deepseek"), PLANNER_THINKING)
-        self.assertEqual(models.thinking_choices(cfg, "glm"), ["low", "high", "max"])
+        self.assertEqual(models.thinking_choices(cfg, "worker1"), PLANNER_THINKING)
+        self.assertEqual(models.thinking_choices(cfg, "worker2"), ["low", "high", "max"])
 
     def test_switching_a_worker_to_claude_says_so(self):
-        code, out = self.cli("model", "deepseek", "sonnet")
+        code, out = self.cli("model", "worker1", "sonnet")
         self.assertEqual(code, 0, out)
         self.assertIn("Claude Code", out)
         self.assertNotIn("warning", out)
         cfg = Config.load(self.project)
-        self.assertEqual((cfg.worker_model("deepseek"), cfg.worker_backend("deepseek")),
+        self.assertEqual((cfg.worker_model("worker1"), cfg.worker_backend("worker1")),
                          ("sonnet", "claude"))
 
     def test_model_json_has_the_backend(self):
         code, out = self.cli("model", "--json")
         self.assertEqual(code, 0, out)
         data = json.loads(out)
-        self.assertEqual(data["workers"]["deepseek"]["backend"], "opencode")
-        self.assertEqual(data["workers"]["glm"]["backend"], "opencode")
+        self.assertEqual(data["workers"]["worker1"]["backend"], "opencode")
+        self.assertEqual(data["workers"]["worker2"]["backend"], "opencode")
         self.assertIn("sonnet", data["worker_choices"])
         self.assertIn("opencode-go/kimi-k3", data["worker_choices"])
 
@@ -295,14 +297,14 @@ class BackendTest(unittest.TestCase):
         code, out = self.cli("thinking", "--json")
         self.assertEqual(code, 0, out)
         data = json.loads(out)
-        self.assertEqual(data["workers"]["deepseek"]["backend"], "opencode")
+        self.assertEqual(data["workers"]["worker1"]["backend"], "opencode")
 
     # -- 10. status ----------------------------------------------------------
 
     def test_status_data_has_the_backend(self):
         data = status.status_data(self.project, Config.load(self.project))
         self.assertEqual(data["workers"][0]["backend"], "opencode")
-        self.config('[workers.deepseek]\nmodel = "sonnet"\n')
+        self.config('[workers.worker1]\nmodel = "sonnet"\n')
         data = status.status_data(self.project, Config.load(self.project))
         self.assertEqual(data["workers"][0]["backend"], "claude")
 
@@ -310,7 +312,7 @@ class BackendTest(unittest.TestCase):
         code, out = self.cli("status")
         self.assertEqual(code, 0, out)
         self.assertNotIn("[claude]", out)
-        self.config('[workers.deepseek]\nmodel = "sonnet"\n')
+        self.config('[workers.worker1]\nmodel = "sonnet"\n')
         code, out = self.cli("status")
         self.assertEqual(code, 0, out)
         self.assertIn("[claude]", out)

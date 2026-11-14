@@ -61,26 +61,26 @@ class ReviewerTest(unittest.TestCase):
         self.assertIn("reviewer: orchestrator (the chat reviews each round)", out)
 
     def test_set_a_worker_in_the_user_config(self):
-        code, out = self.cli("reviewer", "glm")
+        code, out = self.cli("reviewer", "worker2")
         self.assertEqual(code, 0, out)
         self.assertTrue(self.user_config.is_file())
         data = tomllib.loads(self.user_config.read_text())
-        self.assertEqual(data["flow"]["reviewer"], "glm")
-        self.assertEqual(Config.load(self.project).reviewer_worker, "glm")
-        self.assertIn("reviewer: glm (opencode-go/glm-5.3-flash)", out)
+        self.assertEqual(data["flow"]["reviewer"], "worker2")
+        self.assertEqual(Config.load(self.project).reviewer_worker, "worker2")
+        self.assertIn("reviewer: worker2 (opencode-go/glm-5.3-flash)", out)
         self.assertIn("one dispatch now runs implement → review → fix until approval", out)
         self.assertIn("applies from the next dispatch", out)
 
     def test_set_a_worker_in_the_project_config(self):
-        code, out = self.cli("reviewer", "glm", "--project")
+        code, out = self.cli("reviewer", "worker2", "--project")
         self.assertEqual(code, 0, out)
         path = project_config_path(self.project)
-        self.assertEqual(tomllib.loads(path.read_text())["flow"]["reviewer"], "glm")
+        self.assertEqual(tomllib.loads(path.read_text())["flow"]["reviewer"], "worker2")
         self.assertFalse(self.user_config.exists())
-        self.assertEqual(Config.load(self.project).reviewer_worker, "glm")
+        self.assertEqual(Config.load(self.project).reviewer_worker, "worker2")
 
     def test_an_alias_gives_the_job_back_to_the_chat(self):
-        self.cli("reviewer", "glm")
+        self.cli("reviewer", "worker2")
         code, out = self.cli("reviewer", "planner")
         self.assertEqual(code, 0, out)
         self.assertEqual(tomllib.loads(self.user_config.read_text())["flow"]["reviewer"], "orchestrator")
@@ -104,10 +104,10 @@ class ReviewerTest(unittest.TestCase):
         data = json.loads(out)
         self.assertEqual(data["reviewer"], "orchestrator")
         self.assertEqual(data["configured"], "orchestrator")
-        self.assertEqual(data["choices"], ["orchestrator", "deepseek", "glm"])
-        self.assertEqual(sorted(data["workers"]), ["deepseek", "glm"])
-        self.assertEqual(data["workers"]["glm"]["model"], "opencode-go/glm-5.3-flash")
-        self.assertEqual(data["workers"]["glm"]["backend"], "opencode")
+        self.assertEqual(data["choices"], ["orchestrator", "worker1", "worker2"])
+        self.assertEqual(sorted(data["workers"]), ["worker1", "worker2"])
+        self.assertEqual(data["workers"]["worker2"]["model"], "opencode-go/glm-5.3-flash")
+        self.assertEqual(data["workers"]["worker2"]["backend"], "opencode")
 
     def test_status_text_and_data(self):
         code, out = self.cli("status")
@@ -116,10 +116,10 @@ class ReviewerTest(unittest.TestCase):
         self.assertEqual(status.status_data(self.project, Config.load(self.project))["reviewer"],
                          "orchestrator")
 
-        self.cli("reviewer", "glm")
+        self.cli("reviewer", "worker2")
         code, out = self.cli("status")
-        self.assertIn("reviewer: glm", out)
-        self.assertEqual(status.status_data(self.project, Config.load(self.project))["reviewer"], "glm")
+        self.assertIn("reviewer: worker2", out)
+        self.assertEqual(status.status_data(self.project, Config.load(self.project))["reviewer"], "worker2")
 
     def test_unknown_configured_reviewer_warns(self):
         project_config_path(self.project).write_text('[flow]\nreviewer = "nope"\n')

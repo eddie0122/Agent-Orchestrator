@@ -224,7 +224,14 @@ def next_step(task: Task, cfg: Config, worker_override: str | None = None, force
     if not plan_is_written(task):
         raise FlowError(f"{task.rel(task.plan)} still holds the template. Write the plan first.")
 
+    names = cfg.worker_names()
+    if worker_override and worker_override not in names:
+        raise FlowError(f"--worker {worker_override} is not configured "
+                        f"(workers: {', '.join(names)}); see `aaagent workers`")
     plan_worker = frontmatter(task.plan).get("worker") or None
+    if plan_worker and plan_worker not in names:
+        raise FlowError(f"plan.md says worker: {plan_worker}, which is not configured "
+                        f"(workers: {', '.join(names)}); fix the plan or use --worker")
     reports, reviews = task.latest_report(), task.latest_review()
 
     if reports == 0:
@@ -241,7 +248,9 @@ def next_step(task: Task, cfg: Config, worker_override: str | None = None, force
             f"{task.rel(task.review(reports))} (verdict: approved or changes_requested).")
 
     verdict = task.verdict(reviews)
-    current = state.get("worker") or plan_worker or cfg.default_worker
+    current = state.get("worker")
+    if current not in names:  # a stale name from a removed worker: ignore it
+        current = plan_worker or cfg.default_worker
 
     if verdict == "approved":
         worker = worker_override or current

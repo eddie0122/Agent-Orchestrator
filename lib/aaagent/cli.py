@@ -12,12 +12,13 @@ from pathlib import Path
 
 from . import (__version__, attach, backends, dispatch, gitutil, models, session, sessions, status,
                tasks, tui, worker)
-from .config import ROOT, USER_CONFIG, Config
+from .config import (ROOT, USER_CONFIG, Config, migrate_legacy_workers, project_config_path,
+                     set_toml_value, user_config_path)
 from .tasks import FlowError
 
-COMMANDS = {"start", "ui", "worker", "new", "dispatch", "wait", "status", "diff", "logs", "stop",
-            "abandon", "attach", "doctor", "version", "help", "model", "thinking", "sessions",
-            "reviewer"}
+COMMANDS = {"start", "ui", "worker", "workers", "new", "dispatch", "wait", "status", "diff", "logs",
+            "stop", "abandon", "attach", "doctor", "version", "help", "model", "thinking",
+            "sessions", "reviewer"}
 # Options of `start` that also work without the word: `aaagent -c`.
 START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model", "--session"}
 
@@ -167,6 +168,104 @@ def cmd_reviewer(args) -> int:
         answer = input(f"change to? (orchestrator/{'/'.join(cfg.worker_names())}, enter = none): ")
         if answer.strip():
             print("\n".join(models.set_reviewer(project, args.project, answer.strip())))
+    return 0
+
+
+def cmd_workers(args) -> int:
+    project = project_root()
+    if args.action == "add":
+        cfg = Config.load(project)
+        model = args.name
+        if not model:
+            if not sys.stdin.isatty():
+                raise FlowError("no model given; use aaagent workers add <model>")
+            model = _pick_model(models.new_worker_choices(cfg))
+            if model is None:
+                print("unchanged")
+                return 0
+        name, notes = models.add_worker(project, args.project, model, args.thinking)
+        print("\n".join(notes))
+        return 0
+    if args.action in ("remove", "rm"):
+        if not args.name:
+            raise FlowError("name a worker to remove: aaagent workers remove <name>")
+        print("\n".join(models.remove_worker(project, args.project, args.name)))
+        return 0
+    if args.action in ("default", "fallback"):
+        return _set_flow_worker(args, project, args.action)
+    cfg = Config.load(project)
+    if args.json:
+        print(json.dumps({
+            "workers": [{"name": name, "model": cfg.worker_model(name),
+                         "thinking": cfg.worker_thinking(name),
+                         "backend": cfg.worker_backend(name),
+                         "default": name == cfg.default_worker,
+                         "fallback": name == cfg.fallback_worker}
+                        for name in cfg.worker_names()],
+            "default": cfg.default_worker, "fallback": cfg.fallback_worker,
+        }, indent=1))
+        return 0
+    names = cfg.worker_names()
+    rows = [("name", "model", "thinking", "backend", "role")]
+    rows += [(name, cfg.worker_model(name), cfg.worker_thinking(name) or "default",
+              cfg.worker_backend(name), _worker_role(cfg, name)) for name in names]
+    widths = [max(len(row[i]) for row in rows) for i in range(5)]
+    for row in rows:
+        print("  ".join(row[i].ljust(widths[i]) for i in range(4)).rstrip() + "  " + row[4])
+    return 0
+
+
+def _worker_role(cfg: Config, name: str) -> str:
+    roles = []
+    if name == cfg.default_worker:
+        roles.append("default")
+    if name == cfg.fallback_worker and name != cfg.default_worker:
+        roles.append("fallback")
+    if cfg.reviewer_worker == name:
+        roles.append("reviewer")
+    return ", ".join(roles)
+
+
+def _pick_model(available: list[str]) -> str | None:
+    """The numbered pick list of `aaagent workers add` on a terminal; None = cancel."""
+    if not available:
+        raise FlowError("no model given; use aaagent workers add <model>")
+    for number, model in enumerate(available, 1):
+        print(f"  {number}. {model}")
+    for _ in range(3):
+        answer = input("number or model name (enter = cancel): ").strip()
+        if not answer:
+            return None
+        if answer.isdigit():
+            index = int(answer)
+            if 1 <= index <= len(available):
+                return available[index - 1]
+            print(f"error: pick a number from 1 to {len(available)}")
+            continue
+        return answer
+    return None
+
+
+def _set_flow_worker(args, project: Path, which: str) -> int:
+    """`aaagent workers default|fallback <name>`: set flow.default_worker/fallback_worker."""
+    cfg = Config.load(project)
+    names = cfg.worker_names()
+    if not args.name:
+        raise FlowError(f"name a worker: aaagent workers {which} <name> ({', '.join(names)})")
+    if args.name not in names:
+        raise FlowError(f"unknown worker '{args.name}' (configured: {', '.join(names)})")
+    path = project_config_path(project) if args.project else user_config_path()
+    key = f"{which}_worker"
+    try:
+        set_toml_value(path, "flow", key, args.name)
+    except ValueError as exc:
+        raise FlowError(str(exc)) from exc
+    cfg = Config.load(project)
+    print(f"{which} worker: {args.name}  (saved to {path})")
+    if getattr(cfg, key) != args.name:
+        print(f"note: {project_config_path(project)} overrides this; "
+              "use --project to change it there")
+    print("applies from the next dispatch")
     return 0
 
 
@@ -524,6 +623,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write <project>/.aaagent/config.toml instead of the user config")
     s.set_defaults(func=cmd_reviewer)
 
+    s = sub.add_parser("workers", help="show the workers, or add and remove them",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       description=("show the workers (name, model, role), or manage them:\n"
+                                    "  aaagent workers add [<model>] [--thinking LEVEL]  add a worker\n"
+                                    "  aaagent workers remove <name>                    remove a worker\n"
+                                    "  aaagent workers default <name>                   who implements by default\n"
+                                    "  aaagent workers fallback <name>                  who takes over on failure"),
+                       epilog="--project writes <project>/.aaagent/config.toml instead of "
+                              "the user config; --json prints the list machine-readably")
+    s.add_argument("action", nargs="?", choices=["add", "remove", "rm", "default", "fallback"])
+    s.add_argument("name", nargs="?", metavar="model-or-name",
+                   help="a model for add; a worker name for remove, default and fallback")
+    s.add_argument("--thinking", default="", help="thinking level for `workers add` "
+                                                  "(opencode variant or claude --effort)")
+    s.add_argument("--json", action="store_true", help="machine-readable worker list")
+    s.add_argument("--project", action="store_true",
+                   help="write <project>/.aaagent/config.toml instead of the user config")
+    s.set_defaults(func=cmd_workers)
+
     s = sub.add_parser("version")
     s.set_defaults(func=lambda a: print(__version__) or 0)
     return p
@@ -536,6 +654,8 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or (argv[0] not in COMMANDS and not argv[0].startswith("-")) or argv[0] in START_FLAGS:
         argv = ["start", *argv]
     args = build_parser().parse_args(argv)
+    if args.command not in ("worker", "version"):  # the daemon and --help skip the migration
+        _migrate()
     try:
         return args.func(args) or 0
     except FlowError as exc:
@@ -543,3 +663,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except KeyboardInterrupt:
         return 130
+
+
+def _migrate() -> None:
+    """Rename legacy model-named workers once; never fails a command."""
+    try:
+        found = os.environ.get("AAAGENT_PROJECT") or gitutil.find_root(Path.cwd())
+        project = Path(found) if found else None
+        for line in migrate_legacy_workers(project):
+            print(line, file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - a broken migration must not block a command
+        print(f"aaagent: worker migration skipped ({exc})", file=sys.stderr)

@@ -5,7 +5,7 @@ Chat with Claude Opus in your terminal. Opus plans and reviews; cheaper opencode
 ```
 you ──chat──► Opus (Claude Code, Pro subscription)
                  │ 1. investigates, writes  .aaagent/tasks/001-x/plan.md
-                 │ 2. aaagent dispatch 001  ──►  DeepSeek worker implements  → report-1.md
+                 │ 2. aaagent dispatch 001  ──►  worker1 implements  → report-1.md
                  │ 3. reviews diff + tests, writes review-1.md (approved / changes_requested)
                  │ 4. aaagent dispatch 001  ──►  worker fixes → report-2.md … (repeat 3–4)
                  │ 5. aaagent dispatch 001  ──►  worker commits (only after "approved")
@@ -13,16 +13,20 @@ you ──chat──► Opus (Claude Code, Pro subscription)
               tells you what changed and the commit hash
 ```
 
-Workers (OpenCode Go subscription):
+Workers (OpenCode Go subscription) are generic slots: `worker1`, `worker2`, `worker3`, … — any number of them, each running any model. You add and remove them with `aaagent workers add|remove`. The starting set:
 
 | worker | model | role |
 |---|---|---|
-| deepseek | `opencode-go/deepseek-v4.1-flash` | default implementer |
-| glm | `opencode-go/glm-5.3-flash` | takes over when DeepSeek fails or keeps failing review; can be chosen per task |
+| worker1 | `opencode-go/deepseek-v4.1-flash` | default implementer |
+| worker2 | `opencode-go/glm-5.3-flash` | takes over when worker1 fails or keeps failing review; can be chosen per task |
+
+### Adding and removing workers
+
+`aaagent workers` lists every worker with its model and role. `aaagent workers add <model>` adds the next free slot (`worker3`, …) with that model, `aaagent workers remove <name>` removes one (not while it has a queued or running job), and `aaagent workers default <name>` / `aaagent workers fallback <name>` choose who implements by default and who takes over on failure — add `--project` to keep the change in this project's config. On a terminal, `workers add` without a model shows a pick list. The two default workers above are only a starting set: once your config defines any worker of its own, they are replaced by it, and `workers add` writes them out first so they cannot vanish by accident. Configs that still name workers `deepseek`/`glm` are renamed to `worker1`/`worker2` automatically.
 
 ### Claude as a worker
 
-A worker runs on opencode when its model id has a slash (`provider/model`) and on headless Claude Code (`claude -p`) when it is a Claude model name, so `aaagent model glm sonnet` moves that worker to Claude. Say it explicitly with `backend = "opencode"` or `backend = "claude"` in the worker's config:
+A worker runs on opencode when its model id has a slash (`provider/model`) and on headless Claude Code (`claude -p`) when it is a Claude model name, so `aaagent model worker2 sonnet` moves that worker to Claude. Say it explicitly with `backend = "opencode"` or `backend = "claude"` in the worker's config:
 
 ```toml
 [workers.claude]
@@ -37,10 +41,10 @@ By default the chat (the planner) reviews every round: you run `aaagent dispatch
 
 ```toml
 [flow]
-reviewer = "glm"      # a worker name, or "orchestrator" (the default) for the chat
+reviewer = "worker2"      # a worker name, or "orchestrator" (the default) for the chat
 ```
 
-`aaagent reviewer glm` sets it (add `--project` to write this project's config only), `aaagent reviewer orchestrator` gives the job back to the chat, and `aaagent reviewer` shows the current one. In the dashboard press `v`, in VSCode run **Select Reviewer…**.
+`aaagent reviewer worker2` sets it (add `--project` to write this project's config only), `aaagent reviewer orchestrator` gives the job back to the chat, and `aaagent reviewer` shows the current one. In the dashboard press `v`, in VSCode run **Select Reviewer…**.
 
 With a worker reviewer, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails twice (or writes no valid verdict), the round comes back to the chat to review itself.
 
@@ -71,7 +75,7 @@ After installing, run **Developer: Reload Window** once. Then:
 
 1. Open a project folder (a git repository) and click the **aaagent** icon in the activity bar.
 2. Click **New Session** (or run `aaagent: Ask Opus…` from the command palette and type the request). **New Session** closes the open chat and starts a fresh one; **Restore Previous Session…** reopens an earlier one, and **Open Chat** is in the Sessions view's `…` menu.
-   The Opus chat opens as an editor tab, and the DeepSeek and GLM workers open as split terminals in the panel.
+   The Opus chat opens as an editor tab, and the workers open as split terminals in the panel.
 3. Talk to Opus. The sidebar follows along:
    - **Workers**: who is running what. Inline buttons show a worker's output or stop it.
    - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it, and right-click → **Delete Session…** (or the trash button) deletes a session that is not the open chat. **New Session**, **Restore Previous Session…**, **Ask Opus…** and **Attach Image…** are in its title bar.
@@ -106,19 +110,19 @@ With tmux installed, `aaagent` opens one window: the Opus chat on the left and t
 │                                │ WORKERS                               │
 │ > add a /health endpoint       │  planner                  opus · high │
 │                                │  reviewer          planner (the chat) │
-│                                │  deepseek          / fixing 003 r2    │
-│                                │  glm               waiting for a plan │
+│                                │  worker1           / fixing 003 r2    │
+│                                │  worker2           waiting for a plan │
 │                                │ SESSIONS                              │
 │                                │  ▾ add a /health endpoint  open · 2 t…│
 │                                │     003 add health        / fixing …  │
 │                                │  · fix login              2 h ago     │
 │                                │ TASKS                                 │
-│                                │  ▾ 003 add health  / fixing · deepseek│
+│                                │  ▾ 003 add health  / fixing · worker1│
 │                                │     plan.md                           │
 │                                │     report-1.md                   done│
 │                                │     review-1.md      changes requested│
 │                                │  ▸ 002 fix login     committed a1b2c3d│
-│                                │ ── deepseek output (following) ────── │
+│                                │ ── worker1 output (following) ─────── │
 │                                │     edit  app.py                      │
 └────────────────────────────────┴───────────────────────────────────────┘
 ```
@@ -153,7 +157,7 @@ Each `aaagent` starts a new chat session, and a session can create many tasks: `
 
 To start a fresh conversation in the middle of things, press `N` in the dashboard (in the tmux layout) or type `/clear` in the chat; quitting and running `aaagent` again does the same.
 
-Just talk to Opus. Questions get a direct answer; change requests go through the pipeline. You can steer at any point ("use glm for this", "stop after the plan", "split it into two tasks").
+Just talk to Opus. Questions get a direct answer; change requests go through the pipeline. You can steer at any point ("use worker2 for this", "stop after the plan", "split it into two tasks").
 
 ### Commands
 
@@ -169,7 +173,11 @@ Opus runs these itself. They are also useful for you:
 | `aaagent logs <worker> [-f]` | worker output |
 | `aaagent attach <file\|-> […] [--no-send]` | copy images into `.aaagent/attachments/` and add them to the chat |
 | `aaagent new "<title>"` | create a task folder with a plan template |
-| `aaagent dispatch <task> [--worker glm] [--force]` | run the next phase (implement / fix / commit) and wait |
+| `aaagent workers` | list the workers (name, model, role); `--json` for machines |
+| `aaagent workers add [<model>]` | add the next free worker slot (pick from a list on a terminal) |
+| `aaagent workers remove <name>` | remove a worker (not while it has queued or running jobs) |
+| `aaagent workers default\|fallback <name>` | choose the default implementer and the fallback |
+| `aaagent dispatch <task> [--worker worker2] [--force]` | run the next phase (implement / fix / commit) and wait |
 | `aaagent wait <task>` | reattach to a running job |
 | `aaagent abandon <task>` | drop a task (its uncommitted changes stay) |
 | `aaagent stop` | stop this project's workers |
@@ -196,7 +204,7 @@ Code enforces these; they are not just prompt instructions:
 - **Nothing is pushed.** Pushing is up to you.
 - **One active task per working tree**, because workers share the files.
 - **Your own uncommitted changes stay out of the commit.** Files that were already modified when a task started are listed and excluded from its commit.
-- **Escalation:** a failed job is retried once on the other worker. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
+- **Escalation:** a failed job is retried once on the fallback worker. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
 
 These are permission rules, not a sandbox. Workers run as your user, so treat this like giving a junior developer a shell on the machine.
 
@@ -210,16 +218,16 @@ model = "opus"                    # any Claude Code model alias or id
 thinking = "high"                 # claude --effort: low, medium, high, xhigh or max; empty = the default
 extra_args = []                   # any other claude arguments (an --effort here wins over `thinking`)
 
-[workers.deepseek]
+[workers.worker1]
 model = "opencode-go/deepseek-v4-pro"   # swap a model
 thinking = "high"                 # opencode model variant, e.g. low | high | max; empty = the model's default
 
-[workers.kimi]                    # add a worker
+[workers.worker3]                 # add a worker
 model = "opencode-go/kimi-k3"
 
 [flow]
-default_worker = "deepseek"
-fallback_worker = "glm"
+default_worker = "worker1"
+fallback_worker = "worker2"
 max_review_rounds = 3
 fallback_after_failed_reviews = 2
 job_timeout_minutes = 30
@@ -228,7 +236,7 @@ job_timeout_minutes = 30
 commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@example.invalid>"
 ```
 
-`opencode models` lists the model ids you can use. A new worker gets its own pane the next time you run `aaagent`.
+`opencode models` lists the model ids you can use. `aaagent workers add|remove` edits the worker list for you; a new worker gets its own pane the next time you run `aaagent`.
 
 ## Files in a project
 

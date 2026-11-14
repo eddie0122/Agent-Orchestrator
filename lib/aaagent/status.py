@@ -174,7 +174,7 @@ def planner_summary(p: dict) -> str:
 
 
 def reviewer_summary(data: dict) -> str:
-    """Who reviews each round: `planner (the chat)` or `glm · glm-5.3-flash`."""
+    """Who reviews each round: `planner (the chat)` or `worker1 · glm-5.3-flash`."""
     name = str(data.get("reviewer") or "orchestrator")
     if name == "orchestrator":
         return "planner (the chat)"

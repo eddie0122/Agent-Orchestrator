@@ -83,7 +83,7 @@ test("activate() against a real project", async (t) => {
   assert.strictEqual(api.store.data.project, fs.realpathSync(project));
   const workersTree = rec.treeViews["aaagent.workers"].treeDataProvider;
   const tasksTree = rec.treeViews["aaagent.tasks"].treeDataProvider;
-  assert.deepStrictEqual(workersTree.getChildren().map((w) => w.name), ["deepseek", "glm"]);
+  assert.deepStrictEqual(workersTree.getChildren().map((w) => w.name), ["worker1", "worker2"]);
   assert.strictEqual(workersTree.getTreeItem(workersTree.getChildren()[0]).description, "stopped");
   assert.deepStrictEqual(tasksTree.getChildren(), []);
   // The `.aaagent/**` refresh watcher plus the image-fetch watcher.
@@ -122,9 +122,9 @@ test("activate() against a real project", async (t) => {
   // Open Chat: one terminal per worker (split), then the chat as an editor tab
   await rec.commands.get("aaagent.openChat")();
   const names = rec.terminals.map((x) => x.name);
-  assert.deepStrictEqual(names, ["aaagent: deepseek", "aaagent: glm", "aaagent: chat"]);
+  assert.deepStrictEqual(names, ["aaagent: worker1", "aaagent: worker2", "aaagent: chat"]);
   const [ds, glm, chat] = rec.terminals;
-  assert.deepStrictEqual(ds.creationOptions.shellArgs, ["worker", "deepseek"]);
+  assert.deepStrictEqual(ds.creationOptions.shellArgs, ["worker", "worker1"]);
   assert.strictEqual(ds.creationOptions.shellPath, AAAGENT);
   assert.strictEqual(glm.creationOptions.location.parentTerminal, ds);
   assert.deepStrictEqual(chat.creationOptions.shellArgs, ["start", "--no-workers"]);
@@ -213,7 +213,7 @@ test("activate() against a real project", async (t) => {
   // Select Model: a worker's model typed by hand, saved to this project only.
   rec.answer = undefined;
   rec.quickPicks = [
-    (items) => items.find((i) => i.target === "deepseek"),
+    (items) => items.find((i) => i.target === "worker1"),
     (items) => items.find((i) => i.typed),
     (items) => items.find((i) => i.project === true),
   ];
@@ -221,7 +221,7 @@ test("activate() against a real project", async (t) => {
   await rec.commands.get("aaagent.selectModel")();
   assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
     /model = "opencode-go\/kimi-k3"/);
-  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /deepseek model: opencode-go\/kimi-k3/.test(m)),
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /worker1 model: opencode-go\/kimi-k3/.test(m)),
     JSON.stringify(rec.messages));
 
   // Select Thinking: the planner's level, saved to the user config.
@@ -244,24 +244,24 @@ test("activate() against a real project", async (t) => {
   assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
     /thinking = "max"/);
   await api.refresh();
-  assert.strictEqual(api.store.data.workers.find((w) => w.name === "deepseek").thinking, "max");
+  assert.strictEqual(api.store.data.workers.find((w) => w.name === "worker1").thinking, "max");
   assert.strictEqual(rec.treeViews["aaagent.workers"].description, "planner: sonnet · xhigh");
 
   // Select Reviewer…: a worker reviewer, saved to this project only.
   rec.answer = undefined;
   rec.quickPicks = [
-    (items) => items.find((i) => i.reviewer === "glm"),
+    (items) => items.find((i) => i.reviewer === "worker2"),
     (items) => items.find((i) => i.project === true),
   ];
   await rec.commands.get("aaagent.selectReviewer")();
   assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
-    /reviewer = "glm"/);
-  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer: glm/.test(m)),
+    /reviewer = "worker2"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer: worker2/.test(m)),
     JSON.stringify(rec.messages));
   await api.refresh();
-  assert.strictEqual(api.store.data.reviewer, "glm");
+  assert.strictEqual(api.store.data.reviewer, "worker2");
   assert.strictEqual(rec.treeViews["aaagent.workers"].description,
-    "planner: sonnet · xhigh · reviewer: glm");
+    "planner: sonnet · xhigh · reviewer: worker2");
 
   // Attach Image: one panel, reused on a second call, with a nonce CSP and the file button.
   const panelsBefore = rec.panels.length;
