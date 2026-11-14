@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
@@ -14,34 +13,11 @@ import time
 from pathlib import Path
 
 from . import attach, dispatch, gitutil, sessions, tasks, worker
+from .backends import find_claude
 from .config import ROOT, Config
 
 AAAGENT_BIN = ROOT / "bin" / "aaagent"
 HOOKS = ROOT / "claude" / "hooks"
-
-
-def find_claude(cfg: Config) -> str | None:
-    configured = cfg.orchestrator.get("claude_bin")
-    if configured:
-        return configured if Path(configured).is_file() else None
-    if os.environ.get("AAAGENT_CLAUDE_BIN"):
-        return os.environ["AAAGENT_CLAUDE_BIN"]
-    on_path = shutil.which("claude")
-    if on_path:
-        return on_path
-    home = Path.home()
-    for cand in (home / ".local" / "bin" / "claude", home / ".claude" / "local" / "claude"):
-        if cand.is_file():
-            return str(cand)
-    bundled = []
-    for ext_root in (".vscode-server", ".vscode", ".cursor-server"):
-        bundled += glob.glob(str(home / ext_root / "extensions" / "anthropic.claude-code-*" /
-                                 "resources" / "native-binary" / "claude"))
-
-    def version_key(p: str):
-        m = re.search(r"claude-code-(\d+)\.(\d+)\.(\d+)", p)
-        return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
-    return max(bundled, key=version_key) if bundled else None
 
 
 def unfinished_tasks(project: Path, cfg: Config) -> list[str]:

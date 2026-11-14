@@ -40,9 +40,18 @@ def worker_choices(cfg: Config) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def claude_choices() -> list[str]:
+    """Claude model names a worker can run on (headless Claude Code)."""
+    return list(PLANNER_CHOICES)
+
+
 def choices(cfg: Config, target: str) -> list[str]:
     """Suggested models for `target`, always including the one in use."""
-    out = list(PLANNER_CHOICES) if target == PLANNER else worker_choices(cfg)
+    if target == PLANNER:
+        out = list(PLANNER_CHOICES)
+    else:
+        out = worker_choices(cfg)
+        out += [name for name in claude_choices() if name not in out]
     now = current(cfg, target)
     if now not in out:
         out.insert(0, now)
@@ -72,9 +81,12 @@ def set_model(project: Path, cfg_scope_project: bool, target: str, model: str) -
         notes.append(f"applies when the next chat starts; in a running chat type /model {model}")
     else:
         notes.append("applies from the next dispatch")
-        available = worker_choices(cfg)
-        if available and model not in available:
-            notes.append(f"warning: {model} is not in `opencode models`; check the name")
+        if cfg.worker_backend(target) == "claude":
+            notes.append(f"{target} now runs on Claude Code (claude -p), not opencode")
+        else:
+            available = worker_choices(cfg)
+            if available and model not in available:
+                notes.append(f"warning: {model} is not in `opencode models`; check the name")
     return notes
 
 
@@ -136,6 +148,8 @@ def worker_thinking_choices(cfg: Config, model: str) -> list[str]:
 def thinking_choices(cfg: Config, target: str) -> list[str]:
     """Suggested thinking levels for `target`."""
     if target == PLANNER:
+        return list(PLANNER_THINKING)
+    if cfg.worker_backend(target) == "claude":
         return list(PLANNER_THINKING)
     return worker_thinking_choices(cfg, cfg.worker_model(target))
 

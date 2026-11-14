@@ -48,7 +48,7 @@ The user can attach images (screenshots, mockups, error dialogs). They arrive as
 ## When something goes wrong
 - `aaagent dispatch` retries a failed job once on the other worker and hands the task to the fallback worker after repeated rejected reviews. If it still stops (failed job, or the review round limit reached), explain the situation to the user and ask how to proceed. Use `--force` for an extra round only after the user agrees.
 - `aaagent dispatch <task> --worker <name>` picks a worker explicitly.
-- `aaagent model <worker> <model>` changes a worker's model (applies from the next dispatch); `aaagent model --list <worker>` lists choices. Change models only when the user asks.
+- `aaagent model <worker> <model>` changes a worker's model (applies from the next dispatch); `aaagent model --list <worker>` lists choices. Change models only when the user asks. A model id with a slash runs on opencode; a Claude model name (sonnet, opus, haiku) makes that worker run on headless Claude Code.
 - `aaagent status` lists tasks and workers, `aaagent logs <worker>` shows worker output, `aaagent abandon <task>` drops a task (its uncommitted changes stay in the working tree; tell the user).
 
 ## Rules

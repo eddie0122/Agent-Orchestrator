@@ -15,6 +15,8 @@ thinking = ""
 [workers]
 # Path to the opencode binary. Empty = "opencode" on PATH.
 opencode_bin = ""
+# Path to the claude binary for workers that run on Claude Code. Empty = the orchestrator's.
+claude_bin = ""
 # opencode agents installed by install.sh
 implement_agent = "aaagent-worker"
 commit_agent = "aaagent-committer"
@@ -28,6 +30,13 @@ thinking = ""
 model = "opencode-go/glm-5.3-flash"
 # Thinking level (opencode model variant), e.g. low | high | max. Empty = the model's default.
 thinking = ""
+
+# A worker runs on opencode when its model id has a slash (provider/model) and on headless
+# Claude Code (`claude -p`) when it is a Claude model name (sonnet, opus, haiku, claude-…).
+# Set `backend = "opencode"` or `backend = "claude"` to say so explicitly. Example:
+# [workers.claude]
+# model = "sonnet"
+# thinking = ""          # claude --effort: low | medium | high | xhigh | max
 
 [flow]
 # Worker that implements plans unless the plan or --worker says otherwise.

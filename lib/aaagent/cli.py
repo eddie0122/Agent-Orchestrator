@@ -10,7 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, attach, dispatch, gitutil, models, session, sessions, status, tasks, tui, worker
+from . import (__version__, attach, backends, dispatch, gitutil, models, session, sessions, status,
+               tasks, tui, worker)
 from .config import ROOT, USER_CONFIG, Config
 from .tasks import FlowError
 
@@ -43,10 +44,14 @@ def cmd_model(args) -> int:
     project = project_root()
     cfg = Config.load(project)
     if args.json:
+        worker_choices = models.worker_choices(cfg)
+        worker_choices += [name for name in models.claude_choices() if name not in worker_choices]
         print(json.dumps({
             "planner": {"model": cfg.planner_model, "choices": models.choices(cfg, models.PLANNER)},
-            "workers": {name: {"model": cfg.worker_model(name)} for name in cfg.worker_names()},
-            "worker_choices": models.worker_choices(cfg),
+            "workers": {name: {"model": cfg.worker_model(name),
+                               "backend": cfg.worker_backend(name)}
+                        for name in cfg.worker_names()},
+            "worker_choices": worker_choices,
         }, indent=1))
         return 0
     if args.list:
@@ -94,6 +99,7 @@ def cmd_thinking(args) -> int:
                         "choices": models.thinking_choices(cfg, models.PLANNER)},
             "workers": {name: {"model": cfg.worker_model(name),
                                "thinking": cfg.worker_thinking(name),
+                               "backend": cfg.worker_backend(name),
                                "choices": models.thinking_choices(cfg, name)}
                         for name in cfg.worker_names()},
         }, indent=1))
@@ -188,7 +194,10 @@ def cmd_status(args) -> int:
         job = worker.running_job(project, name)
         queued = len(worker.pending_jobs(project, name)) if worker.queue_dir(project, name).is_dir() else 0
         doing = f"running {job['phase']} {job['task']} r{job['round']}" if job else ("idle" if pid else "-")
-        print(f"  {name:<9} {cfg.worker_label(name):<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
+        label = cfg.worker_label(name)
+        if cfg.worker_backend(name) == "claude":
+            label += " [claude]"
+        print(f"  {name:<9} {label:<36} {'up (pid %d)' % pid if pid else 'stopped':<15} "
               f"{doing}{f', {queued} queued' if queued else ''}")
     all_tasks = tasks.all_tasks(project)
     if not args.all:
@@ -288,14 +297,20 @@ def cmd_doctor(args) -> int:
     good &= _check(bool(shutil.which("git")), "git")
     oc = shutil.which(cfg.opencode_bin) or (cfg.opencode_bin if Path(cfg.opencode_bin).is_file() else None)
     good &= _check(bool(oc), f"opencode ({oc or cfg.opencode_bin})", "install: curl -fsSL https://opencode.ai/install | bash")
+    model_list = []
     if oc:
         auth = subprocess.run([oc, "auth", "list"], capture_output=True, text=True, timeout=30).stdout
         good &= _check("OpenCode Go" in auth or "opencode" in auth.lower(), "opencode logged in to OpenCode Go",
                        "run: opencode auth login")
-        models = subprocess.run([oc, "models"], capture_output=True, text=True, timeout=60).stdout.split()
-        for name in cfg.worker_names():
-            model = cfg.worker_model(name)
-            good &= _check(model in models, f"worker {name}: {model}", "check `opencode models` and your config")
+        model_list = subprocess.run([oc, "models"], capture_output=True, text=True, timeout=60).stdout.split()
+    for name in cfg.worker_names():
+        model = cfg.worker_model(name)
+        if cfg.worker_backend(name) == "claude":
+            good &= _check(bool(backends.worker_claude(cfg)), f"worker {name}: {model} (claude)",
+                           "install Claude Code or set workers.claude_bin")
+        elif oc:
+            good &= _check(model in model_list, f"worker {name}: {model}", "check `opencode models` and your config")
+    if oc:
         agents_dir = Path.home() / ".config" / "opencode" / "agents"
         for agent in (cfg.implement_agent, cfg.commit_agent):
             good &= _check((agents_dir / f"{agent}.md").is_file(), f"opencode agent {agent}", "re-run install.sh")

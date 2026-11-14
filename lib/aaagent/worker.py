@@ -18,19 +18,12 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import Config
+from . import backends
+from .backends import BOLD, DIM, GREEN, RED, RESET, color_enabled, paint
+from .config import Config, infer_backend
 
 POLL_SECONDS = 1.0
 COLORS = {"deepseek": "\033[36m", "glm": "\033[35m"}
-DIM, BOLD, RED, GREEN, RESET = "\033[2m", "\033[1m", "\033[31m", "\033[32m", "\033[0m"
-
-
-def color_enabled() -> bool:
-    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-
-
-def paint(code: str, text: str) -> str:
-    return f"{code}{text}{RESET}" if color_enabled() else text
 
 
 # -- paths ------------------------------------------------------------------
@@ -157,43 +150,14 @@ def claim(project: Path, worker: str) -> tuple[dict, Path] | None:
 
 # -- running one job -------------------------------------------------------
 
-def _short(value, limit: int = 110) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
 def describe(event: dict, project: Path) -> str | None:
     """One readable line for a JSON event from `opencode run --format json`."""
-    kind = event.get("type")
-    part = event.get("part") or {}
-    if kind == "tool_use":
-        state = part.get("state") or {}
-        inp = state.get("input") or {}
-        target = inp.get("command") or inp.get("path") or inp.get("filePath") or inp.get("pattern") or inp
-        if isinstance(target, str) and target.startswith(str(project) + "/"):
-            target = target[len(str(project)) + 1:]
-        line = f"  {part.get('tool', '?'):>6}  {_short(target)}"
-        if state.get("status") == "error":
-            return paint(RED, line + f"  ✗ {_short(state.get('error', ''), 60)}")
-        return line
-    if kind == "text" and part.get("text", "").strip():
-        return paint(DIM, "  » " + _short(part["text"], 300))
-    if kind == "error":
-        err = event.get("error") or {}
-        return paint(RED, f"  error: {err.get('message', err)}")
-    return None
+    return backends.describe("opencode", event, project)
 
 
 def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
-    model = job["model"]
-    if job.get("thinking"):
-        model += "#" + job["thinking"]
-    cmd = [cfg.opencode_bin, "run", "--auto", "--agent", job["agent"], "-m", model,
-           "--format", "json", "--title", f"aaagent {job['task']} {job['phase']} r{job['round']}"]
-    if job.get("session"):
-        cmd += ["--session", job["session"]]
-    cmd.append(job["prompt"])
+    backend = job.get("backend") or infer_backend(job["model"])
+    cmd = backends.command(job, cfg)
 
     log_path = Path(job["log"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,16 +189,14 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
                     event = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                sid = event.get("sessionID")
-                if isinstance(sid, str) and sid.startswith("ses"):
-                    session = sid
-                if event.get("type") == "error":
-                    err = event.get("error") or {}
-                    errors.append(err.get("message") or json.dumps(err))
-                part_tokens = (event.get("part") or {}).get("tokens") or {}
-                tokens["input"] += int(part_tokens.get("input") or 0)
-                tokens["output"] += int(part_tokens.get("output") or 0)
-                line = describe(event, project)
+                seen = backends.read_event(backend, event)
+                if seen["session"]:
+                    session = seen["session"]
+                if seen["error"]:
+                    errors.append(seen["error"])
+                tokens["input"] += seen["input"]
+                tokens["output"] += seen["output"]
+                line = backends.describe(backend, event, project)
                 if line:
                     print(line, file=out, flush=True)
             code = proc.wait()
@@ -250,13 +212,13 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
     if timed_out.is_set():
         status, error = "timeout", f"killed after {job.get('timeout', cfg.job_timeout_seconds) / 60:.0f} minutes"
     elif code != 0 or errors:
-        status, error = "error", "; ".join(errors) or f"opencode exited with code {code}"
+        status, error = "error", "; ".join(errors) or f"{backend} exited with code {code}"
     else:
         status, error = "ok", None
     return {
         "id": job["id"], "task": job["task"], "phase": job["phase"], "round": job["round"],
         "worker": job["worker"], "model": job["model"], "status": status, "error": error,
-        "exit_code": code, "session": session, "tokens": tokens,
+        "exit_code": code, "session": session, "tokens": tokens, "backend": backend,
         "started": started, "finished": time.time(), "log": job["log"],
     }
 
@@ -306,7 +268,7 @@ def serve(project: Path, worker: str, once: bool = False, quiet_wait: bool = Fal
             except Exception as exc:  # noqa: BLE001 - report any launch failure to the waiter
                 result = {"id": job["id"], "task": job["task"], "phase": job["phase"],
                           "round": job["round"], "worker": worker, "model": job["model"],
-                          "status": "error", "error": f"could not run opencode: {exc}",
+                          "status": "error", "error": f"could not run {job.get('backend') or 'opencode'}: {exc}",
                           "session": job.get("session"), "started": time.time(),
                           "finished": time.time(), "log": job["log"]}
             write_json(result_path(project, job["id"]), result)

@@ -308,7 +308,7 @@ function activate(context) {
     let chosen;
     if (choice.typed) {
       const answer = await vscode.window.showInputBox({
-        prompt: target === "planner" ? "Model name" : "Model name (opencode model id, e.g. opencode-go/kimi-k3)",
+        prompt: target === "planner" ? "Model name" : "Model name (opencode id like opencode-go/kimi-k3, or a Claude model like sonnet)",
         value: current,
         ignoreFocusOut: true,
       });

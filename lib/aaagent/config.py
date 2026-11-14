@@ -21,6 +21,14 @@ PLANNER_CHOICES = ["opus", "sonnet", "haiku", "fable",
 PLANNER_THINKING = ["low", "medium", "high", "xhigh", "max"]
 WORKER_THINKING_FALLBACK = ["low", "high", "max"]
 
+# How a worker job runs: in opencode, or in headless Claude Code (`claude -p`).
+BACKENDS = ("opencode", "claude")
+
+
+def infer_backend(model: str) -> str:
+    """opencode model ids are `provider/model`; Claude model names have no slash."""
+    return "opencode" if "/" in str(model) else "claude"
+
 
 def user_config_path() -> Path:
     """The user-wide config file (looked up at call time so tests can set the env var)."""
@@ -81,6 +89,20 @@ class Config:
         model = self.worker_model(name)
         level = self.worker_thinking(name)
         return f"{model}, thinking {level}" if level else model
+
+    def worker_backend(self, name: str) -> str:
+        """`opencode` or `claude`: the explicit `backend`, else inferred from the model name."""
+        workers = self.data.get("workers", {})
+        if name not in workers or not isinstance(workers[name], dict):
+            raise KeyError(f"unknown worker '{name}' (configured: {', '.join(self.worker_names())})")
+        backend = workers[name].get("backend")
+        if backend in BACKENDS:
+            return backend
+        return infer_backend(self.worker_model(name))
+
+    @property
+    def worker_claude_bin(self) -> str:
+        return self.data["workers"].get("claude_bin") or ""
 
     @property
     def opencode_bin(self) -> str:

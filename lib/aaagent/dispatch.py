@@ -6,7 +6,7 @@ import json
 import time
 from pathlib import Path
 
-from . import gitutil, tasks, worker
+from . import backends, gitutil, tasks, worker
 from .config import ROOT, Config
 from .tasks import FlowError, Step, Task
 
@@ -50,13 +50,16 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
 
 def _enqueue(project: Path, task: Task, step: Step, cfg: Config, retry_of: str | None = None) -> dict:
     state = task.load()
+    backend = cfg.worker_backend(step.worker)
     session = None if step.phase == "commit" else state.get("sessions", {}).get(step.worker)
+    if not backends.session_fits(backend, session):
+        session = None
     agent = cfg.commit_agent if step.phase == "commit" else cfg.implement_agent
     job_id = worker.new_job_id()
     job = worker.enqueue(project, {
         "id": job_id, "task": task.id, "phase": step.phase, "round": step.round,
         "worker": step.worker, "model": cfg.worker_model(step.worker),
-        "thinking": cfg.worker_thinking(step.worker), "agent": agent,
+        "thinking": cfg.worker_thinking(step.worker), "agent": agent, "backend": backend,
         "session": session, "prompt": build_prompt(task, step, cfg, retry=retry_of is not None),
         "timeout": cfg.job_timeout_seconds, "retry_of": retry_of,
         "pre_head": gitutil.head(project),

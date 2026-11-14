@@ -20,6 +20,17 @@ Workers (OpenCode Go subscription):
 | deepseek | `opencode-go/deepseek-v4.1-flash` | default implementer |
 | glm | `opencode-go/glm-5.3-flash` | takes over when DeepSeek fails or keeps failing review; can be chosen per task |
 
+### Claude as a worker
+
+A worker runs on opencode when its model id has a slash (`provider/model`) and on headless Claude Code (`claude -p`) when it is a Claude model name, so `aaagent model glm sonnet` moves that worker to Claude. Say it explicitly with `backend = "opencode"` or `backend = "claude"` in the worker's config:
+
+```toml
+[workers.claude]
+model = "sonnet"      # thinking = "high" sets claude --effort
+```
+
+Claude workers use the same Claude subscription and usage limit as the chat. `workers.claude_bin` points them at another binary; empty means the chat's.
+
 ## Install
 
 ```bash
@@ -230,6 +241,7 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | `lib/aaagent/tui.py` | the terminal dashboard (`aaagent ui`) |
 | `lib/aaagent/status.py` | status data and the dashboard's view logic |
 | `lib/aaagent/worker.py` | worker daemon and file queue |
+| `lib/aaagent/backends.py` | worker backends: opencode and headless Claude Code |
 | `lib/aaagent/dispatch.py` | queues phases, waits, falls back, checks results |
 | `lib/aaagent/tasks.py` | task files and the rules for the next phase |
 | `vscode/extension.js` | VSCode extension: commands, refresh, notifications |
@@ -237,5 +249,6 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | `prompts/` | Opus system-prompt addition and worker prompts |
 | `opencode/agents/` | worker agent definitions and permissions |
 | `claude/hooks/guard_edit.py` | blocks Opus edits outside `.aaagent/` |
+| `claude/hooks/guard_worker.py` | keeps Claude workers away from secrets and the planner's files |
 | `claude/hooks/record_session.py` | records the chat's session id for `aaagent -c` |
 | `claude/hooks/local_images.py` | copies images from the user's computer that a prompt mentions (VSCode) |
