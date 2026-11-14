@@ -31,12 +31,15 @@ TAIL_BYTES = 16384
 HELP = [
     ("↑ ↓  j k", "move"),
     ("enter", "task: show or hide its files · session: show its tasks · file: read it · worker: show its output"),
+    ("", "reviewer: show the reviewer's output (or choose its model) · + add worker: add one"),
     ("", "on a session's task: jump to it in TASKS"),
     ("d", "everything the selected task changed (diff)"),
     ("l", "switch whose output is shown below"),
-    ("m", "change a model: the selected worker's or planner's, or pick which"),
-    ("t", "change a thinking level (same)"),
-    ("v", "choose who reviews each round: the planner or a worker"),
+    ("m", "change a model: the selected row's (planner, reviewer or worker), or pick which"),
+    ("t", "change a thinking level (the same rows as m)"),
+    ("v", "choose who reviews each round: the planner (the chat) or a model"),
+    ("+", "add a worker (pick its model)"),
+    ("-", "remove the selected worker (asks first)"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
     ("o", "open the selected session in the chat pane"),
     ("x", "delete the selected session (its conversation file too)"),
@@ -133,12 +136,13 @@ def _move(ui: UI, rows: list[Row], delta: int) -> None:
 
 
 def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] = (),
-               has_chat_pane: bool = False) -> tuple | None:
+               has_chat_pane: bool = False, reviewer_job: bool = False) -> tuple | None:
     """Apply one key press to the UI state. Returns an action for the caller to carry out:
     ("quit",) ("refresh",) ("open", path, title) ("diff", task_id) ("abandon", task_id)
     ("restore",) ("open_session", session_id) ("delete_session", session_id) ("new_chat",)
-    ("help",) ("model", target) ("thinking", target) ("reviewer",), or None when the key only
-    changed what is shown.
+    ("help",) ("model", target) ("thinking", target) ("add_worker",)
+    ("remove_worker", name), or None when the key only changed what is shown.
+    `reviewer_job` says whether a model reviews each round (so the reviewer has output).
     """
     if key in (-1, curses.KEY_RESIZE):
         return None
@@ -221,9 +225,14 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
     if key == ord("m"):
         return ("model", _target_of(row))
     if key == ord("t"):
+        if row and row.kind == "reviewer" and row.ref.get("planner_reviews"):
+            ui.message = "the planner reviews; pick a reviewer model first (m or v)"
+            return None
         return ("thinking", _target_of(row))
     if key == ord("v"):
-        return ("reviewer",)
+        return ("model", "reviewer")
+    if key == ord("+"):
+        return ("add_worker",)
     if key in (curses.KEY_UP, ord("k")):
         _move(ui, rows, -1)
     elif key in (curses.KEY_DOWN, ord("j")):
@@ -253,8 +262,13 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
             ui.expanded.add(row.task)
         elif row.kind == "file":
             return ("open", row.ref["path"], f"{row.task} / {row.text}")
+        elif row.kind == "add_worker":
+            return ("add_worker",)
         elif row.kind == "reviewer":
-            return ("reviewer",)
+            if row.ref.get("planner_reviews"):
+                return ("model", "reviewer")
+            ui.output_worker = "reviewer"
+            ui.message = "showing reviewer output"
         elif row.kind == "worker":
             ui.output_worker = row.text
             ui.message = f"showing {row.text} output"
@@ -269,9 +283,20 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
             ui.selected = f"session:{row.id.split(':')[1]}"
     elif key == ord("l"):
         order = [None, *worker_names]
+        if reviewer_job:
+            order.append("reviewer")
         at = order.index(ui.output_worker) if ui.output_worker in order else 0
         ui.output_worker = order[(at + 1) % len(order)]
         ui.message = f"showing {ui.output_worker} output" if ui.output_worker else "following the running worker"
+    elif key in (ord("-"), curses.KEY_DC):
+        if not row or row.kind != "worker":
+            ui.message = "select a worker to remove"
+        elif len(worker_names) <= 1:
+            ui.message = "cannot remove the only worker"
+        else:
+            model = str(row.ref.get("model") or "").rsplit("/", 1)[-1]
+            label = f"{row.text} ({model})" if model else row.text
+            ui.confirm = Confirm(f"Remove {label}? (y/n)", ("remove_worker", row.text))
     elif key == ord("d"):
         if task_id:
             return ("diff", task_id)
@@ -328,6 +353,8 @@ def _target_of(row: Row | None) -> str | None:
     """Whose model or thinking level a picker should change, from the selected row."""
     if row and row.kind == "planner":
         return models.PLANNER
+    if row and row.kind == "reviewer":
+        return models.REVIEWER
     if row and row.kind == "worker":
         return row.text
     return None
@@ -362,21 +389,31 @@ def tail(path: Path, count: int) -> list[str]:
 
 
 def output_worker(ui: UI, data: dict | None, task: dict | None = None) -> str | None:
-    """Whose output the lower pane shows: the chosen worker, else the one that is working,
-    else the worker of the selected task, else whoever wrote to their log last."""
-    workers = (data or {}).get("workers") or []
+    """Whose output the lower pane shows: the chosen worker (or the reviewer), else the one
+    that is working, else the worker of the selected task, else whoever wrote to their log
+    last."""
+    data = data or {}
+    workers = data.get("workers") or []
+    review = data.get("review") if isinstance(data.get("review"), dict) else {}
+    reviewer_job = bool(review) and not review.get("planner_reviews", True)
     names = [w["name"] for w in workers]
+    logs = {w["name"]: w.get("log") for w in workers}
+    running = [w["name"] for w in workers if w.get("state") == "running"]
+    if reviewer_job:
+        names.append("reviewer")
+        logs["reviewer"] = review.get("log")
+        if review.get("state") == "running":
+            running.append("reviewer")
     if ui.output_worker in names:
         return ui.output_worker
-    running = next((w["name"] for w in workers if w.get("state") == "running"), None)
     if running:
-        return running
+        return running[0]
     if task and task.get("worker") in names:
         return task["worker"]
 
     def mtime(name: str) -> float:
         try:
-            return Path(next(w["log"] for w in workers if w["name"] == name)).stat().st_mtime
+            return Path(logs.get(name) or "").stat().st_mtime
         except OSError:
             return 0.0
     return max(names, key=mtime) if names else None
@@ -519,15 +556,28 @@ class Dashboard:
                     self.pick_scope(("model_save", target, value))
             elif name == "thinking_pick":
                 self.pick_scope(("thinking_save", action[1], action[2]))
-            elif name == "reviewer":
-                self.pick_reviewer()
-            elif name == "reviewer_pick":
-                self.pick_scope(("reviewer_save", action[1]))
-            elif name == "reviewer_save":
-                name, scope = action[1], action[2]
-                notes = models.set_reviewer(self.project, scope == "project", name)
+            elif name == "add_worker":
+                self.pick_new_worker_model()
+            elif name == "add_worker_pick":
+                if action[1] == TYPE_NEW:
+                    self.ui.picker = None
+                    self.ui.prompt = Prompt("model for the new worker: ",
+                                            action=("add_worker_pick",))
+                else:
+                    self.pick_scope(("add_worker_save", action[1]))
+            elif name == "add_worker_save":
+                model, scope = action[1], action[2]
+                worker_name, notes = models.add_worker(self.project, scope == "project", model)
+                self.load()
+                self.ui.message = notes[0] if notes else f"added {worker_name}"
+                self.ui.selected = f"worker:{worker_name}"
+            elif name == "remove_worker":
+                removed = action[1]
+                notes = models.remove_worker(self.project, False, removed)
                 self.load()
                 self.ui.message = "; ".join(notes[:2])
+                if self.ui.output_worker == removed:
+                    self.ui.output_worker = None
             elif name == "model_save":
                 target, model, scope = action[1], action[2], action[3]
                 notes = models.set_model(self.project, scope == "project", target, model)
@@ -544,12 +594,18 @@ class Dashboard:
 
     # -- model and thinking pickers -----------------------------------------------
     def pick_targets(self, kind: str) -> None:
-        """Whose model or thinking level to change: the planner, or one of the workers."""
+        """Whose model or thinking level to change: the planner, the reviewer, or a worker."""
         cfg = Config.load(self.project)
+        targets = [models.PLANNER]
+        if kind == "model" or not cfg.reviewer_is_planner:
+            targets.append(models.REVIEWER)
+        targets += cfg.worker_names()
         items = []
-        for target in [models.PLANNER, *cfg.worker_names()]:
+        for target in targets:
             if kind == "model":
                 detail = models.current(cfg, target)
+                if target == models.REVIEWER and cfg.reviewer_is_planner:
+                    detail = "planner (the chat)"
             else:
                 detail = models.thinking_current(cfg, target) or "default"
             items.append((target, target, detail))
@@ -561,7 +617,15 @@ class Dashboard:
         self.ui.message = "loading models…" if kind == "model" else "loading thinking levels…"
         self.draw()
         cfg = Config.load(self.project)
-        if kind == "model":
+        if kind == "model" and target == models.REVIEWER:
+            now = models.current(cfg, target)
+            planner_reviews = cfg.reviewer_is_planner
+            items = [("planner (the chat)", "planner", "current" if planner_reviews else "")]
+            items += [(name, name, "current" if name == now and not planner_reviews else "")
+                      for name in models.choices(cfg, target) if name != "planner"]
+            items.append(("type a name…", TYPE_NEW, ""))
+            self.ui.picker = Picker("who reviews each round?", items, action=("model_pick", target))
+        elif kind == "model":
             now = models.current(cfg, target)
             names = models.choices(cfg, target)
             if now in names:
@@ -582,18 +646,12 @@ class Dashboard:
                  ("this project only", "project", ".aaagent/config.toml")]
         self.ui.picker = Picker("save where?", items, action=action)
 
-    def pick_reviewer(self) -> None:
-        """Who reviews each round: the planner (the chat), or a worker whose model it copies."""
+    def pick_new_worker_model(self) -> None:
+        """The model a new worker runs: the same list `aaagent workers add` offers."""
         cfg = Config.load(self.project)
-        planner_reviews = cfg.reviewer_is_planner
-        items = [("planner (the chat)", models.ORCHESTRATOR,
-                  "current" if planner_reviews else "")]
-        for name in cfg.worker_names():
-            model = cfg.worker_model(name)
-            # The reviewer may be a copy of a worker's model: mark that worker.
-            here = not planner_reviews and cfg.reviewer_model == model
-            items.append((name, name, "current" if here else model))
-        self.ui.picker = Picker("who reviews each round?", items, action=("reviewer_pick",))
+        items = [(name, name, "") for name in models.new_worker_choices(cfg)]
+        items.append(("type a name…", TYPE_NEW, ""))
+        self.ui.picker = Picker("model for the new worker", items, action=("add_worker_pick",))
 
     # -- drawing ------------------------------------------------------------------
     def put(self, y: int, x: int, text: str, attr: int = 0, width: int | None = None) -> None:
@@ -745,6 +803,8 @@ class Dashboard:
         else:
             hints = "enter open  d diff  m model  t thinking  v reviewer  a abandon"
             row = self.selected_row()
+            if row and row.kind == "worker":
+                hints += "  + add  - remove"
             if row and row.kind == "session":
                 hints += "  x delete"
             if self.chat_pane:
@@ -784,7 +844,9 @@ class Dashboard:
                 continue
             rows = status.rows(self.data, self.ui.expanded)
             names = tuple(w["name"] for w in (self.data or {}).get("workers") or [])
-            action = handle_key(self.ui, key, rows, names, bool(self.chat_pane))
+            review = (self.data or {}).get("review") or {}
+            action = handle_key(self.ui, key, rows, names, bool(self.chat_pane),
+                                not review.get("planner_reviews", True))
             if action and not self.act(action):
                 return 0
 

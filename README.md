@@ -112,11 +112,14 @@ With tmux installed, `aaagent` opens one window: the Opus chat on the left and t
 
 ```
 ┌ Opus chat ─────────────────────┬ aaagent · my-project ─────────────────┐
-│                                │ WORKERS                               │
+│                                │ PLANNER                               │
 │ > add a /health endpoint       │  planner                  opus · high │
+│                                │ REVIEWER                              │
 │                                │  reviewer          planner (the chat) │
-│                                │  worker1           / fixing 003 r2    │
-│                                │  worker2           waiting for a plan │
+│                                │ WORKERS                               │
+│                                │  worker1      waiting · glm-5.3-flash │
+│                                │  worker2      stopped · fallback      │
+│                                │  + add worker                         │
 │                                │ SESSIONS                              │
 │                                │  ▾ add a /health endpoint  open · 2 t…│
 │                                │     003 add health        / fixing …  │
@@ -137,12 +140,14 @@ Dashboard keys:
 | key | does |
 |---|---|
 | `↑` `↓` / `j` `k` | move |
-| `enter` | task: show or hide its plan, reports and reviews · session: show its tasks · a session's task: jump to it in TASKS · file: read it · worker: show its output |
+| `enter` | task: show or hide its plan, reports and reviews · session: show its tasks · a session's task: jump to it in TASKS · file: read it · worker: show its output · reviewer: show its output (or, while the planner reviews, choose its model) · `+ add worker`: add one |
 | `d` | the selected task's diff (also from a session's task) |
-| `l` | choose whose output the bottom pane shows (default: whoever is working) |
-| `m` | change a model: the selected worker's or the planner's, or pick which one; type a name if it is not listed |
-| `t` | the same for a thinking level |
-| `v` | choose who reviews each round: the planner or a worker |
+| `l` | choose whose output the bottom pane shows (a worker's or the reviewer's; default: whoever is working) |
+| `m` | change a model: the selected row's (planner, reviewer or worker), or pick which one; type a name if it is not listed |
+| `t` | the same for a thinking level (the reviewer has one only while a model reviews) |
+| `v` | choose who reviews each round: the planner (the chat) or a model (Claude or opencode); type a name if it is not listed |
+| `+` | add a worker, after picking its model |
+| `-` | remove the selected worker, after a y/n question |
 | `a` | abandon the selected task, after a y/n question |
 | `o` | open the selected session in the chat pane, after a y/n question (shown for a session row in aaagent's tmux layout) |
 | `x` | delete the selected session and its conversation, after a y/n question |

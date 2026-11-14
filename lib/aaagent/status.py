@@ -41,6 +41,7 @@ def _review_entry(project: Path, cfg: Config) -> dict:
 def status_data(project: Path, cfg: Config) -> dict:
     """Machine-readable status, used by the VSCode extension and the dashboard."""
     workers = []
+    default, fallback = cfg.default_worker, cfg.fallback_worker
     for name in cfg.worker_names():
         pid = worker.worker_pid(project, name)
         job = worker.running_job(project, name)
@@ -52,6 +53,8 @@ def status_data(project: Path, cfg: Config) -> dict:
             "state": "running" if job else ("idle" if pid else "stopped"),
             "job": {k: job[k] for k in ("task", "phase", "round", "created")} if job else None,
             "queued": queued, "log": str(worker.log_file(project, name)),
+            "default": name == default,
+            "fallback": name == fallback and fallback != default,
         })
     out_tasks = []
     for task in tasks.all_tasks(project):
@@ -181,6 +184,10 @@ def worker_summary(w: dict) -> str:
         text += f" · {w['thinking']}"
     if w.get("queued"):
         text += f" · {w['queued']} queued"
+    if w.get("default"):
+        text += " · default"
+    elif w.get("fallback"):
+        text += " · fallback"
     return text
 
 
@@ -193,16 +200,14 @@ def planner_summary(p: dict) -> str:
 
 
 def reviewer_summary(data: dict) -> str:
-    """Who reviews each round: `planner (the chat)` or `reviewer · <model>[ · <thinking>]`."""
+    """Who reviews each round: `planner (the chat)`, or the reviewer's state like a worker's."""
     name = str(data.get("reviewer") or "orchestrator")
     if name == "orchestrator":
         return "planner (the chat)"
     review = data.get("review")
-    if isinstance(review, dict) and review.get("model"):
-        text = f"reviewer · {str(review['model']).rsplit('/', 1)[-1]}"
-        if review.get("thinking"):
-            text += f" · {review['thinking']}"
-        return text
+    if isinstance(review, dict) and review.get("model") and not review.get("planner_reviews"):
+        return worker_summary(review)
+    # Old status data without a review entry: say what the worker it names would run.
     worker = next((w for w in data.get("workers") or [] if w.get("name") == name), None)
     model = str((worker or {}).get("model") or "")
     return f"{name} · {model.rsplit('/', 1)[-1]}" if model else name
@@ -320,7 +325,8 @@ class Row:
 
     @property
     def selectable(self) -> bool:
-        return self.kind in ("planner", "reviewer", "worker", "session", "stask", "task", "file")
+        return self.kind in ("planner", "reviewer", "worker", "add_worker",
+                             "session", "stask", "task", "file")
 
 
 def visible_sessions(all_sessions: list[dict], keep: int = 5) -> tuple[list[dict], int]:
@@ -335,18 +341,31 @@ def visible_sessions(all_sessions: list[dict], keep: int = 5) -> tuple[list[dict
 
 def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_finished: int = 10,
          keep_sessions: int = 5) -> list[Row]:
-    """The flat list shown in the dashboard: workers, chat sessions, then tasks (with the files
-    and the tasks of the expanded ones)."""
+    """The flat list shown in the dashboard: the planner, the reviewer and the workers, then
+    chat sessions, then tasks (with the files and the tasks of the expanded ones)."""
     if not data:
         return []
-    out = [Row("header:workers", "header", "WORKERS", style="header")]
+    out = [Row("header:planner", "header", "PLANNER", style="header")]
     planner = data.get("planner") or {}
     out.append(Row("planner", "planner", "planner", planner_summary(planner), "normal", 1, planner))
-    out.append(Row("reviewer", "reviewer", "reviewer", reviewer_summary(data), "normal", 1,
-                   {"reviewer": data.get("reviewer") or "orchestrator"}))
+
+    review = data.get("review") if isinstance(data.get("review"), dict) else {}
+    review_ref = dict(review)
+    review_ref["reviewer"] = data.get("reviewer") or "orchestrator"
+    review_ref.setdefault("planner_reviews", review_ref["reviewer"] == "orchestrator")
+    style = "normal"
+    if not review_ref["planner_reviews"]:
+        state = review_ref.get("state")
+        style = "running" if state == "running" else ("dim" if state == "stopped" else "normal")
+    out.append(Row("header:reviewer", "header", "REVIEWER", style="header"))
+    out.append(Row("reviewer", "reviewer", "reviewer", reviewer_summary(data), style, 1, review_ref))
+
+    out.append(Row("header:workers", "header", "WORKERS", style="header"))
     for w in data.get("workers") or []:
         style = "running" if w.get("state") == "running" else ("dim" if w.get("state") == "stopped" else "normal")
         out.append(Row(f"worker:{w['name']}", "worker", w["name"], worker_summary(w), style, 1, w))
+    out.append(Row("add_worker", "add_worker", "+ add worker", style="dim", indent=1))
+
     out.append(Row("header:sessions", "header", "SESSIONS", style="header"))
     all_sessions = data.get("sessions") or []
     if not all_sessions:

@@ -288,7 +288,7 @@ class ReviewerTest(unittest.TestCase):
         self.assertEqual(status.reviewer_summary(data), "planner (the chat)")
         self.cli("reviewer", GLM, "--thinking", "high")
         data = status.status_data(self.project, Config.load(self.project))
-        self.assertEqual(status.reviewer_summary(data), "reviewer · glm-5.3-flash · high")
+        self.assertEqual(status.reviewer_summary(data), "stopped · glm-5.3-flash · high")
 
     # -- the reserved name --------------------------------------------------
 

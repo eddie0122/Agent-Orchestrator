@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
 from aaagent import models, session, status, tui  # noqa: E402
+from aaagent.config import Config  # noqa: E402
 
 
 def task(**over):
@@ -50,9 +51,29 @@ def worker(name, state, model="opencode-go/deepseek-v4.1-flash", thinking="", **
     return base
 
 
-def data(tasks=None, workers=None, sessions=None):
+def review_planner():
+    """The `review` entry of status_data while the planner (the chat) reviews."""
+    return {"planner_reviews": True, "model": "planner", "thinking": "", "backend": None,
+            "pid": None, "state": "stopped", "job": None, "queued": 0, "log": "/none"}
+
+
+def review_model(state="stopped", **over):
+    """The `review` entry of status_data while a model reviews each round."""
+    base = {"planner_reviews": False, "model": "opencode-go/glm-5.3-flash",
+            "thinking": "", "backend": "opencode", "pid": None, "state": state,
+            "job": None, "queued": 0, "log": "/none"}
+    base.update(over)
+    return base
+
+
+def data(tasks=None, workers=None, sessions=None, reviewer=None, review=None):
+    if review is None:
+        review = review_planner() if reviewer in (None, "orchestrator") else review_model()
+    if reviewer is None:
+        reviewer = "orchestrator" if review.get("planner_reviews", True) else "reviewer"
     return {"project": "/p", "active_task": None,
             "planner": {"model": "opus", "thinking": ""},
+            "reviewer": reviewer, "review": review,
             "workers": workers if workers is not None else [
                 worker("worker1", "idle"),
                 worker("worker2", "stopped", model="opencode-go/glm-5.3-flash")],
@@ -176,14 +197,22 @@ class RowsTest(unittest.TestCase):
         d = data([task(status="awaiting_review", round=1, files=FILES)])
         rows = status.rows(d)
         self.assertEqual([r.kind for r in rows],
-                         ["header", "planner", "reviewer", "worker", "worker", "header", "note",
-                          "header", "task"])
-        self.assertEqual(rows[5].text, "SESSIONS")
+                         ["header", "planner", "header", "reviewer", "header", "worker", "worker",
+                          "add_worker", "header", "note", "header", "task"])
+        self.assertEqual(rows[8].text, "SESSIONS")
         self.assertTrue(rows[-1].text.startswith("▸ 004 health"))
         rows = status.rows(d, {"004-health"})
         self.assertEqual([r.text for r in rows if r.kind == "file"], ["plan.md", "report-1.md", "review-1.md"])
         self.assertEqual(rows[-1].detail, "changes requested")
         self.assertTrue(all(r.task == "004-health" for r in rows if r.kind == "file"))
+
+    def test_three_sections_before_sessions(self):
+        rows = status.rows(data())
+        self.assertEqual([r.id for r in rows if r.kind == "header"],
+                         ["header:planner", "header:reviewer", "header:workers",
+                          "header:sessions", "header:tasks"])
+        self.assertEqual([r.text for r in rows if r.kind == "header"],
+                         ["PLANNER", "REVIEWER", "WORKERS", "SESSIONS", "TASKS"])
 
     def test_sessions_section(self):
         d = data([task(status="awaiting_review", round=1)], sessions=[
@@ -191,9 +220,9 @@ class RowsTest(unittest.TestCase):
             session_(id="sess-old", short="sess-old", title="fix login", available=False,
                      last_active=recently(hours=3))])
         rows = status.rows(d)
-        self.assertEqual(rows[5].id, "header:sessions")
-        self.assertEqual(rows[5].text, "SESSIONS")
-        current, old = rows[6], rows[7]
+        at = next(i for i, r in enumerate(rows) if r.id == "header:sessions")
+        self.assertEqual(rows[at].text, "SESSIONS")
+        current, old = rows[at + 1], rows[at + 2]
         self.assertEqual(current.id, "session:sess-current")
         self.assertEqual(current.text, "▸ add a /health endpoint")
         self.assertEqual(current.detail, "open · 1 task")
@@ -202,13 +231,14 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(old.text, "· fix login")
         self.assertEqual(old.detail, "3 h ago · gone")
         self.assertEqual(old.style, "dim")
-        self.assertEqual(rows[8].text, "TASKS")
+        self.assertEqual(rows[at + 3].text, "TASKS")
 
     def test_a_session_shows_its_tasks_when_expanded(self):
         d = data([task(status="awaiting_review", round=1, files=FILES)], sessions=[
             session_(current=True, tasks=["004-health", "999-unknown"])])
         rows = status.rows(d, {"session:sess-current"})
-        self.assertEqual(rows[6].text, "▾ add a /health endpoint")
+        session_row = next(r for r in rows if r.id == "session:sess-current")
+        self.assertEqual(session_row.text, "▾ add a /health endpoint")
         stasks = [r for r in rows if r.kind == "stask"]
         self.assertEqual(len(stasks), 1, "unknown task ids are skipped")
         self.assertEqual(stasks[0].id, "stask:sess-current:004-health")
@@ -236,41 +266,96 @@ class RowsTest(unittest.TestCase):
     def test_planner_row(self):
         d = data()
         rows = status.rows(d)
-        planner = rows[1]
-        self.assertEqual(rows[0].text, "WORKERS")
+        planner = next(r for r in rows if r.id == "planner")
         self.assertEqual(planner.kind, "planner")
-        self.assertEqual(planner.id, "planner")
         self.assertEqual(planner.text, "planner")
         self.assertTrue(planner.selectable)
         self.assertEqual(planner.detail, status.planner_summary(d["planner"]))
         self.assertEqual(planner.detail, "opus")
 
-    def test_reviewer_row(self):
-        d = data()
-        row = status.rows(d)[2]
-        self.assertEqual(row.id, "reviewer")
+    def test_reviewer_row_while_the_planner_reviews(self):
+        row = next(r for r in status.rows(data()) if r.id == "reviewer")
         self.assertEqual(row.kind, "reviewer")
         self.assertEqual(row.text, "reviewer")
         self.assertEqual(row.detail, "planner (the chat)")
         self.assertEqual(row.indent, 1)
         self.assertTrue(row.selectable)
-        d["reviewer"] = "reviewer"
-        d["review"] = {"planner_reviews": False, "model": "opencode-go/glm-5.3-flash",
-                       "thinking": "", "backend": "opencode", "pid": None, "state": "stopped",
-                       "job": None, "queued": 0, "log": "/none"}
-        self.assertEqual(status.rows(d)[2].detail, "reviewer · glm-5.3-flash")
-        d["review"]["thinking"] = "high"
-        self.assertEqual(status.rows(d)[2].detail, "reviewer · glm-5.3-flash · high")
+        self.assertTrue(row.ref["planner_reviews"])
+        self.assertEqual(row.ref["reviewer"], "orchestrator")
+
+    def test_reviewer_row_with_a_model_reviewer(self):
+        d = data(reviewer="reviewer")
+        row = next(r for r in status.rows(d) if r.id == "reviewer")
+        self.assertEqual(row.detail, "stopped · glm-5.3-flash")
+        self.assertFalse(row.ref["planner_reviews"])
+        self.assertEqual(row.ref["reviewer"], "reviewer")
+
+    def test_reviewer_row_while_reviewing_a_job(self):
+        d = data(reviewer="reviewer", review=review_model(
+            state="running", thinking="high",
+            job={"task": "016-x", "phase": "review", "round": 2, "created": 0}))
+        row = next(r for r in status.rows(d) if r.id == "reviewer")
+        self.assertTrue(row.detail.startswith("reviewing 016 r2"))
+        self.assertIn("glm-5.3-flash", row.detail)
+        self.assertIn("high", row.detail)
+        self.assertEqual(row.style, "running")
+
+    def test_reviewer_row_without_a_review_entry(self):
+        d = data()
         del d["review"]
         d["reviewer"] = "worker2"
-        self.assertEqual(status.rows(d)[2].detail, "worker2 · glm-5.3-flash",
+        self.assertEqual(status.reviewer_summary(d), "worker2 · glm-5.3-flash",
                          "old status data without a review entry still works")
         d["reviewer"] = "missing"
-        self.assertEqual(status.rows(d)[2].detail, "missing")
+        self.assertEqual(status.reviewer_summary(d), "missing")
+
+    def test_add_worker_row_is_the_last_worker_row(self):
+        rows = status.rows(data())
+        add = next(r for r in rows if r.id == "add_worker")
+        self.assertEqual(add.kind, "add_worker")
+        self.assertEqual(add.text, "+ add worker")
+        self.assertEqual(add.style, "dim")
+        self.assertEqual(add.indent, 1)
+        self.assertTrue(add.selectable)
+        self.assertEqual([r.kind for r in rows if r.kind in ("worker", "add_worker")],
+                         ["worker", "worker", "add_worker"])
+
+    def test_worker_rows_mark_the_default_and_the_fallback(self):
+        d = data(workers=[worker("worker1", "idle", default=True),
+                          worker("worker2", "stopped", model="opencode-go/glm-5.3-flash",
+                                 fallback=True)])
+        by_id = {r.id: r for r in status.rows(d)}
+        self.assertTrue(by_id["worker:worker1"].detail.endswith(" · default"))
+        self.assertTrue(by_id["worker:worker2"].detail.endswith(" · fallback"))
 
     def test_no_tasks(self):
         self.assertEqual(status.rows(data())[-1].kind, "note")
         self.assertEqual(status.rows(None), [])
+
+
+class StatusDataTest(unittest.TestCase):
+    def project(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def test_workers_carry_their_default_and_fallback_flags(self):
+        cfg = Config({"workers": {"worker1": {"model": "sonnet"},
+                                  "worker2": {"model": "opus"},
+                                  "worker3": {"model": "haiku"}},
+                      "flow": {"default_worker": "worker2", "fallback_worker": "worker3"},
+                      "reviewer": {"model": "planner"}})
+        workers = status.status_data(self.project(), cfg)["workers"]
+        self.assertEqual([w["name"] for w in workers], ["worker1", "worker2", "worker3"])
+        self.assertEqual([w["default"] for w in workers], [False, True, False])
+        self.assertEqual([w["fallback"] for w in workers], [False, False, True])
+
+    def test_the_only_worker_is_the_default_but_not_the_fallback(self):
+        cfg = Config({"workers": {"worker1": {"model": "sonnet"}},
+                      "reviewer": {"model": "planner"}})
+        worker_entry = status.status_data(self.project(), cfg)["workers"][0]
+        self.assertTrue(worker_entry["default"])
+        self.assertFalse(worker_entry["fallback"])
 
 
 class TextTest(unittest.TestCase):
@@ -301,10 +386,10 @@ class KeysTest(unittest.TestCase):
                           task(id="003-old", number=3, title="old", status="committed", commit="abc1234")])
         self.ui = tui.UI()
 
-    def press(self, key, has_chat_pane=False):
+    def press(self, key, has_chat_pane=False, reviewer_job=False):
         rows = status.rows(self.data, self.ui.expanded)
         k = ord(key) if isinstance(key, str) else key
-        return tui.handle_key(self.ui, k, rows, ("worker1", "worker2"), has_chat_pane)
+        return tui.handle_key(self.ui, k, rows, ("worker1", "worker2"), has_chat_pane, reviewer_job)
 
     def test_starts_on_the_open_task_and_moves(self):
         rows = status.rows(self.data)
@@ -357,6 +442,14 @@ class KeysTest(unittest.TestCase):
         self.press(10)
         self.assertEqual(self.ui.output_worker, "worker2")
 
+    def test_output_worker_cycles_through_the_reviewer_only_when_it_has_a_job(self):
+        for expected in ("worker1", "worker2", "reviewer", None):
+            self.press("l", reviewer_job=True)
+            self.assertEqual(self.ui.output_worker, expected)
+        self.press("l")
+        self.assertEqual(self.ui.output_worker, "worker1",
+                         "the planner reviews, so the cycle has no reviewer")
+
     def test_view_scrolls_and_closes(self):
         self.ui.view = tui.View("t", ["x"] * 50)
         self.ui.page = 10
@@ -401,6 +494,18 @@ class KeysTest(unittest.TestCase):
                              {"name": "worker2", "state": "idle", "log": "/none"}])
         self.assertEqual(tui.output_worker(tui.UI(), idle, task(worker="worker2")), "worker2")
 
+    def test_output_follows_the_running_reviewer(self):
+        d = data(reviewer="reviewer", review=review_model(
+            state="running", job={"task": "016-x", "phase": "review", "round": 2, "created": 0}))
+        self.assertEqual(tui.output_worker(self.ui, d), "reviewer")
+        self.ui.output_worker = "worker1"
+        self.assertEqual(tui.output_worker(self.ui, d), "worker1")
+
+        planner_reviews = tui.UI()
+        planner_reviews.output_worker = "reviewer"
+        self.assertEqual(tui.output_worker(planner_reviews, data()), "worker1",
+                         "while the planner reviews there is no reviewer output")
+
     def test_model_and_thinking_keys_use_the_selected_row(self):
         self.ui.selected = "worker:worker1"
         self.assertEqual(self.press("m"), ("model", "worker1"))
@@ -412,14 +517,64 @@ class KeysTest(unittest.TestCase):
         self.assertEqual(self.press("m"), ("model", None))
         self.assertEqual(self.press("t"), ("thinking", None))
 
-    def test_reviewer_key_and_row(self):
-        self.assertEqual(self.press("v"), ("reviewer",))
+    def test_the_reviewer_row_uses_its_own_model_and_thinking(self):
         self.ui.selected = "reviewer"
-        self.assertEqual(self.press(10), ("reviewer",))
-        self.assertEqual(self.press(curses.KEY_RIGHT), ("reviewer",))
+        self.assertEqual(self.press("m"), ("model", "reviewer"))
+        self.assertIsNone(self.press("t"), "the planner reviews: it has no level of its own")
+        self.assertIn("pick a reviewer model first", self.ui.message)
+
+        self.data = data(reviewer="reviewer")
+        self.assertEqual(self.press("t"), ("thinking", "reviewer"))
+
+    def test_reviewer_key_and_row(self):
+        self.assertEqual(self.press("v"), ("model", "reviewer"))
+        self.ui.selected = "reviewer"
+        self.assertEqual(self.press(10), ("model", "reviewer"),
+                         "while the planner reviews, enter offers the reviewer's model")
+        self.assertEqual(self.press(curses.KEY_RIGHT), ("model", "reviewer"))
         self.ui.selected = "planner"
         self.assertIsNone(self.press(10), "enter on the planner row still means nothing")
-        self.assertEqual(self.press("v"), ("reviewer",))
+        self.assertEqual(self.press("v"), ("model", "reviewer"))
+
+    def test_enter_on_the_reviewer_row_shows_its_output(self):
+        self.data = data(reviewer="reviewer", review=review_model(
+            state="running", job={"task": "016-x", "phase": "review", "round": 2, "created": 0}))
+        self.ui.selected = "reviewer"
+        self.assertIsNone(self.press(10))
+        self.assertEqual(self.ui.output_worker, "reviewer")
+        self.assertEqual(self.ui.message, "showing reviewer output")
+
+    def test_add_worker_key_and_row(self):
+        self.ui.selected = "add_worker"
+        self.assertEqual(self.press(10), ("add_worker",))
+        self.ui.selected = "task:004-health"
+        self.assertEqual(self.press("+"), ("add_worker",))
+
+    def test_remove_worker_asks_first(self):
+        self.ui.selected = "worker:worker2"
+        self.assertIsNone(self.press("-"))
+        self.assertIsNotNone(self.ui.confirm)
+        self.assertIn("Remove worker2 (glm-5.3-flash)", self.ui.confirm.prompt)
+        self.assertEqual(self.ui.confirm.action, ("remove_worker", "worker2"))
+        self.assertIsNone(self.press("n"))
+        self.assertIsNone(self.ui.confirm)
+
+        self.ui.selected = "worker:worker2"
+        self.assertIsNone(self.press(curses.KEY_DC))
+        self.assertEqual(self.press("y"), ("remove_worker", "worker2"))
+
+    def test_remove_key_on_another_row_asks_for_a_worker(self):
+        self.ui.selected = "task:004-health"
+        self.assertIsNone(self.press("-"))
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "select a worker to remove")
+
+    def test_remove_refuses_the_only_worker(self):
+        self.ui.selected = "worker:worker1"
+        rows = status.rows(self.data)
+        self.assertIsNone(tui.handle_key(self.ui, ord("-"), rows, ("worker1",)))
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "cannot remove the only worker")
 
     def test_picker_moves_and_returns_the_value(self):
         self.ui.picker = tui.Picker("pick", [("a", "1", ""), ("b", "2", ""), ("c", "3", "")],
@@ -647,11 +802,19 @@ class ActTest(unittest.TestCase):
     def test_picker_can_pick_which_target(self):
         self.dash.act(("model", None))
         picker = self.dash.ui.picker
-        self.assertEqual([i[1] for i in picker.items], ["planner", "worker1", "worker2"])
-        self.assertEqual(picker.items[1][2], "opencode-go/deepseek-v4.1-flash")
+        self.assertEqual([i[1] for i in picker.items], ["planner", "reviewer", "worker1", "worker2"])
+        self.assertEqual(picker.items[1][2], "planner (the chat)")
+        self.assertEqual(picker.items[2][2], "opencode-go/deepseek-v4.1-flash")
         self.dash.act(("thinking", None))
-        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["planner", "worker1", "worker2"])
+        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["planner", "worker1", "worker2"],
+                         "the planner reviews, so the reviewer has no thinking level to pick")
         self.assertEqual(self.dash.ui.picker.items[1][2], "default")
+
+    def test_thinking_targets_include_the_reviewer_when_a_model_reviews(self):
+        self.dash.act(("model_save", "reviewer", "sonnet", "project"))
+        self.dash.act(("thinking", None))
+        self.assertEqual([i[1] for i in self.dash.ui.picker.items],
+                         ["planner", "reviewer", "worker1", "worker2"])
 
     def test_thinking_picker_lists_the_levels(self):
         with mock.patch.object(models, "thinking_choices", return_value=["low", "high", "max"]):
@@ -679,32 +842,91 @@ class ActTest(unittest.TestCase):
         self.assertIn('model = "sonnet"', text)
         self.assertIn("planner model: sonnet", self.dash.ui.message)
 
-    def test_reviewer_picker_and_save(self):
-        self.assertTrue(self.dash.act(("reviewer",)))
+    def test_reviewer_model_picker_lists_the_planner_first(self):
+        with mock.patch.object(models, "choices", return_value=["planner", "sonnet", "opus"]):
+            self.assertTrue(self.dash.act(("model", "reviewer")))
         picker = self.dash.ui.picker
         self.assertEqual(picker.title, "who reviews each round?")
-        self.assertEqual([i[1] for i in picker.items], ["orchestrator", "worker1", "worker2"])
-        self.assertEqual([i[0] for i in picker.items], ["planner (the chat)", "worker1", "worker2"])
+        self.assertEqual([i[0] for i in picker.items], ["planner (the chat)", "sonnet", "opus",
+                                                        "type a name…"])
+        self.assertEqual([i[1] for i in picker.items[:3]], ["planner", "sonnet", "opus"])
         self.assertEqual(picker.items[0][2], "current")
-        self.assertEqual(picker.items[2][2], "opencode-go/glm-5.3-flash")
-        self.assertEqual(picker.action, ("reviewer_pick",))
+        self.assertEqual(picker.items[-1][1], tui.TYPE_NEW)
+        self.assertEqual(picker.action, ("model_pick", "reviewer"))
 
-        self.dash.act(("reviewer_pick", "worker2"))
+        self.dash.act(("model_pick", "reviewer", "sonnet"))
         self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["user", "project"])
-        self.dash.act(("reviewer_save", "worker2", "project"))
-        path = self.project / ".aaagent" / "config.toml"
-        self.assertTrue(path.is_file())
-        self.assertIn('model = "opencode-go/glm-5.3-flash"', path.read_text(),
-                      "picking a worker copies its model into [reviewer]")
+        self.dash.act(("model_save", "reviewer", "sonnet", "project"))
+        text = (self.project / ".aaagent" / "config.toml").read_text()
+        self.assertIn("[reviewer]", text)
+        self.assertIn('model = "sonnet"', text)
         self.assertEqual(self.dash.data["reviewer"], "reviewer")
-        self.assertIn("reviewer: reviewer (opencode-go/glm-5.3-flash)", self.dash.ui.message)
+        self.assertIn("reviewer: reviewer (sonnet", self.dash.ui.message)
 
-    def test_reviewer_picker_marks_the_worker_that_reviews(self):
-        self.dash.act(("reviewer_save", "worker2", "user"))
-        self.dash.act(("reviewer",))
-        self.assertEqual(self.dash.ui.picker.items[0][2], "")
-        self.assertEqual(self.dash.ui.picker.items[2][2], "current",
-                         "worker2's model is the reviewer's, so worker2 is marked")
+    def test_reviewer_can_be_given_back_to_the_planner(self):
+        self.dash.act(("model_save", "reviewer", "sonnet", "project"))
+        self.assertEqual(self.dash.data["reviewer"], "reviewer")
+        self.dash.act(("model_save", "reviewer", "planner", "project"))
+        text = (self.project / ".aaagent" / "config.toml").read_text()
+        self.assertIn('model = "planner"', text)
+        self.assertEqual(self.dash.data["reviewer"], "orchestrator")
+
+    def test_reviewer_picker_marks_the_current_model(self):
+        self.dash.act(("model_save", "reviewer", "sonnet", "project"))
+        with mock.patch.object(models, "choices", return_value=["planner", "sonnet", "opus"]):
+            self.dash.act(("model", "reviewer"))
+        details = {i[1]: i[2] for i in self.dash.ui.picker.items}
+        self.assertEqual(details["sonnet"], "current")
+        self.assertEqual(details["planner"], "")
+        self.assertEqual(details["opus"], "")
+
+    def test_reviewer_model_can_be_typed(self):
+        with mock.patch.object(models, "choices", return_value=["planner", "sonnet"]):
+            self.dash.act(("model", "reviewer"))
+        self.dash.act(("model_pick", "reviewer", tui.TYPE_NEW))
+        self.assertEqual(self.dash.ui.prompt.action, ("model_pick", "reviewer"))
+        self.assertIn("reviewer", self.dash.ui.prompt.title)
+        self.dash.act(("model_pick", "reviewer", "opus"))
+        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["user", "project"])
+
+    def test_add_worker_picks_a_model_and_creates_it(self):
+        with mock.patch.object(models, "new_worker_choices", return_value=["sonnet", "opus"]):
+            self.assertTrue(self.dash.act(("add_worker",)))
+        picker = self.dash.ui.picker
+        self.assertEqual(picker.title, "model for the new worker")
+        self.assertEqual([i[1] for i in picker.items], ["sonnet", "opus", tui.TYPE_NEW])
+        self.assertEqual(picker.action, ("add_worker_pick",))
+
+        self.dash.act(("add_worker_pick", tui.TYPE_NEW))
+        self.assertEqual(self.dash.ui.prompt.action, ("add_worker_pick",))
+        self.assertEqual(self.dash.ui.prompt.title, "model for the new worker: ")
+
+        self.dash.act(("add_worker_pick", "sonnet"))
+        self.assertEqual([i[1] for i in self.dash.ui.picker.items], ["user", "project"])
+
+        self.dash.act(("add_worker_save", "sonnet", "user"))
+        text = self.user.read_text()
+        self.assertIn("[workers.worker3]", text)
+        self.assertIn('model = "sonnet"', text)
+        self.assertEqual([w["name"] for w in self.dash.data["workers"]],
+                         ["worker1", "worker2", "worker3"])
+        self.assertEqual(self.dash.ui.selected, "worker:worker3")
+        self.assertIn("added worker3", self.dash.ui.message)
+
+    def test_remove_worker_removes_it_and_resets_the_output(self):
+        self.dash.act(("add_worker_save", "sonnet", "user"))
+        self.dash.ui.output_worker = "worker3"
+        self.assertTrue(self.dash.act(("remove_worker", "worker3")))
+        self.assertEqual([w["name"] for w in self.dash.data["workers"]], ["worker1", "worker2"])
+        self.assertIsNone(self.dash.ui.output_worker)
+        self.assertIn("removed worker3", self.dash.ui.message)
+
+    def test_removing_the_only_worker_reports_the_error(self):
+        self.user.write_text('[workers.worker1]\nmodel = "sonnet"\n')
+        self.dash.load()
+        self.assertEqual([w["name"] for w in self.dash.data["workers"]], ["worker1"])
+        self.dash.act(("remove_worker", "worker1"))
+        self.assertIn("only worker", self.dash.ui.message)
 
     def test_errors_go_to_the_message(self):
         self.dash.act(("model_save", "planner", "  ", "project"))
