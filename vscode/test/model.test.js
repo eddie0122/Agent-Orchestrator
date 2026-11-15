@@ -25,6 +25,8 @@ test("taskSummary describes each stage", () => {
   assert.strictEqual(model.taskSummary(task({ next: { phase: "implement" } })), "plan ready");
   assert.strictEqual(model.taskSummary(task({ status: "running", job: { phase: "implement", worker: "deepseek" } })),
     "implementing · deepseek");
+  assert.strictEqual(model.taskSummary(task({ status: "running", job: { phase: "review", worker: "glm" } })),
+    "reviewing · glm");
   assert.strictEqual(model.taskSummary(task({ status: "awaiting_review", round: 2 })), "in review (round 2)");
   assert.strictEqual(model.taskSummary(task({ status: "awaiting_review", round: 1, next: { phase: "commit" } })),
     "in review (round 1)");
@@ -118,6 +120,138 @@ test("workerItem shows the job a worker is running and its model", () => {
     "stopped");
 });
 
+test("workerItem marks the default and fallback workers", () => {
+  const def = model.workerItem({ name: "worker1", model: "opencode-go/deepseek-v4.1-flash", state: "idle",
+    queued: 0, default: true });
+  assert.strictEqual(def.description, "waiting for a plan · deepseek-v4.1-flash · default");
+  assert.strictEqual(def.contextValue, "worker.idle.default");
+  const fallback = model.workerItem({ name: "worker2", model: "opencode-go/glm-5.3-flash", state: "stopped",
+    queued: 0, fallback: true });
+  assert.strictEqual(fallback.description, "stopped · fallback");
+  assert.strictEqual(fallback.contextValue, "worker.stopped");
+});
+
+test("plannerItem shows the chat's model and thinking level", () => {
+  assert.deepStrictEqual(model.plannerItem({ model: "opus", thinking: "xhigh" }), {
+    id: "planner",
+    label: "opus",
+    description: "xhigh",
+    tooltip: "Planner (the chat): opus\nthinking: xhigh\nClaude models only",
+    icon: { id: "sparkle" },
+    contextValue: "planner",
+  });
+  assert.strictEqual(model.plannerItem({}).description, "default thinking");
+  assert.strictEqual(model.plannerItem(undefined).label, "planner");
+});
+
+test("gitItem shows the branch mode and the checked-out branch", () => {
+  const current = model.gitItem({ mode: "current", branch: "main", batch: null, last_pr: null });
+  assert.strictEqual(current.id, "git");
+  assert.strictEqual(current.label, "Git: Current branch");
+  assert.strictEqual(current.description, "on main");
+  assert.strictEqual(current.contextValue, "git");
+  assert.deepStrictEqual(current.icon, { id: "git-branch" });
+  assert.match(current.tooltip, /Commit on the checked-out branch/);
+  assert.match(current.tooltip, /Click to change$/);
+
+  const branch = model.gitItem({ mode: "branch", branch: "feat/branch-mode", batch: null, last_pr: null });
+  assert.strictEqual(branch.label, "Git: New branch");
+  assert.match(branch.tooltip, /One feat\/… or fix\/… branch per batch of tasks/);
+
+  const pr = model.gitItem({ mode: "pr", branch: "fix/login-crash", batch: null, last_pr: null });
+  assert.strictEqual(pr.label, "Git: New branch + pull request");
+  assert.deepStrictEqual(pr.icon, { id: "git-pull-request" });
+  assert.match(pr.tooltip, /open a PR \(gh\)/);
+});
+
+test("gitItem describes the open batch, its base and its tasks", () => {
+  const item = model.gitItem({
+    mode: "branch", branch: "fix/login-crash",
+    batch: { branch: "fix/login-crash", base: "main", tasks: ["022-branch-mode", "023-pr"] },
+    last_pr: null,
+  });
+  assert.strictEqual(item.description, "on fix/login-crash (from main)");
+  assert.match(item.tooltip, /batch: fix\/login-crash from main/);
+  assert.match(item.tooltip, /tasks: 022-branch-mode, 023-pr/);
+  assert.deepStrictEqual(item.icon, { id: "git-branch" });
+});
+
+test("gitItem marks a failed PR unless a batch is open", () => {
+  const failed = model.gitItem({
+    mode: "pr", branch: "main", batch: null,
+    last_pr: { branch: "fix/login-crash", url: null, error: "gh is not installed" },
+  });
+  assert.deepStrictEqual(failed.icon, { id: "warning", color: "problemsWarningIcon.foreground" });
+  assert.match(failed.tooltip, /PR failed: gh is not installed — run aaagent pr/);
+  const withBatch = model.gitItem({
+    mode: "pr", branch: "feat/next", batch: { branch: "feat/next", base: "main", tasks: [] },
+    last_pr: { branch: "feat/old", url: null, error: "gh is not installed" },
+  });
+  assert.deepStrictEqual(withBatch.icon, { id: "git-pull-request" });
+  const opened = model.gitItem({
+    mode: "pr", branch: "main", batch: null,
+    last_pr: { branch: "feat/old", url: "https://example.invalid/pr/1", error: null },
+  });
+  assert.match(opened.tooltip, /pull request: https:\/\/example\.invalid\/pr\/1/);
+});
+
+test("gitItem handles a missing mode, a detached HEAD and no input", () => {
+  const unknown = model.gitItem({ mode: "nonsense", branch: null });
+  assert.strictEqual(unknown.label, "Git: Current branch");
+  assert.strictEqual(unknown.description, "detached HEAD");
+  assert.doesNotThrow(() => model.gitItem(undefined));
+  assert.strictEqual(model.gitItem(undefined).label, "Git: Current branch");
+  assert.strictEqual(model.gitItem(null).description, "detached HEAD");
+});
+
+test("branchModeChoices lists current, branch, pr and marks the active one", () => {
+  const choices = model.branchModeChoices("pr");
+  assert.deepStrictEqual(choices.map((c) => c.mode), ["current", "branch", "pr"]);
+  assert.deepStrictEqual(choices.map((c) => c.label),
+    ["Current branch", "New branch", "New branch + pull request"]);
+  assert.deepStrictEqual(choices.map((c) => c.description), [undefined, undefined, "current"]);
+  assert.match(choices[0].detail, /checked-out branch/);
+  assert.deepStrictEqual(model.branchModeChoices("current").map((c) => c.description),
+    ["current", undefined, undefined]);
+  assert.deepStrictEqual(model.branchModeChoices(undefined).map((c) => c.mode), ["current", "branch", "pr"]);
+});
+
+test("reviewerItem shows the planner when the chat reviews", () => {
+  const planner = model.reviewerItem({ reviewer: "orchestrator", review: { planner_reviews: true } });
+  assert.strictEqual(planner.label, "Planner (the chat)");
+  assert.strictEqual(planner.description, "reviews each round in the chat");
+  assert.strictEqual(planner.contextValue, "reviewer.planner");
+  assert.deepStrictEqual(planner.icon, { id: "comment-discussion" });
+  assert.match(planner.tooltip, /planner reviews each round itself/);
+  // Older status data without a review entry, and no data at all, mean the same.
+  assert.strictEqual(model.reviewerItem({ reviewer: "orchestrator" }).contextValue, "reviewer.planner");
+  assert.strictEqual(model.reviewerItem({}).contextValue, "reviewer.planner");
+  assert.strictEqual(model.reviewerItem(null).contextValue, "reviewer.planner");
+});
+
+test("reviewerItem shows the reviewer job like a worker", () => {
+  const data = (review) => ({ reviewer: "reviewer", review: { planner_reviews: false, ...review } });
+  const running = model.reviewerItem(data({
+    model: "opencode-go/glm-5.3-flash", thinking: "high", backend: "opencode", pid: 12,
+    state: "running", job: { task: "016-a-view", phase: "review", round: 2 }, queued: 1,
+  }));
+  assert.strictEqual(running.label, "glm-5.3-flash");
+  assert.strictEqual(running.description, "reviewing 016 r2 · high · 1 queued");
+  assert.strictEqual(running.contextValue, "reviewer.model.running");
+  assert.deepStrictEqual(running.icon, { id: "sync~spin" });
+  assert.strictEqual(running.tooltip,
+    "reviewer: opencode-go/glm-5.3-flash\nbackend: opencode\nthinking: high\npid 12");
+  const idle = model.reviewerItem(data({ model: "sonnet", state: "idle", pid: 3 }));
+  assert.strictEqual(idle.description, "waiting for a round");
+  assert.strictEqual(idle.contextValue, "reviewer.model.idle");
+  assert.deepStrictEqual(idle.icon, { id: "circle-filled", color: "testing.iconPassed" });
+  const stopped = model.reviewerItem(data({ model: "sonnet", state: "stopped", pid: null }));
+  assert.strictEqual(stopped.description, "stopped");
+  assert.strictEqual(stopped.contextValue, "reviewer.model.stopped");
+  assert.deepStrictEqual(stopped.icon, { id: "circle-outline" });
+  assert.match(stopped.tooltip, /\nnot running$/);
+});
+
 test("workerItem shows the thinking level when one is set", () => {
   const w = model.workerItem({ name: "deepseek", model: "opencode-go/deepseek-v4.1-flash", thinking: "high",
     pid: 9, state: "idle", queued: 0 });
@@ -127,8 +261,68 @@ test("workerItem shows the thinking level when one is set", () => {
     state: "stopped", queued: 0 }).tooltip, "glm: opencode-go/glm-5.3-flash\nnot running");
 });
 
+test("reviewerChoices lists the planner, typing, then the models with the current first", () => {
+  const info = {
+    reviewer: { model: "planner", choices: ["planner", "sonnet", "opencode-go/glm-5.3-flash"] },
+  };
+  assert.deepStrictEqual(model.reviewerChoices(info), [
+    { label: "Planner (the chat)", description: "current", reviewer: "planner" },
+    { label: "$(edit) Type a model name…", typed: true },
+    { label: "sonnet", reviewer: "sonnet" },
+    { label: "opencode-go/glm-5.3-flash", reviewer: "opencode-go/glm-5.3-flash" },
+  ]);
+  const modelReviewer = model.reviewerChoices({
+    reviewer: { model: "opencode-go/glm-5.3-flash", choices: ["planner", "sonnet", "opencode-go/glm-5.3-flash"] },
+  });
+  assert.strictEqual(modelReviewer[0].description, "the chat reviews each round");
+  assert.deepStrictEqual(modelReviewer[2],
+    { label: "opencode-go/glm-5.3-flash", reviewer: "opencode-go/glm-5.3-flash", description: "current" });
+  // No duplicate "planner" entry, whatever the choices say.
+  assert.strictEqual(modelReviewer.filter((c) => c.reviewer === "planner").length, 1);
+});
+
+test("workersDescription names the default and fallback workers", () => {
+  assert.strictEqual(model.workersDescription({
+    workers: [{ name: "worker1", default: true }, { name: "worker2", fallback: true }],
+  }), "default: worker1 · fallback: worker2");
+  assert.strictEqual(model.workersDescription({
+    workers: [{ name: "worker1", default: true }, { name: "worker2" }],
+  }), "default: worker1");
+  assert.strictEqual(model.workersDescription({ workers: [{ name: "only" }] }), "default: only");
+  assert.strictEqual(model.workersDescription({ workers: [] }), undefined);
+  assert.strictEqual(model.workersDescription(null), undefined);
+});
+
+test("statusBar names the reviewer in its tooltip", () => {
+  const base = { workers: [], planner: { model: "opus" }, tasks: [] };
+  assert.match(model.statusBar(base).tooltip, /^planner: opus\nreviewer: planner \(the chat\)\naaagent:/);
+  assert.match(model.statusBar({ ...base, reviewer: "reviewer",
+    review: { planner_reviews: false, model: "opencode-go/glm-5.3-flash" } }).tooltip,
+  /^planner: opus\nreviewer: opencode-go\/glm-5\.3-flash\naaagent:/);
+});
+
+test("transitions say the planner and stay quiet while a worker reviews", () => {
+  const before = { tasks: [task({ status: "running" })] };
+  const after = { tasks: [task({ status: "awaiting_review", round: 2 })] };
+  const ev = model.transitions(before, after);
+  assert.strictEqual(ev[0].level, "status");
+  assert.match(ev[0].message, /worker finished round 2; the planner is reviewing\.$/);
+  assert.ok(!/Opus/.test(ev[0].message));
+  assert.deepStrictEqual(
+    model.transitions({ ...before, reviewer: "glm" }, { ...after, reviewer: "glm" }), []);
+  const approved = model.transitions({ ...before, reviewer: "glm" },
+    { reviewer: "glm", tasks: [task({ status: "approved", round: 2 })] });
+  assert.strictEqual(approved[0].level, "status");
+  assert.strictEqual(approved[0].message,
+    "aaagent: 004 health: approved by the reviewer in round 2; the planner commits next.");
+  const warning = model.transitions(before, { tasks: [task({ status: "failed", attention: "failed" })] });
+  assert.match(warning[0].message, /The planner is waiting for your decision in the chat\.$/);
+});
+
 const modelInfo = () => ({
   planner: { model: "opus", choices: ["sonnet", "opus", "haiku"] },
+  reviewer: { model: "planner", thinking: "", backend: null,
+    choices: ["planner", "sonnet", "opencode-go/glm-5.3-flash"] },
   workers: {
     deepseek: { model: "opencode-go/deepseek-v4.1-flash" },
     glm: { model: "opencode-go/glm-5.3-flash" },
@@ -136,12 +330,16 @@ const modelInfo = () => ({
   worker_choices: ["opencode-go/kimi-k3", "opencode-go/glm-5.3-flash"],
 });
 
-test("modelTargets lists the planner first, then the workers", () => {
+test("modelTargets lists the planner, the reviewer, then the workers", () => {
   assert.deepStrictEqual(model.modelTargets(modelInfo()), [
     { label: "Planner (Claude)", description: "opus", target: "planner" },
+    { label: "Reviewer", description: "planner (the chat)", target: "reviewer" },
     { label: "Worker: deepseek", description: "opencode-go/deepseek-v4.1-flash", target: "deepseek" },
     { label: "Worker: glm", description: "opencode-go/glm-5.3-flash", target: "glm" },
   ]);
+  const reviewer = model.modelTargets({ ...modelInfo(),
+    reviewer: { model: "opencode-go/glm-5.3-flash", choices: [] } });
+  assert.strictEqual(reviewer[1].description, "opencode-go/glm-5.3-flash");
 });
 
 test("modelChoices offers typing first, then the current model first and marked", () => {
@@ -160,6 +358,21 @@ test("modelChoices offers typing first, then the current model first and marked"
     { label: "opencode-go/kimi-k3", model: "opencode-go/kimi-k3" },
     { label: "opencode-go/glm-5.3-flash", model: "opencode-go/glm-5.3-flash" },
   ]);
+  assert.deepStrictEqual(model.modelChoices(info, "reviewer"), [
+    { label: "$(edit) Type a model name…", typed: true },
+    { label: "planner", model: "planner", description: "current" },
+    { label: "sonnet", model: "sonnet" },
+    { label: "opencode-go/glm-5.3-flash", model: "opencode-go/glm-5.3-flash" },
+  ]);
+});
+
+test("addWorkerChoices offers typing first, then the models for a new worker", () => {
+  assert.deepStrictEqual(model.addWorkerChoices(modelInfo()), [
+    { label: "$(edit) Type a model name…", typed: true },
+    { label: "opencode-go/kimi-k3", model: "opencode-go/kimi-k3" },
+    { label: "opencode-go/glm-5.3-flash", model: "opencode-go/glm-5.3-flash" },
+  ]);
+  assert.deepStrictEqual(model.addWorkerChoices({}), [{ label: "$(edit) Type a model name…", typed: true }]);
 });
 
 const thinkingInfo = () => ({
@@ -170,12 +383,19 @@ const thinkingInfo = () => ({
   },
 });
 
-test("thinkingTargets lists the planner first, then the workers", () => {
+test("thinkingTargets lists the planner, then the reviewer only when a model reviews, then the workers", () => {
   assert.deepStrictEqual(model.thinkingTargets(thinkingInfo()), [
     { label: "Planner (Claude)", description: "xhigh · opus", target: "planner" },
     { label: "Worker: deepseek", description: "high · opencode-go/deepseek-v4.1-flash", target: "deepseek" },
     { label: "Worker: glm", description: "default · opencode-go/glm-5.3-flash", target: "glm" },
   ]);
+  const withReviewer = model.thinkingTargets({ ...thinkingInfo(),
+    reviewer: { model: "sonnet", thinking: "medium", choices: ["low", "medium", "high"] } });
+  assert.deepStrictEqual(withReviewer.slice(0, 2), [
+    { label: "Planner (Claude)", description: "xhigh · opus", target: "planner" },
+    { label: "Reviewer", description: "medium · sonnet", target: "reviewer" },
+  ]);
+  assert.strictEqual(withReviewer.length, 4);
 });
 
 test("thinkingChoices offers Default and the levels, marking the current one", () => {
@@ -194,6 +414,14 @@ test("thinkingChoices offers Default and the levels, marking the current one", (
     { label: "high", level: "high" },
     { label: "max", level: "max" },
   ]);
+  assert.deepStrictEqual(model.thinkingChoices({
+    ...info, reviewer: { model: "sonnet", thinking: "medium", choices: ["low", "medium", "high"] },
+  }, "reviewer"), [
+    { label: "Default", description: "the model's own setting", level: "default" },
+    { label: "low", level: "low" },
+    { label: "medium", description: "current", level: "medium" },
+    { label: "high", level: "high" },
+  ]);
 });
 
 test("statusBar prefers running work, then tasks needing the user", () => {
@@ -207,6 +435,14 @@ test("statusBar prefers running work, then tasks needing the user", () => {
   assert.strictEqual(model.statusBar(needs).text, "$(warning) aaagent: 004 needs you");
   assert.match(model.statusBar(needs).tooltip, /^planner: opus\n/);
   assert.match(model.statusBar(needs).tooltip, /workers up: deepseek/);
+  const single = { workers, active_task: "004-health",
+    tasks: [task({ status: "awaiting_review", round: 2 })] };
+  assert.strictEqual(model.statusBar(single).text, "$(hubot) aaagent: 004 in review (round 2)");
+  const parallel = { workers, active_tasks: ["004-health", "005-x"], tasks: [
+    task({ id: "005-x", number: 5, status: "awaiting_review", round: 1 }),
+    task({ status: "awaiting_review", round: 2 }),
+  ] };
+  assert.strictEqual(model.statusBar(parallel).text, "$(hubot) aaagent: 005 in review (round 1)");
 });
 
 test("transitions notify on commit, attention, and finished rounds; first load is silent", () => {

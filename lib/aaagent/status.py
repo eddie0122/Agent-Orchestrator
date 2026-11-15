@@ -13,26 +13,48 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, sessions, tasks, worker
-from .config import Config
+from . import __version__, branching, sessions, tasks, worker
+from .config import REVIEWER, Config
 from .tasks import FINAL_STATUSES, FlowError
 
-PHASE_VERB = {"implement": "implementing", "fix": "fixing", "commit": "committing"}
+PHASE_VERB = {"implement": "implementing", "fix": "fixing", "review": "reviewing", "commit": "committing"}
+
+
+def _review_entry(project: Path, cfg: Config) -> dict:
+    """The `review` entry of status_data: the reviewer as it would appear among the workers."""
+    if cfg.reviewer_is_planner:
+        return {"planner_reviews": True, "model": "planner", "thinking": "", "backend": None,
+                "pid": None, "state": "stopped", "job": None, "queued": 0,
+                "log": str(worker.log_file(project, REVIEWER))}
+    pid = worker.worker_pid(project, REVIEWER)
+    job = worker.running_job(project, REVIEWER)
+    queued = (len(worker.pending_jobs(project, REVIEWER))
+              if worker.queue_dir(project, REVIEWER).is_dir() else 0)
+    return {"planner_reviews": False, "model": cfg.reviewer_model,
+            "thinking": cfg.reviewer_thinking, "backend": cfg.reviewer_backend,
+            "pid": pid,
+            "state": "running" if job else ("idle" if pid else "stopped"),
+            "job": {k: job[k] for k in ("task", "phase", "round", "created")} if job else None,
+            "queued": queued, "log": str(worker.log_file(project, REVIEWER))}
 
 
 def status_data(project: Path, cfg: Config) -> dict:
     """Machine-readable status, used by the VSCode extension and the dashboard."""
     workers = []
+    default, fallback = cfg.default_worker, cfg.fallback_worker
     for name in cfg.worker_names():
         pid = worker.worker_pid(project, name)
         job = worker.running_job(project, name)
         queued = len(worker.pending_jobs(project, name)) if worker.queue_dir(project, name).is_dir() else 0
         workers.append({
-            "name": name, "model": cfg.worker_model(name), "thinking": cfg.worker_thinking(name),
+            "name": name, "model": cfg.worker_model(name), "backend": cfg.worker_backend(name),
+            "thinking": cfg.worker_thinking(name),
             "pid": pid,
             "state": "running" if job else ("idle" if pid else "stopped"),
             "job": {k: job[k] for k in ("task", "phase", "round", "created")} if job else None,
             "queued": queued, "log": str(worker.log_file(project, name)),
+            "default": name == default,
+            "fallback": name == fallback and fallback != default,
         })
     out_tasks = []
     for task in tasks.all_tasks(project):
@@ -71,12 +93,21 @@ def status_data(project: Path, cfg: Config) -> dict:
             "commit": state.get("commit"), "created": state.get("created"),
             "session": state.get("chat_session"),
             "updated": task.state_file.stat().st_mtime if task.state_file.exists() else None,
-            "path": str(task.path), "files": files,
+            "path": str(task.path), "files": files, "scope": task.scope(),
         })
+    active = tasks.active_tasks(project)
+    try:
+        git_info = branching.git_status(project, cfg)
+    except Exception:  # noqa: BLE001 - a git problem must never break status
+        git_info = {"mode": cfg.branch_mode, "branch": None, "batch": None, "last_pr": None}
     return {"version": __version__, "project": str(project),
             "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking},
+            "reviewer": cfg.reviewer,
+            "review": _review_entry(project, cfg),
             "workers": workers,
-            "tasks": out_tasks, "active_task": tasks.active_task(project),
+            "git": git_info,
+            "tasks": out_tasks, "active_task": active[0] if active else None,
+            "active_tasks": active,
             "sessions": sessions.list_sessions(project, limit=30),
             "current_session": sessions.current_session(project)}
 
@@ -160,6 +191,10 @@ def worker_summary(w: dict) -> str:
         text += f" · {w['thinking']}"
     if w.get("queued"):
         text += f" · {w['queued']} queued"
+    if w.get("default"):
+        text += " · default"
+    elif w.get("fallback"):
+        text += " · fallback"
     return text
 
 
@@ -169,6 +204,20 @@ def planner_summary(p: dict) -> str:
     if p.get("thinking"):
         text += f" · {p['thinking']}"
     return text
+
+
+def reviewer_summary(data: dict) -> str:
+    """Who reviews each round: `planner (the chat)`, or the reviewer's state like a worker's."""
+    name = str(data.get("reviewer") or "orchestrator")
+    if name == "orchestrator":
+        return "planner (the chat)"
+    review = data.get("review")
+    if isinstance(review, dict) and review.get("model") and not review.get("planner_reviews"):
+        return worker_summary(review)
+    # Old status data without a review entry: say what the worker it names would run.
+    worker = next((w for w in data.get("workers") or [] if w.get("name") == name), None)
+    model = str((worker or {}).get("model") or "")
+    return f"{name} · {model.rsplit('/', 1)[-1]}" if model else name
 
 
 def file_summary(task: dict, f: dict) -> str:
@@ -256,10 +305,15 @@ def transitions(prev: dict | None, new: dict | None) -> list[dict]:
         elif t.get("attention") and t["attention"] != old.get("attention"):
             why = "stopped after both workers failed" if t["attention"] == "failed" else "reached the review round limit"
             out.append({"level": "warning", "task": t["id"],
-                        "message": f"{label} {why}; Opus is waiting for you in the chat"})
-        elif t["status"] == "awaiting_review" and old["status"] != "awaiting_review":
+                        "message": f"{label} {why}; the planner is waiting for you in the chat"})
+        elif t["status"] == "approved" and old["status"] != "approved":
             out.append({"level": "status", "task": t["id"],
-                        "message": f"{label}: round {t.get('round')} finished; Opus is reviewing"})
+                        "message": f"{label}: approved by the reviewer in round {t.get('round')}; "
+                                   "the planner commits next"})
+        elif (t["status"] == "awaiting_review" and old["status"] != "awaiting_review"
+              and (new.get("reviewer", "orchestrator") == "orchestrator")):
+            out.append({"level": "status", "task": t["id"],
+                        "message": f"{label}: round {t.get('round')} finished; the planner is reviewing"})
     return out
 
 
@@ -278,7 +332,8 @@ class Row:
 
     @property
     def selectable(self) -> bool:
-        return self.kind in ("planner", "worker", "session", "stask", "task", "file")
+        return self.kind in ("planner", "reviewer", "worker", "add_worker",
+                             "session", "stask", "task", "file")
 
 
 def visible_sessions(all_sessions: list[dict], keep: int = 5) -> tuple[list[dict], int]:
@@ -293,16 +348,31 @@ def visible_sessions(all_sessions: list[dict], keep: int = 5) -> tuple[list[dict
 
 def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_finished: int = 10,
          keep_sessions: int = 5) -> list[Row]:
-    """The flat list shown in the dashboard: workers, chat sessions, then tasks (with the files
-    and the tasks of the expanded ones)."""
+    """The flat list shown in the dashboard: the planner, the reviewer and the workers, then
+    chat sessions, then tasks (with the files and the tasks of the expanded ones)."""
     if not data:
         return []
-    out = [Row("header:workers", "header", "WORKERS", style="header")]
+    out = [Row("header:planner", "header", "PLANNER", style="header")]
     planner = data.get("planner") or {}
     out.append(Row("planner", "planner", "planner", planner_summary(planner), "normal", 1, planner))
+
+    review = data.get("review") if isinstance(data.get("review"), dict) else {}
+    review_ref = dict(review)
+    review_ref["reviewer"] = data.get("reviewer") or "orchestrator"
+    review_ref.setdefault("planner_reviews", review_ref["reviewer"] == "orchestrator")
+    style = "normal"
+    if not review_ref["planner_reviews"]:
+        state = review_ref.get("state")
+        style = "running" if state == "running" else ("dim" if state == "stopped" else "normal")
+    out.append(Row("header:reviewer", "header", "REVIEWER", style="header"))
+    out.append(Row("reviewer", "reviewer", "reviewer", reviewer_summary(data), style, 1, review_ref))
+
+    out.append(Row("header:workers", "header", "WORKERS", style="header"))
     for w in data.get("workers") or []:
         style = "running" if w.get("state") == "running" else ("dim" if w.get("state") == "stopped" else "normal")
         out.append(Row(f"worker:{w['name']}", "worker", w["name"], worker_summary(w), style, 1, w))
+    out.append(Row("add_worker", "add_worker", "+ add worker", style="dim", indent=1))
+
     out.append(Row("header:sessions", "header", "SESSIONS", style="header"))
     all_sessions = data.get("sessions") or []
     if not all_sessions:
@@ -333,7 +403,7 @@ def rows(data: dict | None, expanded: set[str] | frozenset = frozenset(), keep_f
     out.append(Row("header:tasks", "header", "TASKS", style="header"))
     shown = visible_tasks(data.get("tasks") or [], keep_finished)
     if not shown:
-        out.append(Row("note:empty", "note", "none yet: ask Opus for a change in the chat", style="dim", indent=1))
+        out.append(Row("note:empty", "note", "none yet: ask for a change in the chat", style="dim", indent=1))
     for t in shown:
         mark = "▾" if t["id"] in expanded else "▸"
         out.append(Row(f"task:{t['id']}", "task", f"{mark} {task_label(t)}", task_summary(t),

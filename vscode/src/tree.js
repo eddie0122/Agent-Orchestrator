@@ -1,5 +1,5 @@
 "use strict";
-// Tree views: Workers, Sessions and Tasks.
+// Tree views: Planner, Reviewer, Workers, Sessions and Tasks.
 
 const vscode = require("vscode");
 const model = require("./model");
@@ -16,6 +16,65 @@ function toTreeItem(spec, collapsible = vscode.TreeItemCollapsibleState.None) {
       : new vscode.ThemeIcon(spec.icon.id);
   }
   return item;
+}
+
+/** The Planner view: the chat's model and thinking level, and where tasks commit. */
+class PlannerProvider {
+  constructor(store) {
+    this.store = store;
+    this._onDidChange = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChange.event;
+  }
+
+  refresh() {
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(node) {
+    if (node && node.kind === "git") {
+      const item = toTreeItem(model.gitItem(node.data));
+      item.command = { command: "aaagent.selectBranchMode", title: "Select Git Branch Mode", arguments: [node] };
+      return item;
+    }
+    const item = toTreeItem(model.plannerItem((node && node.data) || {}));
+    item.command = { command: "aaagent.changePlannerModel", title: "Change Planner Model", arguments: [node] };
+    return item;
+  }
+
+  getChildren(node) {
+    if (node) return [];
+    if (!this.store.data) return [];
+    return [
+      { kind: "planner", data: this.store.data.planner || {} },
+      { kind: "git", data: this.store.data.git || {} },
+    ];
+  }
+}
+
+/** The Reviewer view: one node, the chat or the reviewer job. */
+class ReviewerProvider {
+  constructor(store) {
+    this.store = store;
+    this._onDidChange = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChange.event;
+  }
+
+  refresh() {
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(node) {
+    const item = toTreeItem(model.reviewerItem(node));
+    item.command = model.plannerReviews(node)
+      ? { command: "aaagent.selectReviewer", title: "Change Reviewer", arguments: [node] }
+      : { command: "aaagent.showReviewer", title: "Show Reviewer Output", arguments: [node] };
+    return item;
+  }
+
+  getChildren(node) {
+    if (node) return [];
+    return this.store.data ? [this.store.data] : [];
+  }
 }
 
 class WorkersProvider {
@@ -55,7 +114,11 @@ class TasksProvider {
   getTreeItem(node) {
     if (node.type === "task") {
       const t = node.task;
-      const expanded = !model.isFinal(t) && t.id === (this.store.data && this.store.data.active_task);
+      const data = this.store.data || {};
+      const active = (Array.isArray(data.active_tasks) && data.active_tasks.length)
+        ? data.active_tasks
+        : (data.active_task ? [data.active_task] : []);
+      const expanded = !model.isFinal(t) && active.includes(t.id);
       return toTreeItem(model.taskItem(t), expanded
         ? vscode.TreeItemCollapsibleState.Expanded
         : vscode.TreeItemCollapsibleState.Collapsed);
@@ -139,4 +202,4 @@ class SessionsProvider {
   }
 }
 
-module.exports = { WorkersProvider, TasksProvider, SessionsProvider };
+module.exports = { PlannerProvider, ReviewerProvider, WorkersProvider, TasksProvider, SessionsProvider };

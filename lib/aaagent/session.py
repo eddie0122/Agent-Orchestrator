@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
@@ -14,34 +13,11 @@ import time
 from pathlib import Path
 
 from . import attach, dispatch, gitutil, sessions, tasks, worker
-from .config import ROOT, Config
+from .backends import find_claude
+from .config import REVIEWER, ROOT, Config
 
 AAAGENT_BIN = ROOT / "bin" / "aaagent"
 HOOKS = ROOT / "claude" / "hooks"
-
-
-def find_claude(cfg: Config) -> str | None:
-    configured = cfg.orchestrator.get("claude_bin")
-    if configured:
-        return configured if Path(configured).is_file() else None
-    if os.environ.get("AAAGENT_CLAUDE_BIN"):
-        return os.environ["AAAGENT_CLAUDE_BIN"]
-    on_path = shutil.which("claude")
-    if on_path:
-        return on_path
-    home = Path.home()
-    for cand in (home / ".local" / "bin" / "claude", home / ".claude" / "local" / "claude"):
-        if cand.is_file():
-            return str(cand)
-    bundled = []
-    for ext_root in (".vscode-server", ".vscode", ".cursor-server"):
-        bundled += glob.glob(str(home / ext_root / "extensions" / "anthropic.claude-code-*" /
-                                 "resources" / "native-binary" / "claude"))
-
-    def version_key(p: str):
-        m = re.search(r"claude-code-(\d+)\.(\d+)\.(\d+)", p)
-        return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
-    return max(bundled, key=version_key) if bundled else None
 
 
 def unfinished_tasks(project: Path, cfg: Config) -> list[str]:
@@ -56,6 +32,10 @@ def orchestrator_prompt(cfg: Config, project: Path | None = None) -> str:
     text = (text.replace("{workers}", workers)
                 .replace("{default_worker}", cfg.default_worker)
                 .replace("{fallback_worker}", cfg.fallback_worker))
+    reviewer = cfg.reviewer_worker
+    if reviewer:
+        note = (ROOT / "prompts" / "orchestrator-worker-review.md").read_text()
+        text += note.replace("{model}", cfg.worker_label(REVIEWER))
     pending = unfinished_tasks(project, cfg) if project else []
     if pending:
         text += ("\n## Unfinished work from an earlier chat\n"
@@ -217,6 +197,7 @@ def launch(start: Path, first_prompt: str | None = None, use_tmux: bool = True,
     finally:
         for name in names:
             worker.stop(project, name)
+        worker.stop(project, REVIEWER)      # ignore False: only runs when a model reviews
 
 
 def _write_chat_script(project: Path, claude_cmd: list[str], env: dict, close: str) -> Path:

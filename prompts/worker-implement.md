@@ -3,6 +3,8 @@ You are an unattended implementation worker in an automated pipeline. A planner 
 TASK: {task_id}
 PLAN FILE: {plan}
 
+{scope_note}
+
 Steps:
 1. Read the plan file completely, then read the code it points to.
 2. Implement exactly what the plan asks. Stay in scope: do not refactor unrelated code, reformat files, or add features the plan does not ask for.

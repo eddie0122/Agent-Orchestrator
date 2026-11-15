@@ -1,6 +1,8 @@
 ---
 task: {task_id}
-worker:            # optional: deepseek | glm (empty = default worker)
+worker:            # optional: a worker name such as worker2 (empty = default worker)
+files:             # optional: the files this task may change, comma-separated (dir/ and globs allowed). Needed to run it at the same time as another task.
+branch:            # optional, used when [git] branch_mode is branch or pr: e.g. feat/login-form or fix/crash-on-save (empty = derived from the task title)
 ---
 <!-- TEMPLATE: replace this whole file with the plan. Remove this line. -->
 

@@ -35,25 +35,25 @@ class TomlTest(unittest.TestCase):
 
     def test_existing_section_replaces_the_key_and_keeps_the_rest(self):
         self.path.write_text('# top\n[orchestrator]\n# the model\nmodel = "opus"  # current\n'
-                             'extra_args = []\n\n[flow]\ndefault_worker = "deepseek"\n')
+                             'extra_args = []\n\n[flow]\ndefault_worker = "worker1"\n')
         set_toml_value(self.path, "orchestrator", "model", "sonnet")
         text = self.path.read_text()
         data = tomllib.loads(text)
         self.assertEqual(data["orchestrator"]["model"], "sonnet")
         self.assertEqual(data["orchestrator"]["extra_args"], [])
-        self.assertEqual(data["flow"]["default_worker"], "deepseek")
+        self.assertEqual(data["flow"]["default_worker"], "worker1")
         self.assertIn("# top", text)
         self.assertIn("# the model", text)
         self.assertIn('model = "sonnet"', text)
 
     def test_existing_section_without_the_key_inserts_after_it(self):
         self.path.write_text('[orchestrator]\nextra_args = ["--effort", "high"]\n\n'
-                             '[flow]\ndefault_worker = "deepseek"\n')
+                             '[flow]\ndefault_worker = "worker1"\n')
         set_toml_value(self.path, "orchestrator", "model", "sonnet")
         data = tomllib.loads(self.path.read_text())
         self.assertEqual(data["orchestrator"]["model"], "sonnet")
         self.assertEqual(data["orchestrator"]["extra_args"], ["--effort", "high"])
-        self.assertEqual(data["flow"]["default_worker"], "deepseek")
+        self.assertEqual(data["flow"]["default_worker"], "worker1")
         self.assertLess(self.path.read_text().index('model = "sonnet"'),
                         self.path.read_text().index("[flow]"))
 
@@ -65,10 +65,10 @@ class TomlTest(unittest.TestCase):
         self.assertEqual(data["flow"]["default_worker"], "x")
 
     def test_inline_table_cannot_be_updated(self):
-        original = 'workers = { deepseek = { model = "x" } }\n'
+        original = 'workers = { worker1 = { model = "x" } }\n'
         self.path.write_text(original)
         with self.assertRaises(ValueError):
-            set_toml_value(self.path, "workers.deepseek", "model", "y")
+            set_toml_value(self.path, "workers.worker1", "model", "y")
         self.assertEqual(self.path.read_text(), original)
 
 
@@ -135,11 +135,11 @@ class ModelTest(unittest.TestCase):
     # -- workers -------------------------------------------------------------
 
     def test_set_worker_model(self):
-        code, out = self.cli("model", "deepseek", "opencode-go/kimi-k3")
+        code, out = self.cli("model", "worker1", "opencode-go/kimi-k3")
         self.assertEqual(code, 0, out)
         cfg = Config.load(self.project)
-        self.assertEqual(cfg.worker_model("deepseek"), "opencode-go/kimi-k3")
-        self.assertEqual(cfg.worker_model("glm"), "opencode-go/glm-5.3-flash")
+        self.assertEqual(cfg.worker_model("worker1"), "opencode-go/kimi-k3")
+        self.assertEqual(cfg.worker_model("worker2"), "opencode-go/glm-5.3-flash")
         self.assertIn("next dispatch", out)
         self.assertNotIn("warning", out)
 
@@ -147,10 +147,10 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(self.cli("model", "nope", "x")[0], 2)
 
     def test_unknown_model_warns_but_is_saved(self):
-        code, out = self.cli("model", "deepseek", "opencode-go/nope")
+        code, out = self.cli("model", "worker1", "opencode-go/nope")
         self.assertEqual(code, 0, out)
         self.assertIn("warning", out)
-        self.assertEqual(Config.load(self.project).worker_model("deepseek"), "opencode-go/nope")
+        self.assertEqual(Config.load(self.project).worker_model("worker1"), "opencode-go/nope")
 
     # -- listing -------------------------------------------------------------
 
@@ -160,8 +160,8 @@ class ModelTest(unittest.TestCase):
         data = json.loads(out)
         self.assertEqual(data["planner"]["model"], "opus")
         self.assertIn("opus", data["planner"]["choices"])
-        self.assertEqual(sorted(data["workers"]), ["deepseek", "glm"])
-        self.assertEqual(data["workers"]["deepseek"]["model"], "opencode-go/deepseek-v4.1-flash")
+        self.assertEqual(sorted(data["workers"]), ["worker1", "worker2"])
+        self.assertEqual(data["workers"]["worker1"]["model"], "opencode-go/deepseek-v4.1-flash")
         self.assertIn("opencode-go/kimi-k3", data["worker_choices"])
 
     def test_list_prints_the_choices(self):

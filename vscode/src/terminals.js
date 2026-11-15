@@ -5,6 +5,7 @@ const vscode = require("vscode");
 const model = require("./model");
 
 const CHAT_NAME = "aaagent: chat";
+const REVIEWER = "reviewer";
 const workerName = (name) => `aaagent: ${name}`;
 
 // Terminals we disposed ourselves. VSCode can keep a disposed terminal in `window.terminals`
@@ -48,14 +49,21 @@ class Terminals {
 
   /**
    * One terminal per worker, side by side in the panel. A worker that is busy in the
-   * background keeps running; its terminal follows the log instead.
+   * background keeps running; its terminal follows the log instead. The reviewer is a
+   * role of its own: it gets the same terminal when a model reviews, and its terminal
+   * closes when the planner reviews again.
    */
   async ensureWorkers(project, { reveal = false } = {}) {
     const bin = this.cli.require();
-    const workers = (this.store.data && this.store.data.workers) || [];
+    const data = this.store.data || {};
+    const workers = data.workers || [];
+    const review = data.review;
+    const reviewerRuns = !!review && !review.planner_reviews;
+    if (!reviewerRuns) this.disposeWorkerTerminal(REVIEWER);
+    const entries = reviewerRuns ? [...workers, { ...review, name: REVIEWER }] : workers;
     let parent = null;
     let stoppedIdle = false;
-    for (const w of workers) {
+    for (const w of entries) {
       const existing = this.workerTerminal(w.name);
       if (existing) {
         parent = parent || existing;

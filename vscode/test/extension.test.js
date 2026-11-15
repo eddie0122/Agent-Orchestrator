@@ -49,7 +49,8 @@ test("manifest: every command in a menu is declared, and every declared command 
     for (const m of w.contents.matchAll(/command:(aaagent\.[A-Za-z]+)/g)) assert.ok(declared.has(m[1]), m[1]);
   }
   const views = pkg.contributes.views.aaagent.map((v) => v.id);
-  assert.deepStrictEqual(views, ["aaagent.workers", "aaagent.sessions", "aaagent.tasks"]);
+  assert.deepStrictEqual(views,
+    ["aaagent.planner", "aaagent.reviewer", "aaagent.workers", "aaagent.sessions", "aaagent.tasks"]);
   assert.ok(fs.existsSync(path.join(__dirname, "..", pkg.contributes.viewsContainers.activitybar[0].icon)));
   // registration is checked after activation below
   test.declared = declared;
@@ -83,12 +84,36 @@ test("activate() against a real project", async (t) => {
   assert.strictEqual(api.store.data.project, fs.realpathSync(project));
   const workersTree = rec.treeViews["aaagent.workers"].treeDataProvider;
   const tasksTree = rec.treeViews["aaagent.tasks"].treeDataProvider;
-  assert.deepStrictEqual(workersTree.getChildren().map((w) => w.name), ["deepseek", "glm"]);
-  assert.strictEqual(workersTree.getTreeItem(workersTree.getChildren()[0]).description, "stopped");
+  assert.deepStrictEqual(workersTree.getChildren().map((w) => w.name), ["worker1", "worker2"]);
+  assert.strictEqual(workersTree.getTreeItem(workersTree.getChildren()[0]).description, "stopped · default");
   assert.deepStrictEqual(tasksTree.getChildren(), []);
   // The `.aaagent/**` refresh watcher plus the image-fetch watcher.
   assert.strictEqual(rec.watchers.length, 2);
-  assert.match(rec.treeViews["aaagent.workers"].description, /^planner: /);
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
+
+  // The Planner view shows the planner and where tasks commit; the Reviewer view shows one node.
+  const plannerTree = rec.treeViews["aaagent.planner"].treeDataProvider;
+  const reviewerTree = rec.treeViews["aaagent.reviewer"].treeDataProvider;
+  assert.strictEqual(plannerTree.getChildren().length, 2);
+  const plannerNode = plannerTree.getChildren()[0];
+  const plannerItem = plannerTree.getTreeItem(plannerNode);
+  assert.strictEqual(plannerItem.label, api.store.data.planner.model);
+  assert.strictEqual(plannerItem.description, api.store.data.planner.thinking || "default thinking");
+  assert.strictEqual(plannerItem.command.command, "aaagent.changePlannerModel");
+  const checkout = sh(project, "git", ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  const gitNode = plannerTree.getChildren()[1];
+  const gitTreeItem = plannerTree.getTreeItem(gitNode);
+  assert.strictEqual(gitTreeItem.id, "git");
+  assert.strictEqual(gitTreeItem.label, "Git: Current branch");
+  assert.strictEqual(gitTreeItem.description, `on ${checkout}`);
+  assert.strictEqual(gitTreeItem.contextValue, "git");
+  assert.strictEqual(gitTreeItem.command.command, "aaagent.selectBranchMode");
+  assert.strictEqual(reviewerTree.getChildren().length, 1);
+  const reviewerItem = reviewerTree.getTreeItem(reviewerTree.getChildren()[0]);
+  assert.strictEqual(reviewerItem.label, "Planner (the chat)");
+  assert.strictEqual(reviewerItem.contextValue, "reviewer.planner");
+  assert.strictEqual(reviewerItem.command.command, "aaagent.selectReviewer");
+  assert.strictEqual(rec.context["aaagent.reviewerIsModel"], false);
 
   // a task with a plan, a (hand-written) report and a review
   sh(project, AAAGENT, ["new", "health endpoint"]);
@@ -104,6 +129,13 @@ test("activate() against a real project", async (t) => {
   const item = tasksTree.getTreeItem(nodes[0]);
   assert.strictEqual(item.label, "001 health endpoint");
   assert.strictEqual(item.contextValue, "task.active");
+  assert.strictEqual(item.collapsibleState, stub.TreeItemCollapsibleState.Collapsed);
+  // every active task is expanded, not just active_task
+  const savedData = api.store.data;
+  api.store.data = { ...savedData, active_task: null, active_tasks: [nodes[0].task.id, "999-other"] };
+  assert.strictEqual(tasksTree.getTreeItem(nodes[0]).collapsibleState,
+    stub.TreeItemCollapsibleState.Expanded);
+  api.store.data = savedData;
   const kids = tasksTree.getChildren(nodes[0]);
   assert.deepStrictEqual(kids.map((k) => (k.file ? k.file.name : k.type)), ["plan.md", "report-1.md", "review-1.md", "changes"]);
   const reviewItem = tasksTree.getTreeItem(kids[2]);
@@ -122,9 +154,9 @@ test("activate() against a real project", async (t) => {
   // Open Chat: one terminal per worker (split), then the chat as an editor tab
   await rec.commands.get("aaagent.openChat")();
   const names = rec.terminals.map((x) => x.name);
-  assert.deepStrictEqual(names, ["aaagent: deepseek", "aaagent: glm", "aaagent: chat"]);
+  assert.deepStrictEqual(names, ["aaagent: worker1", "aaagent: worker2", "aaagent: chat"]);
   const [ds, glm, chat] = rec.terminals;
-  assert.deepStrictEqual(ds.creationOptions.shellArgs, ["worker", "deepseek"]);
+  assert.deepStrictEqual(ds.creationOptions.shellArgs, ["worker", "worker1"]);
   assert.strictEqual(ds.creationOptions.shellPath, AAAGENT);
   assert.strictEqual(glm.creationOptions.location.parentTerminal, ds);
   assert.deepStrictEqual(chat.creationOptions.shellArgs, ["start", "--no-workers"]);
@@ -213,7 +245,7 @@ test("activate() against a real project", async (t) => {
   // Select Model: a worker's model typed by hand, saved to this project only.
   rec.answer = undefined;
   rec.quickPicks = [
-    (items) => items.find((i) => i.target === "deepseek"),
+    (items) => items.find((i) => i.target === "worker1"),
     (items) => items.find((i) => i.typed),
     (items) => items.find((i) => i.project === true),
   ];
@@ -221,7 +253,7 @@ test("activate() against a real project", async (t) => {
   await rec.commands.get("aaagent.selectModel")();
   assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
     /model = "opencode-go\/kimi-k3"/);
-  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /deepseek model: opencode-go\/kimi-k3/.test(m)),
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /worker1 model: opencode-go\/kimi-k3/.test(m)),
     JSON.stringify(rec.messages));
 
   // Select Thinking: the planner's level, saved to the user config.
@@ -244,8 +276,77 @@ test("activate() against a real project", async (t) => {
   assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
     /thinking = "max"/);
   await api.refresh();
-  assert.strictEqual(api.store.data.workers.find((w) => w.name === "deepseek").thinking, "max");
-  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "planner: sonnet · xhigh");
+  assert.strictEqual(api.store.data.workers.find((w) => w.name === "worker1").thinking, "max");
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
+
+  // Change Reviewer…: one model reviews each round (its model goes into [reviewer]),
+  // saved to this project only. A reviewer terminal appears.
+  rec.answer = undefined;
+  rec.quickPicks = [
+    (items) => items.find((i) => i.reviewer === "opencode-go/glm-5.3-flash"),
+    (items) => items.find((i) => i.project === true),
+  ];
+  await rec.commands.get("aaagent.selectReviewer")();
+  assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
+    /\[reviewer\]\nmodel = "opencode-go\/glm-5\.3-flash"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer: reviewer \(opencode-go\/glm-5\.3-flash\)/.test(m)),
+    JSON.stringify(rec.messages));
+  assert.ok(rec.terminals.some((term) => term.name === "aaagent: reviewer"
+    && term.exitStatus === undefined), JSON.stringify(rec.terminals.map((term) => term.name)));
+  await api.refresh();
+  assert.strictEqual(api.store.data.reviewer, "reviewer");
+  assert.strictEqual(rec.context["aaagent.reviewerIsModel"], true);
+  const modelReviewerItem = reviewerTree.getTreeItem(reviewerTree.getChildren()[0]);
+  assert.strictEqual(modelReviewerItem.label, "glm-5.3-flash");
+  assert.strictEqual(modelReviewerItem.contextValue, "reviewer.model.stopped");
+  assert.strictEqual(modelReviewerItem.command.command, "aaagent.showReviewer");
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
+
+  // Change Reviewer Thinking… targets the reviewer, not the planner.
+  rec.quickPicks = [
+    (items) => items.find((i) => i.level === "high"),
+    (items) => items.find((i) => i.project === true),
+  ];
+  await rec.commands.get("aaagent.changeReviewerThinking")();
+  const reviewConf = fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8");
+  assert.match(reviewConf, /\[reviewer\]\nmodel = "opencode-go\/glm-5\.3-flash"/);
+  assert.match(reviewConf, /\[reviewer\][\s\S]*?thinking = "high"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer thinking: high/.test(m)),
+    JSON.stringify(rec.messages));
+
+  // Select Git Branch Mode…: the quick pick runs `aaagent branch-mode` and refreshes.
+  rec.quickPicks = [(items) => items.find((i) => i.mode === "pr")];
+  await rec.commands.get("aaagent.selectBranchMode")();
+  assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
+    /\[git\]\nbranch_mode = "pr"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /branch mode: pr/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
+  assert.strictEqual(api.store.data.git.mode, "pr");
+  const prTreeItem = plannerTree.getTreeItem(plannerTree.getChildren()[1]);
+  assert.strictEqual(prTreeItem.label, "Git: New branch + pull request");
+  // Picking the mode that is already set does nothing.
+  rec.quickPicks = [(items) => items[2]];
+  const beforeSamePick = rec.messages.length;
+  await rec.commands.get("aaagent.selectBranchMode")();
+  assert.strictEqual(rec.messages.length, beforeSamePick);
+
+  // The reviewer's output opens its own terminal; Stop Reviewer asks only while it runs.
+  const reviewerTerm = rec.terminals.find((term) => term.name === "aaagent: reviewer");
+  assert.ok(reviewerTerm, JSON.stringify(rec.terminals.map((term) => term.name)));
+  const reviewerShown = reviewerTerm.shown;
+  await rec.commands.get("aaagent.showReviewer")();
+  assert.strictEqual(reviewerTerm.shown, reviewerShown + 1);
+  api.store.data.review.state = "running";
+  const beforeStop = rec.messages.length;
+  rec.answer = undefined;
+  await rec.commands.get("aaagent.stopReviewer")();
+  assert.ok(rec.messages.slice(beforeStop).some(([lvl, m]) => lvl === "warning" && /middle of a review/.test(m)),
+    JSON.stringify(rec.messages.slice(beforeStop)));
+  rec.answer = "Stop";
+  await rec.commands.get("aaagent.stopReviewer")();
+  api.store.data.review.state = "stopped";
+  assert.ok(!rec.messages.some(([lvl]) => lvl === "error"), JSON.stringify(rec.messages));
+  rec.answer = undefined;
 
   // Attach Image: one panel, reused on a second call, with a nonce CSP and the file button.
   const panelsBefore = rec.panels.length;
@@ -420,6 +521,78 @@ test("activate() against a real project", async (t) => {
   assert.deepStrictEqual(chat5.creationOptions.shellArgs, ["start", "--no-workers", "--session", otherId]);
   assert.ok(chat4.exitStatus !== undefined, "the old chat is closed");
   assert.ok(!rec.messages.some(([lvl]) => lvl === "error"), JSON.stringify(rec.messages));
+
+  // Delete Session…: the open chat's session is refused; another one asks first, in a modal.
+  await api.refresh();
+  const readSessions = () => JSON.parse(fs.readFileSync(sessionsFile, "utf8")).sessions;
+  const openSessionNode = sessionsTree.getChildren().find((n) => n.session.id === resumeId);
+  assert.strictEqual(sessionsTree.getTreeItem(openSessionNode).contextValue, "session.open");
+  const beforeRefusal = rec.messages.length;
+  await rec.commands.get("aaagent.deleteSession")(openSessionNode);
+  assert.ok(rec.messages.slice(beforeRefusal).some(([lvl, m]) => lvl === "info" && /open chat/.test(m)),
+    JSON.stringify(rec.messages.slice(beforeRefusal)));
+  assert.ok(readSessions().some((s) => s.id === resumeId), "the open session stays");
+
+  // Dismissed: nothing is deleted.
+  const otherNode = sessionsTree.getChildren().find((n) => n.session.id === otherId);
+  rec.answer = undefined;
+  await rec.commands.get("aaagent.deleteSession")(otherNode);
+  await api.refresh();
+  assert.ok(readSessions().some((s) => s.id === otherId), "a dismissed modal deletes nothing");
+
+  // Confirmed: the session leaves the history.
+  rec.answer = "Delete";
+  await rec.commands.get("aaagent.deleteSession")(otherNode);
+  await api.refresh();
+  assert.deepStrictEqual(readSessions().map((s) => s.id), [resumeId]);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /deleted session bbbbbbbb/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
+  // Add Worker…: picks a model and scope, then the new worker gets its own terminal.
+  await api.refresh();
+  rec.answer = undefined;
+  rec.quickPicks = [
+    (items) => items.find((i) => i.model === "opencode-go/kimi-k3"),
+    (items) => items.find((i) => i.project === true),
+  ];
+  await rec.commands.get("aaagent.addWorker")();
+  await api.refresh();
+  assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1", "worker2", "worker3"]);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /^added worker3: opencode-go\/kimi-k3/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
+  assert.ok(rec.terminals.some((term) => term.name === "aaagent: worker3" && term.exitStatus === undefined),
+    JSON.stringify(rec.terminals.map((term) => term.name)));
+
+  // Use as Default Worker: the Workers view description follows.
+  const worker3 = workersTree.getChildren().find((w) => w.name === "worker3");
+  await rec.commands.get("aaagent.setDefaultWorker")(worker3);
+  await api.refresh();
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker3 · fallback: worker1");
+
+  // Remove Worker…: asks first; a dismissed modal keeps the worker.
+  rec.answer = undefined;
+  await rec.commands.get("aaagent.removeWorker")(worker3);
+  await api.refresh();
+  assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1", "worker2", "worker3"]);
+
+  // Confirmed: the worker leaves the config and its terminal closes.
+  rec.answer = "Remove";
+  await rec.commands.get("aaagent.removeWorker")(worker3);
+  await api.refresh();
+  assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1", "worker2"]);
+  assert.ok(!rec.terminals.some((term) => term.name === "aaagent: worker3" && term.exitStatus === undefined));
+  assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
+
+  // The last worker cannot be removed.
+  rec.answer = "Remove";
+  await rec.commands.get("aaagent.removeWorker")(workersTree.getChildren().find((w) => w.name === "worker2"));
+  await api.refresh();
+  const beforeLast = rec.messages.length;
+  await rec.commands.get("aaagent.removeWorker")(workersTree.getChildren()[0]);
+  assert.ok(rec.messages.slice(beforeLast).some(([lvl, m]) => lvl === "info"
+    && /needs at least one worker/.test(m)), JSON.stringify(rec.messages.slice(beforeLast)));
+  await api.refresh();
+  assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1"]);
+  rec.answer = undefined;
 });
 
 test("not a git repository and missing CLI show the right welcome state", async (t) => {

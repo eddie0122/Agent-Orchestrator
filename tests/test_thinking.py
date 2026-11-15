@@ -47,10 +47,10 @@ class ThinkingTest(unittest.TestCase):
         session.init_project(self.project, Config.load(self.project))
 
     def tearDown(self):
-        for name in ("deepseek", "glm"):
+        for name in ("worker1", "worker2"):
             worker.stop(self.project, name)
         for _ in range(50):
-            if not any(worker.worker_pid(self.project, n) for n in ("deepseek", "glm")):
+            if not any(worker.worker_pid(self.project, n) for n in ("worker1", "worker2")):
                 break
             time.sleep(0.1)
         os.environ.clear()
@@ -74,8 +74,8 @@ class ThinkingTest(unittest.TestCase):
     def test_defaults_are_empty(self):
         cfg = Config.load(self.project)
         self.assertEqual(cfg.planner_thinking, "")
-        self.assertEqual(cfg.worker_thinking("deepseek"), "")
-        self.assertEqual(cfg.worker_label("deepseek"), DS)
+        self.assertEqual(cfg.worker_thinking("worker1"), "")
+        self.assertEqual(cfg.worker_label("worker1"), DS)
 
     def test_unknown_worker_raises(self):
         cfg = Config.load(self.project)
@@ -83,42 +83,43 @@ class ThinkingTest(unittest.TestCase):
             cfg.worker_thinking("nope")
 
     def test_worker_label_includes_the_level(self):
-        self.user_config.write_text('[workers.deepseek]\nthinking = "high"\n')
+        self.user_config.write_text('[workers.worker1]\nmodel = "opencode-go/deepseek-v4.1-flash"\n'
+                                    'thinking = "high"\n')
         cfg = Config.load(self.project)
-        self.assertEqual(cfg.worker_thinking("deepseek"), "high")
-        self.assertEqual(cfg.worker_label("deepseek"), f"{DS}, thinking high")
+        self.assertEqual(cfg.worker_thinking("worker1"), "high")
+        self.assertEqual(cfg.worker_label("worker1"), f"{DS}, thinking high")
 
     # -- choices -------------------------------------------------------------
 
     def test_choices_come_from_the_opencode_api(self):
         cfg = Config.load(self.project)
         self.assertEqual(models.thinking_choices(cfg, models.PLANNER), PLANNER_THINKING)
-        self.assertEqual(models.thinking_choices(cfg, "deepseek"), ["low", "high", "max"])
-        self.assertEqual(models.thinking_current(cfg, "deepseek"), "")
+        self.assertEqual(models.thinking_choices(cfg, "worker1"), ["low", "high", "max"])
+        self.assertEqual(models.thinking_current(cfg, "worker1"), "")
 
     def test_choices_fall_back_when_opencode_is_missing(self):
         os.environ["AAAGENT_OPENCODE_BIN"] = str(Path(self.tmp.name) / "no-opencode")
         cfg = Config.load(self.project)
-        self.assertEqual(models.thinking_choices(cfg, "deepseek"), WORKER_THINKING_FALLBACK)
+        self.assertEqual(models.thinking_choices(cfg, "worker1"), WORKER_THINKING_FALLBACK)
 
     def test_choices_fall_back_for_a_model_without_variants(self):
-        self.user_config.write_text('[workers.deepseek]\nmodel = "opencode-go/nope"\n')
+        self.user_config.write_text('[workers.worker1]\nmodel = "opencode-go/nope"\n')
         cfg = Config.load(self.project)
-        self.assertEqual(models.thinking_choices(cfg, "deepseek"), WORKER_THINKING_FALLBACK)
+        self.assertEqual(models.thinking_choices(cfg, "worker1"), WORKER_THINKING_FALLBACK)
 
     # -- saving --------------------------------------------------------------
 
     def test_set_worker_thinking_and_clear_it(self):
-        notes = models.set_thinking(self.project, False, "deepseek", "high")
-        self.assertEqual(tomllib.loads(self.user_config.read_text())["workers"]["deepseek"]["thinking"], "high")
-        self.assertEqual(Config.load(self.project).worker_thinking("deepseek"), "high")
+        notes = models.set_thinking(self.project, False, "worker1", "high")
+        self.assertEqual(tomllib.loads(self.user_config.read_text())["workers"]["worker1"]["thinking"], "high")
+        self.assertEqual(Config.load(self.project).worker_thinking("worker1"), "high")
         self.assertIn(f"saved to {self.user_config}", notes[0])
         self.assertIn("applies from the next dispatch", notes)
         self.assertFalse(any(line.startswith("warning:") for line in notes), notes)
 
-        notes = models.set_thinking(self.project, False, "deepseek", "default")
-        self.assertEqual(tomllib.loads(self.user_config.read_text())["workers"]["deepseek"]["thinking"], "")
-        self.assertEqual(Config.load(self.project).worker_thinking("deepseek"), "")
+        notes = models.set_thinking(self.project, False, "worker1", "default")
+        self.assertEqual(tomllib.loads(self.user_config.read_text())["workers"]["worker1"]["thinking"], "")
+        self.assertEqual(Config.load(self.project).worker_thinking("worker1"), "")
         self.assertIn("thinking: default", notes[0])
 
     def test_set_planner_thinking_and_clear_it(self):
@@ -137,23 +138,29 @@ class ThinkingTest(unittest.TestCase):
                                                            "claude", None))
 
     def test_set_thinking_in_the_project_config(self):
-        code, out = self.cli("thinking", "glm", "low", "--project")
+        code, out = self.cli("thinking", "worker2", "low", "--project")
         self.assertEqual(code, 0, out)
         data = tomllib.loads(project_config_path(self.project).read_text())
-        self.assertEqual(data["workers"]["glm"]["thinking"], "low")
-        self.assertFalse(self.user_config.exists())
-        self.assertEqual(Config.load(self.project).worker_thinking("glm"), "low")
+        self.assertEqual(data["workers"]["worker2"]["thinking"], "low")
+        # the seed was written out first, so worker1 survives the project-only override
+        self.assertTrue(self.user_config.exists())
+        self.assertEqual(sorted(tomllib.loads(self.user_config.read_text())["workers"]),
+                         ["worker1", "worker2"])
+        cfg = Config.load(self.project)
+        self.assertEqual(cfg.worker_thinking("worker2"), "low")
+        self.assertEqual(cfg.worker_names(), ["worker1", "worker2"])
 
     def test_project_config_overrides_the_user_config(self):
-        project_config_path(self.project).write_text('[workers.deepseek]\nthinking = "max"\n')
-        notes = models.set_thinking(self.project, False, "deepseek", "high")
+        project_config_path(self.project).write_text(
+            '[workers.worker1]\nmodel = "opencode-go/deepseek-v4.1-flash"\nthinking = "max"\n')
+        notes = models.set_thinking(self.project, False, "worker1", "high")
         self.assertTrue(any("overrides this" in line for line in notes), notes)
-        self.assertEqual(Config.load(self.project).worker_thinking("deepseek"), "max")
+        self.assertEqual(Config.load(self.project).worker_thinking("worker1"), "max")
 
     def test_unknown_level_warns_but_is_saved(self):
-        notes = models.set_thinking(self.project, False, "deepseek", "turbo")
+        notes = models.set_thinking(self.project, False, "worker1", "turbo")
         self.assertTrue(any(line.startswith("warning: turbo is not one of:") for line in notes), notes)
-        self.assertEqual(Config.load(self.project).worker_thinking("deepseek"), "turbo")
+        self.assertEqual(Config.load(self.project).worker_thinking("worker1"), "turbo")
 
     # -- the commands --------------------------------------------------------
 
@@ -178,7 +185,7 @@ class ThinkingTest(unittest.TestCase):
         report = self.project / ".aaagent" / "tasks" / "t" / "report-1.md"
         report.parent.mkdir(parents=True, exist_ok=True)
         job = {
-            "id": "j1", "task": "001-x", "phase": "implement", "round": 1, "worker": "deepseek",
+            "id": "j1", "task": "001-x", "phase": "implement", "round": 1, "worker": "worker1",
             "model": DS, "thinking": "high", "agent": "aaagent-worker",
             "prompt": f"Write your report to: {report}\nround: 1\n",
             "log": str(report.parent / "log.jsonl"), "timeout": 30,
@@ -193,7 +200,7 @@ class ThinkingTest(unittest.TestCase):
         report = self.project / ".aaagent" / "tasks" / "t" / "report-1.md"
         report.parent.mkdir(parents=True, exist_ok=True)
         job = {
-            "id": "j2", "task": "001-x", "phase": "implement", "round": 1, "worker": "deepseek",
+            "id": "j2", "task": "001-x", "phase": "implement", "round": 1, "worker": "worker1",
             "model": DS, "thinking": "", "agent": "aaagent-worker",
             "prompt": f"Write your report to: {report}\nround: 1\n",
             "log": str(report.parent / "log.jsonl"), "timeout": 30,
@@ -205,7 +212,8 @@ class ThinkingTest(unittest.TestCase):
 
     def test_dispatch_passes_the_level_to_the_worker(self):
         from aaagent import dispatch, tasks
-        project_config_path(self.project).write_text('[workers.deepseek]\nthinking = "high"\n')
+        project_config_path(self.project).write_text(
+            '[workers.worker1]\nmodel = "opencode-go/deepseek-v4.1-flash"\nthinking = "high"\n')
         task = tasks.create(self.project, "add work")
         task.plan.write_text("---\ntask: x\nworker:\n---\n# Goal\nAppend the model name.\n")
         buf = io.StringIO()
@@ -227,16 +235,16 @@ class ThinkingTest(unittest.TestCase):
         self.assertEqual(data["planner"]["model"], "opus")
         self.assertEqual(data["planner"]["thinking"], "high")
         self.assertEqual(data["planner"]["choices"], PLANNER_THINKING)
-        self.assertEqual(sorted(data["workers"]), ["deepseek", "glm"])
-        self.assertEqual(data["workers"]["deepseek"]["model"], DS)
-        self.assertEqual(data["workers"]["deepseek"]["thinking"], "")
-        self.assertEqual(data["workers"]["deepseek"]["choices"], ["low", "high", "max"])
+        self.assertEqual(sorted(data["workers"]), ["worker1", "worker2"])
+        self.assertEqual(data["workers"]["worker1"]["model"], DS)
+        self.assertEqual(data["workers"]["worker1"]["thinking"], "")
+        self.assertEqual(data["workers"]["worker1"]["choices"], ["low", "high", "max"])
 
     def test_list_prints_the_choices(self):
         code, out = self.cli("thinking", "--list", "planner")
         self.assertEqual(code, 0, out)
         self.assertEqual(out.splitlines(), PLANNER_THINKING)
-        code, out = self.cli("thinking", "--list", "deepseek")
+        code, out = self.cli("thinking", "--list", "worker1")
         self.assertEqual(code, 0, out)
         self.assertEqual(out.splitlines(), ["low", "high", "max"])
 
@@ -246,7 +254,8 @@ class ThinkingTest(unittest.TestCase):
         lines = out.splitlines()
         self.assertTrue(lines[0].startswith("target"), lines)
         self.assertRegex(lines[1], r"^planner\s+opus\s+default$")
-        self.assertRegex(lines[2], r"^deepseek\s+\S+\s+default$")
+        self.assertRegex(lines[2], r"^reviewer\s+planner\s+-$")
+        self.assertRegex(lines[3], r"^worker1\s+\S+\s+default$")
 
     def test_unknown_target_exits_2(self):
         self.assertEqual(self.cli("thinking", "nope", "high")[0], 2)
@@ -258,14 +267,14 @@ class ThinkingTest(unittest.TestCase):
         def answer(value):
             return lambda prompt: value
 
-        self.assertIsNone(models.pick_thinking_interactive(cfg, "deepseek", answer(""), printed.append))
-        self.assertEqual(models.pick_thinking_interactive(cfg, "deepseek", answer("0"), printed.append),
+        self.assertIsNone(models.pick_thinking_interactive(cfg, "worker1", answer(""), printed.append))
+        self.assertEqual(models.pick_thinking_interactive(cfg, "worker1", answer("0"), printed.append),
                          "default")
-        self.assertEqual(models.pick_thinking_interactive(cfg, "deepseek", answer("2"), printed.append),
+        self.assertEqual(models.pick_thinking_interactive(cfg, "worker1", answer("2"), printed.append),
                          "high")
-        self.assertEqual(models.pick_thinking_interactive(cfg, "deepseek", answer("turbo"), printed.append),
+        self.assertEqual(models.pick_thinking_interactive(cfg, "worker1", answer("turbo"), printed.append),
                          "turbo")
-        self.assertIsNone(models.pick_thinking_interactive(cfg, "deepseek", answer("9"), printed.append))
+        self.assertIsNone(models.pick_thinking_interactive(cfg, "worker1", answer("9"), printed.append))
         self.assertIn("  0. default  (current)", printed)
         self.assertIn("  2. high", printed)
         self.assertTrue(any(line.startswith("error:") for line in printed))
@@ -274,13 +283,15 @@ class ThinkingTest(unittest.TestCase):
 
     def test_status_data_has_thinking(self):
         self.user_config.write_text('[orchestrator]\nthinking = "xhigh"\n'
-                                    '[workers.deepseek]\nthinking = "high"\n')
+                                    '[workers.worker1]\nmodel = "opencode-go/deepseek-v4.1-flash"\n'
+                                    'thinking = "high"\n'
+                                    '[workers.worker2]\nmodel = "opencode-go/glm-5.3-flash"\n')
         cfg = Config.load(self.project)
         data = status.status_data(self.project, cfg)
         self.assertEqual(data["planner"]["thinking"], "xhigh")
         by_name = {w["name"]: w for w in data["workers"]}
-        self.assertEqual(by_name["deepseek"]["thinking"], "high")
-        self.assertEqual(by_name["glm"]["thinking"], "")
+        self.assertEqual(by_name["worker1"]["thinking"], "high")
+        self.assertEqual(by_name["worker2"]["thinking"], "")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ Chat with Claude Opus in your terminal. Opus plans and reviews; cheaper opencode
 ```
 you ──chat──► Opus (Claude Code, Pro subscription)
                  │ 1. investigates, writes  .aaagent/tasks/001-x/plan.md
-                 │ 2. aaagent dispatch 001  ──►  DeepSeek worker implements  → report-1.md
+                 │ 2. aaagent dispatch 001  ──►  worker1 implements  → report-1.md
                  │ 3. reviews diff + tests, writes review-1.md (approved / changes_requested)
                  │ 4. aaagent dispatch 001  ──►  worker fixes → report-2.md … (repeat 3–4)
                  │ 5. aaagent dispatch 001  ──►  worker commits (only after "approved")
@@ -13,12 +13,45 @@ you ──chat──► Opus (Claude Code, Pro subscription)
               tells you what changed and the commit hash
 ```
 
-Workers (OpenCode Go subscription):
+Workers (OpenCode Go subscription) are generic slots: `worker1`, `worker2`, `worker3`, … — any number of them, each running any model. You add and remove them with `aaagent workers add|remove`. The starting set:
 
 | worker | model | role |
 |---|---|---|
-| deepseek | `opencode-go/deepseek-v4.1-flash` | default implementer |
-| glm | `opencode-go/glm-5.3-flash` | takes over when DeepSeek fails or keeps failing review; can be chosen per task |
+| worker1 | `opencode-go/deepseek-v4.1-flash` | default implementer |
+| worker2 | `opencode-go/glm-5.3-flash` | takes over when worker1 fails or keeps failing review; can be chosen per task |
+
+### Adding and removing workers
+
+`aaagent workers` lists every worker with its model and role. `aaagent workers add <model>` adds the next free slot (`worker3`, …) with that model, `aaagent workers remove <name>` removes one (not while it has a queued or running job), and `aaagent workers default <name>` / `aaagent workers fallback <name>` choose who implements by default and who takes over on failure — add `--project` to keep the change in this project's config. On a terminal, `workers add` without a model shows a pick list. The two default workers above are only a starting set: once your config defines any worker of its own, they are replaced by it, and `workers add` writes them out first so they cannot vanish by accident. Configs that still name workers `deepseek`/`glm` are renamed to `worker1`/`worker2` automatically.
+
+### Claude as a worker
+
+A worker runs on opencode when its model id has a slash (`provider/model`) and on headless Claude Code (`claude -p`) when it is a Claude model name, so `aaagent model worker2 sonnet` moves that worker to Claude. Say it explicitly with `backend = "opencode"` or `backend = "claude"` in the worker's config:
+
+```toml
+[workers.claude]
+model = "sonnet"      # thinking = "high" sets claude --effort
+```
+
+Claude workers use the same Claude subscription and usage limit as the chat. `workers.claude_bin` points them at another binary; empty means the chat's.
+
+### Who reviews
+
+By default the planner reviews every round itself: you run `aaagent dispatch` for the implement/fix round, read the report, write `review-N.md`, and dispatch again. Give the reviewer its own model and one dispatch does the whole loop by itself:
+
+```toml
+[reviewer]
+model = "sonnet"          # a Claude model name runs on headless Claude Code
+# model = "opencode-go/glm-5.3-flash"   # an opencode id (provider/model) runs on opencode
+# thinking = "high"       # claude --effort, or the opencode model variant
+# model = "planner"       # the default: the chat (the planner) reviews each round itself
+```
+
+The reviewer is a role of its own, with its own model, thinking level, queue, daemon and log (`.aaagent/workers/reviewer.log`, `aaagent logs reviewer`) — never one of the worker slots. Like a worker, it runs on headless Claude Code when its model is a Claude name and on opencode when the id has a slash.
+
+`aaagent reviewer sonnet` sets it (add `--project` to write this project's config only), `aaagent reviewer opencode-go/glm-5.3-flash --thinking high` sets model and level, `aaagent reviewer worker2` copies worker2's model and thinking into `[reviewer]` (a snapshot: changing worker2 later does not change the reviewer), `aaagent reviewer planner` gives the job back to the chat, and `aaagent reviewer` shows the current one. `aaagent model reviewer <model>` and `aaagent thinking reviewer <level>` work too. In the dashboard press `v`, in VSCode run **Change Reviewer…** in the Reviewer view (a typed model id sets it directly). An old `[flow] reviewer = "<worker>"` is still honoured until you set the reviewer again, which clears that key in the written file.
+
+With a reviewer model, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails (or writes no valid verdict) it is retried once on the reviewer itself; if that fails too, the round comes back to the chat to review itself.
 
 ## Install
 
@@ -32,7 +65,7 @@ The installer is safe to re-run. It:
 - checks python 3.11+ and git
 - installs opencode and the Claude Code CLI if they are missing, and asks you to log in if needed
 - installs tmux with apt, which asks for your sudo password
-- registers the `aaagent-worker` and `aaagent-committer` agents in `~/.config/opencode/agents/`
+- registers the `aaagent-worker`, `aaagent-committer` and `aaagent-reviewer` agents in `~/.config/opencode/agents/`
 - links `aaagent` into `~/.local/bin`
 - builds and installs the VSCode extension (skip it with `--no-vscode`)
 - runs `aaagent doctor`
@@ -47,17 +80,21 @@ After installing, run **Developer: Reload Window** once. Then:
 
 1. Open a project folder (a git repository) and click the **aaagent** icon in the activity bar.
 2. Click **New Session** (or run `aaagent: Ask Opus…` from the command palette and type the request). **New Session** closes the open chat and starts a fresh one; **Restore Previous Session…** reopens an earlier one, and **Open Chat** is in the Sessions view's `…` menu.
-   The Opus chat opens as an editor tab, and the DeepSeek and GLM workers open as split terminals in the panel.
+   The Opus chat opens as an editor tab, and each worker (and the reviewer, when a model reviews) opens as a split terminal in the panel.
 3. Talk to Opus. The sidebar follows along:
-   - **Workers**: who is running what. Inline buttons show a worker's output or stop it.
-   - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it. **New Session**, **Restore Previous Session…**, **Ask Opus…** and **Attach Image…** are in its title bar.
+   - **Planner**: the chat's Claude model and thinking level. Click the model to change it.
+   - **Reviewer**: who reviews each round — the planner (the chat) itself, or any Claude/opencode model. Click **Change Reviewer…** to switch, and while a model reviews, its thinking level, output terminal and **Stop Reviewer** are here too.
+   - **Workers**: who is running what. Add a worker with **+** (**Add Worker…**), and right-click a worker to change its model or thinking level, use it as the default, or remove it. Inline buttons show a worker's output or stop it.
+   - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it, and right-click → **Delete Session…** (or the trash button) deletes a session that is not the open chat. **New Session**, **Restore Previous Session…**, **Ask Opus…** and **Attach Image…** are in its title bar.
    - **Tasks**: all tasks, newest first, with the current stage (planning, implementing, in review, committed…). Expand a task to open its `plan.md`, `report-N.md` and `review-N.md`, or **Changes** for the diff.
    - The **status bar** shows what is happening now. A notification appears when a task is committed or needs your decision.
 
 Other handy commands:
 
-- **Select Model…** (Workers view title, or right-click a worker → **Change Model…**): change the planner's Claude model or a worker's opencode model, from a list or typed, for all projects or just this one.
-- **Select Thinking Level…** (Workers view title, or right-click a worker → **Change Thinking Level…**): set the planner's reasoning effort or a worker's model variant, for all projects or just this one.
+- **Select Model…**/**Select Thinking Level…** (Workers view `…` menu, or the command palette): change the planner's, the reviewer's or a worker's model or thinking level, from a list or typed, for all projects or just this one. Each job's own view has a direct button for it (**Change Planner Model…**, **Change Reviewer Thinking Level…**, or right-click a worker → **Change Model…**/**Change Thinking Level…**).
+- **Change Reviewer…** (Reviewer view title): choose who reviews each round: the planner (the chat) or any Claude/opencode model, from a list or typed, for all projects or just this one.
+- **Add Worker…** (Workers view title): pick or type a model for a new worker; it gets its own terminal like the others.
+- **Remove Worker…** and **Use as Default Worker** (right-click a worker): remove a worker (after a confirmation; its config and terminal go, its tasks keep their history) or make it the default implementer.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.
 - **Attach Image…** (Sessions view title): paste a screenshot (Ctrl+V / ⌘V), hold **Shift** and drop image files, or click **Choose files…**. The image is saved to `.aaagent/attachments/` and its `@`-mention is typed into the chat input, ready for you to add text and press Enter. This works over Remote-SSH too: the files are read on your machine and sent to the server. Dropping an image on the chat terminal (hold Shift) also works over Remote-SSH: the path from your computer is detected and aaagent copies the file to the server. Images up to 5 MB (PNG, JPEG, GIF, WebP).
 - **Attach to aaagent Chat** (Explorer or editor tab right-click on an image): types that image's `@`-mention into the chat input.
@@ -78,21 +115,25 @@ With tmux installed, `aaagent` opens one window: the Opus chat on the left and t
 
 ```
 ┌ Opus chat ─────────────────────┬ aaagent · my-project ─────────────────┐
-│                                │ WORKERS                               │
+│                                │ PLANNER                               │
 │ > add a /health endpoint       │  planner                  opus · high │
-│                                │  deepseek          / fixing 003 r2    │
-│                                │  glm               waiting for a plan │
+│                                │ REVIEWER                              │
+│                                │  reviewer          planner (the chat) │
+│                                │ WORKERS                               │
+│                                │  worker1      waiting · glm-5.3-flash │
+│                                │  worker2      stopped · fallback      │
+│                                │  + add worker                         │
 │                                │ SESSIONS                              │
 │                                │  ▾ add a /health endpoint  open · 2 t…│
 │                                │     003 add health        / fixing …  │
 │                                │  · fix login              2 h ago     │
 │                                │ TASKS                                 │
-│                                │  ▾ 003 add health  / fixing · deepseek│
+│                                │  ▾ 003 add health  / fixing · worker1│
 │                                │     plan.md                           │
 │                                │     report-1.md                   done│
 │                                │     review-1.md      changes requested│
 │                                │  ▸ 002 fix login     committed a1b2c3d│
-│                                │ ── deepseek output (following) ────── │
+│                                │ ── worker1 output (following) ─────── │
 │                                │     edit  app.py                      │
 └────────────────────────────────┴───────────────────────────────────────┘
 ```
@@ -102,13 +143,18 @@ Dashboard keys:
 | key | does |
 |---|---|
 | `↑` `↓` / `j` `k` | move |
-| `enter` | task: show or hide its plan, reports and reviews · session: show its tasks · a session's task: jump to it in TASKS · file: read it · worker: show its output |
+| `enter` | task: show or hide its plan, reports and reviews · session: show its tasks · a session's task: jump to it in TASKS · file: read it · worker: show its output · reviewer: show its output (or, while the planner reviews, choose its model) · `+ add worker`: add one |
 | `d` | the selected task's diff (also from a session's task) |
-| `l` | choose whose output the bottom pane shows (default: whoever is working) |
-| `m` | change a model: the selected worker's or the planner's, or pick which one; type a name if it is not listed |
-| `t` | the same for a thinking level |
+| `l` | choose whose output the bottom pane shows (a worker's or the reviewer's; default: whoever is working) |
+| `m` | change a model: the selected row's (planner, reviewer or worker), or pick which one; type a name if it is not listed |
+| `t` | the same for a thinking level (the reviewer has one only while a model reviews) |
+| `v` | choose who reviews each round: the planner (the chat) or a model (Claude or opencode); type a name if it is not listed |
+| `B` | git branch mode: current branch, new branch, or new branch + pull request (see Branches and pull requests) |
+| `+` | add a worker, after picking its model |
+| `-` | remove the selected worker, after a y/n question |
 | `a` | abandon the selected task, after a y/n question |
 | `o` | open the selected session in the chat pane, after a y/n question (shown for a session row in aaagent's tmux layout) |
+| `x` | delete the selected session and its conversation, after a y/n question |
 | `N` | start a new session (closes this chat; shown in aaagent's tmux layout) |
 | `R` | restore an earlier session, picked from a list (shown in aaagent's tmux layout) |
 | `?` | all keys · `q` closes a view, or quits the dashboard |
@@ -121,9 +167,11 @@ The dashboard beeps and says so in its bottom line when a task is committed or n
 
 Each `aaagent` starts a new chat session, and a session can create many tasks: `aaagent status` shows each task's session, and `aaagent sessions` lists the sessions with the tasks they created. `aaagent --session <id>` reopens one (the id, or a unique prefix of it, is in that list); `aaagent -c` reopens the last one for this project, and `/resume` inside the chat lists older ones. aaagent remembers its own chats in `.aaagent/sessions.json` (and the last one in `.aaagent/chat.json`), so `-c` never picks up an unrelated Claude Code conversation from the same folder. When a new chat starts while tasks are unfinished, Opus is told about them and asks you whether to continue.
 
+`aaagent sessions delete <id>` (an id or id prefix; several ids allowed) removes a session from the list and deletes its Claude Code conversation too, so the list does not grow forever; `--keep-conversation` only forgets the session and leaves the conversation on disk. `aaagent sessions delete --gone` clears every session whose conversation is already gone. The current chat's session needs `--force` (close the chat first), and the tasks a session created stay.
+
 To start a fresh conversation in the middle of things, press `N` in the dashboard (in the tmux layout) or type `/clear` in the chat; quitting and running `aaagent` again does the same.
 
-Just talk to Opus. Questions get a direct answer; change requests go through the pipeline. You can steer at any point ("use glm for this", "stop after the plan", "split it into two tasks").
+Just talk to Opus. Questions get a direct answer; change requests go through the pipeline. You can steer at any point ("use worker2 for this", "stop after the plan", "split it into two tasks").
 
 ### Commands
 
@@ -134,21 +182,66 @@ Opus runs these itself. They are also useful for you:
 | `aaagent ui` | the dashboard, in any terminal |
 | `aaagent status [--all]` | workers and tasks, with each task's next step |
 | `aaagent sessions [--all]` | this project's chat sessions, with the tasks each created |
+| `aaagent sessions delete <id>… [--gone]` | delete chat sessions (and their conversations) |
 | `aaagent diff <task> [--stat]` | everything changed since the task started |
 | `aaagent logs <worker> [-f]` | worker output |
 | `aaagent attach <file\|-> […] [--no-send]` | copy images into `.aaagent/attachments/` and add them to the chat |
 | `aaagent new "<title>"` | create a task folder with a plan template |
-| `aaagent dispatch <task> [--worker glm] [--force]` | run the next phase (implement / fix / commit) and wait |
+| `aaagent workers` | list the workers (name, model, role); `--json` for machines |
+| `aaagent workers add [<model>]` | add the next free worker slot (pick from a list on a terminal) |
+| `aaagent workers remove <name>` | remove a worker (not while it has queued or running jobs) |
+| `aaagent workers default\|fallback <name>` | choose the default implementer and the fallback |
+| `aaagent dispatch <task> [--worker worker2] [--force]` | run the next phase (implement / fix / commit) and wait |
 | `aaagent wait <task>` | reattach to a running job |
 | `aaagent abandon <task>` | drop a task (its uncommitted changes stay) |
 | `aaagent stop` | stop this project's workers |
-| `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner and worker models |
-| `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner and worker thinking levels |
+| `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner, reviewer and worker models |
+| `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner, reviewer and worker thinking levels |
+| `aaagent reviewer [<model\|planner\|worker>] [--thinking LEVEL]` | show or set who reviews each round: a model with its own job, or planner (the chat); a worker name copies its model |
+| `aaagent branch-mode [current\|branch\|pr] [--json]` | show or set where tasks commit: the current branch, a branch per batch, or that plus a pull request |
+| `aaagent pr` | push the last finished branch and open (or retry) its pull request |
 | `aaagent --model <name>` | start the chat with another planner model for this chat only |
 | `aaagent --session <id>` | reopen a chat session (an id or id prefix from `aaagent sessions`) |
 | `aaagent doctor` | check the installation |
 
 Task numbers can be short: `aaagent diff 3` means `003-…`.
+
+### Parallel tasks
+
+Several tasks can run at the same time in one working tree when their plans declare disjoint files. A plan's frontmatter lists everything the task may change:
+
+```markdown
+---
+task: 020-move-the-health-check
+worker:            # optional
+files: lib/aaagent/health.py, tests/test_health.py, docs/
+---
+```
+
+- Entries are repo-relative. `dir/` means everything below that directory; `*`, `?` and `[` make a glob (`lib/aaagent/*.py`). Absolute paths, `..` and `.aaagent/` are refused.
+- `aaagent dispatch` lets a task start only when no other active task's `files:` overlap its own. Overlapping tasks, or a task without `files:` while another is active, are refused with a message that names the other task. A task without `files:` keeps the old behaviour: it needs the working tree to itself.
+- Disjoint tasks go to different workers when one is free: if the default worker is busy with another task, dispatch picks the first idle worker. Fix rounds stay on the task's own worker.
+- `aaagent diff`, the review prompt and the commit job only look at the task's declared files, and a round that changes files outside them is reported as a warning (the reviewer decides what to do).
+- Commits never run at the same time: a task waits while another task is committing, so the shared git index is never touched by two workers at once.
+- Your own uncommitted changes are still kept out of the commits; they are refreshed when the task is first dispatched.
+
+### Branches and pull requests
+
+By default tasks commit on the branch that is checked out. `[git] branch_mode` changes that:
+
+| mode | where the work lands |
+|---|---|
+| `current` | the branch that is checked out (the default) |
+| `branch` | a new branch per batch of tasks (`feat/…`, `fix/…`); the checkout stays on it afterwards |
+| `pr` | like `branch`, and when the last task of the batch is committed aaagent pushes the branch to `origin` and opens a pull request with `gh` |
+
+A **batch** is one branch's worth of work: it starts at the first `aaagent dispatch` while no task is active, every task that becomes active while it is open joins it, and it closes when the last of them is committed or abandoned. Tasks that run in parallel (disjoint `files:`) therefore share one branch.
+
+The branch name comes from the plan's `branch:` frontmatter when it has one, otherwise from the task's title: a leading `fix`, `bug`, `bugfix`, `hotfix`, `docs`, `doc`, `refactor`, `test`, `tests`, `chore`, `feat` or `feature` word becomes the prefix (`021-fix-login-crash` → `fix/login-crash`), anything else is `feat/` (`022-branch-mode-tui` → `feat/branch-mode-tui`). A name that is already taken gets `-2`, `-3`, … appended.
+
+`aaagent branch-mode` shows the mode with the current branch and the open batch, `aaagent branch-mode branch` (or `current`, `pr`) sets it in this project's config, and `aaagent branch-mode --json` prints it for machines. Switching the mode while a batch is open takes effect for that batch's end (`pr` or not) and for the next batch.
+
+In `pr` mode, `gh` (the GitHub CLI) must be installed and logged in, and `origin` must be a GitHub repository. The push and the pull request happen after the commit, and a failure never fails the commit: it is recorded in `.aaagent/batches/` and printed, and `aaagent pr` retries it (also for a `branch`-mode batch that was never pushed).
 
 ### Images
 
@@ -161,10 +254,10 @@ Code enforces these; they are not just prompt instructions:
 - **Opus cannot edit project files.** A hook blocks its edit tools outside `.aaagent/`, and `git commit`/`git push` are denied for it.
 - **Implementing workers cannot commit.** `aaagent-worker` denies `git commit/push/reset/rebase/clean/stash/checkout/switch`, `sudo`, destructive `docker` commands, files outside the project, `.env` files, and edits to plans and reviews.
 - **The commit step happens only after approval.** `aaagent dispatch` sends a commit job only when the latest review says `verdict: approved`. The `aaagent-committer` agent cannot edit files and can only run git status/diff/log/add/commit; `--amend` and `add -A`/`add .` are denied.
-- **Nothing is pushed.** Pushing is up to you.
-- **One active task per working tree**, because workers share the files.
+- **Nothing is pushed unless `branch_mode = "pr"`.** In pr mode aaagent pushes only the batch's branch to `origin` and opens its pull request; everything else is up to you.
+- **Parallel tasks only with disjoint `files:`.** Several tasks may be active in one working tree, but only when every plan declares the files it may change and those lists do not overlap; anything else keeps the working tree to one task.
 - **Your own uncommitted changes stay out of the commit.** Files that were already modified when a task started are listed and excluded from its commit.
-- **Escalation:** a failed job is retried once on the other worker. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
+- **Escalation:** a failed implement/fix job is retried once on the fallback worker; a failed review is retried once on the reviewer itself, then the round goes back to the planner. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
 
 These are permission rules, not a sandbox. Workers run as your user, so treat this like giving a junior developer a shell on the machine.
 
@@ -178,25 +271,30 @@ model = "opus"                    # any Claude Code model alias or id
 thinking = "high"                 # claude --effort: low, medium, high, xhigh or max; empty = the default
 extra_args = []                   # any other claude arguments (an --effort here wins over `thinking`)
 
-[workers.deepseek]
+[workers.worker1]
 model = "opencode-go/deepseek-v4-pro"   # swap a model
 thinking = "high"                 # opencode model variant, e.g. low | high | max; empty = the model's default
 
-[workers.kimi]                    # add a worker
+[workers.worker3]                 # add a worker
 model = "opencode-go/kimi-k3"
 
+[reviewer]
+model = "planner"                 # or a Claude model name / opencode id for a reviewer job
+thinking = ""                     # claude --effort or the opencode variant; empty = default
+
 [flow]
-default_worker = "deepseek"
-fallback_worker = "glm"
+default_worker = "worker1"
+fallback_worker = "worker2"
 max_review_rounds = 3
 fallback_after_failed_reviews = 2
 job_timeout_minutes = 30
 
 [git]
 commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@example.invalid>"
+branch_mode = "current"           # current = the checked-out branch; branch = a branch per batch; pr = that + push and pull request
 ```
 
-`opencode models` lists the model ids you can use. A new worker gets its own pane the next time you run `aaagent`.
+`opencode models` lists the model ids you can use. `aaagent workers add|remove` edits the worker list for you; a new worker gets its own pane the next time you run `aaagent`.
 
 ## Files in a project
 
@@ -209,6 +307,9 @@ commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@examp
   workers/          worker pids and logs
   attachments/      images from `aaagent attach`
   fetch/            image copy requests between the chat and VSCode
+  active-tasks.json which tasks are running in this working tree now
+  batch.json        the open branch and the tasks that share it
+  batches/          every closed batch, with its commits and pull request
   chat.json         the last chat's session id, for `aaagent -c`
   sessions.json     the chat sessions and the tasks each one created
   chat-pane         the tmux pane of the chat, for `aaagent attach`
@@ -230,6 +331,7 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | `lib/aaagent/tui.py` | the terminal dashboard (`aaagent ui`) |
 | `lib/aaagent/status.py` | status data and the dashboard's view logic |
 | `lib/aaagent/worker.py` | worker daemon and file queue |
+| `lib/aaagent/backends.py` | worker backends: opencode and headless Claude Code |
 | `lib/aaagent/dispatch.py` | queues phases, waits, falls back, checks results |
 | `lib/aaagent/tasks.py` | task files and the rules for the next phase |
 | `vscode/extension.js` | VSCode extension: commands, refresh, notifications |
@@ -237,5 +339,6 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | `prompts/` | Opus system-prompt addition and worker prompts |
 | `opencode/agents/` | worker agent definitions and permissions |
 | `claude/hooks/guard_edit.py` | blocks Opus edits outside `.aaagent/` |
+| `claude/hooks/guard_worker.py` | keeps Claude workers away from secrets and the planner's files |
 | `claude/hooks/record_session.py` | records the chat's session id for `aaagent -c` |
 | `claude/hooks/local_images.py` | copies images from the user's computer that a prompt mentions (VSCode) |

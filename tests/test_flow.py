@@ -58,10 +58,10 @@ class FlowTest(unittest.TestCase):
 
     def stop_workers(self):
         import time
-        for name in ("deepseek", "glm"):
+        for name in ("worker1", "worker2"):
             worker.stop(self.project, name)
         for _ in range(50):
-            if not any(worker.worker_pid(self.project, n) for n in ("deepseek", "glm")):
+            if not any(worker.worker_pid(self.project, n) for n in ("worker1", "worker2")):
                 break
             time.sleep(0.1)
 
@@ -130,14 +130,14 @@ class FlowTest(unittest.TestCase):
         with self.assertRaisesRegex(FlowError, "verdict"):
             self.run_dispatch(task)
 
-    def test_failed_job_falls_back_to_glm(self):
+    def test_failed_job_falls_back_to_worker2(self):
         os.environ["FAKE_OC_FAIL"] = DS
         task = self.new_task()
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
-        self.assertIn("retrying with glm", out)
+        self.assertIn("retrying with worker2", out)
         self.assertIn(GLM, task.report(1).read_text())
-        self.assertEqual(task.load()["worker"], "glm")
+        self.assertEqual(task.load()["worker"], "worker2")
 
     def test_missing_report_counts_as_failure(self):
         os.environ["FAKE_OC_NOREPORT"] = DS
@@ -145,7 +145,7 @@ class FlowTest(unittest.TestCase):
         code, out = self.run_dispatch(task)
         self.assertEqual(code, 0, out)
         self.assertIn("without writing", out)
-        self.assertEqual(task.load()["worker"], "glm")
+        self.assertEqual(task.load()["worker"], "worker2")
 
     def test_both_workers_fail_stops_task(self):
         os.environ["FAKE_OC_FAIL"] = f"{DS},{GLM}"
@@ -162,13 +162,13 @@ class FlowTest(unittest.TestCase):
         task = self.new_task()
         self.run_dispatch(task)
         task.review(1).write_text(review("changes_requested", 1))
-        self.run_dispatch(task)                       # round 2, still deepseek, same session
+        self.run_dispatch(task)                       # round 2, still worker1, same session
         self.assertIn(DS, task.report(2).read_text())
         ds_calls = [c for c in self.calls() if DS in c]
         self.assertIn("--session", ds_calls[1], "fix round should continue the worker's session")
 
         task.review(2).write_text(review("changes_requested", 2))
-        code, out = self.run_dispatch(task)          # round 3 goes to glm
+        code, out = self.run_dispatch(task)          # round 3 goes to worker2
         self.assertIn("switching worker", out)
         self.assertIn(GLM, task.report(3).read_text())
         self.assertNotIn("--session", [c for c in self.calls() if GLM in c][0])
@@ -182,7 +182,7 @@ class FlowTest(unittest.TestCase):
 
     def test_worker_override_and_plan_frontmatter(self):
         task = self.new_task()
-        task.plan.write_text(PLAN.replace("worker:", "worker: glm"))
+        task.plan.write_text(PLAN.replace("worker:", "worker: worker2"))
         self.run_dispatch(task)
         self.assertIn(GLM, task.report(1).read_text())
 
@@ -228,7 +228,7 @@ class FlowTest(unittest.TestCase):
         code, out = self.cli("status", "--json")
         data = json.loads(out)
         self.assertEqual(code, 0)
-        self.assertEqual([w["name"] for w in data["workers"]], ["deepseek", "glm"])
+        self.assertEqual([w["name"] for w in data["workers"]], ["worker1", "worker2"])
         self.assertEqual(data["tasks"], [])
 
         task = tasks.create(self.project, "unwritten plan")
@@ -239,7 +239,7 @@ class FlowTest(unittest.TestCase):
 
         task.plan.write_text(PLAN)
         t = json.loads(self.cli("status", "--json")[1])["tasks"][0]
-        self.assertEqual(t["next"], {"phase": "implement", "round": 1, "worker": "deepseek"})
+        self.assertEqual(t["next"], {"phase": "implement", "round": 1, "worker": "worker1"})
         self.assertEqual((t["number"], t["title"]), (1, "unwritten plan"))
 
         self.run_dispatch(task)
@@ -249,7 +249,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(data["active_task"], task.id)
         self.assertEqual([f["name"] for f in t["files"]], ["plan.md", "report-1.md"])
         self.assertEqual(t["files"][1]["status"], "done")
-        self.assertEqual(next(w for w in data["workers"] if w["name"] == "deepseek")["state"], "idle")
+        self.assertEqual(next(w for w in data["workers"] if w["name"] == "worker1")["state"], "idle")
 
         task.review(1).write_text(review("changes_requested", 1))
         t = json.loads(self.cli("status", "--json")[1])["tasks"][0]
@@ -266,11 +266,11 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(t["attention"], "failed")
 
     def test_stop_named_worker(self):
-        worker.start_background(self.project, "deepseek")
-        worker.start_background(self.project, "glm")
-        code, out = self.cli("stop", "glm")
-        self.assertEqual(out.strip(), "stopped glm")
-        self.assertIsNotNone(worker.worker_pid(self.project, "deepseek"))
+        worker.start_background(self.project, "worker1")
+        worker.start_background(self.project, "worker2")
+        code, out = self.cli("stop", "worker2")
+        self.assertEqual(out.strip(), "stopped worker2")
+        self.assertIsNotNone(worker.worker_pid(self.project, "worker1"))
         import contextlib
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(self.cli("stop", "nope")[0], 2)

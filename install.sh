@@ -142,16 +142,17 @@ if [ ! -f "$AAAGENT_CONFIG_DIR/config.toml" ]; then
 # [orchestrator]
 # model = "opus"
 #
-# [workers.deepseek]
+# [workers.worker1]
 # model = "opencode-go/deepseek-v4.1-flash"
 #
-# [workers.glm]
+# [workers.worker2]
 # model = "opencode-go/glm-5.3-flash"
 #
 # [flow]
-# default_worker = "deepseek"
-# fallback_worker = "glm"
+# default_worker = "worker1"
+# fallback_worker = "worker2"
 # max_review_rounds = 3
+# Workers are generic slots; add and remove them with `aaagent workers add|remove`.
 EOF
   ok "created $AAAGENT_CONFIG_DIR/config.toml"
 else

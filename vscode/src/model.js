@@ -4,7 +4,7 @@
 
 const FINAL = new Set(["committed", "abandoned"]);
 
-const PHASE_VERB = { implement: "implementing", fix: "fixing", commit: "committing" };
+const PHASE_VERB = { implement: "implementing", fix: "fixing", review: "reviewing", commit: "committing" };
 
 function isFinal(task) {
   return FINAL.has(task.status);
@@ -167,11 +167,123 @@ function fileItem(task, file) {
     contextValue: `file.${file.kind}` };
 }
 
+/** The Planner view's node: the chat's Claude model and thinking level. */
+function plannerItem(planner) {
+  const p = planner || {};
+  const name = p.model || "planner";
+  return {
+    id: "planner",
+    label: name,
+    description: p.thinking || "default thinking",
+    tooltip: `Planner (the chat): ${name}\nthinking: ${p.thinking || "default"}\nClaude models only`,
+    icon: { id: "sparkle" },
+    contextValue: "planner",
+  };
+}
+
+const BRANCH_MODES = [
+  { mode: "current", label: "Current branch", detail: "Commit on the checked-out branch" },
+  { mode: "branch", label: "New branch", detail: "One feat/… or fix/… branch per batch of tasks" },
+  { mode: "pr", label: "New branch + pull request", detail: "Also push it and open a PR (gh) when the batch is done" },
+];
+
+/** The Planner view's second node: where tasks commit (`[git] branch_mode`). */
+function gitItem(git) {
+  const g = git || {};
+  const entry = BRANCH_MODES.find((m) => m.mode === g.mode) || BRANCH_MODES[0];
+  const batch = g.batch || null;
+  const last = g.last_pr || null;
+  const branch = g.branch || "";
+  let description = branch ? `on ${branch}` : "detached HEAD";
+  if (batch) description += ` (from ${batch.base})`;
+  const lines = [entry.detail, `branch: ${branch || "detached HEAD"}`];
+  if (batch) {
+    lines.push(`batch: ${batch.branch} from ${batch.base}`);
+    const tasks = batch.tasks || [];
+    if (tasks.length) lines.push(`tasks: ${tasks.join(", ")}`);
+  }
+  if (last && last.url) lines.push(`pull request: ${last.url}`);
+  if (last && last.error) lines.push(`PR failed: ${last.error} — run aaagent pr`);
+  lines.push("Click to change");
+  const failed = !!(last && last.error);
+  return {
+    id: "git",
+    label: `Git: ${entry.label}`,
+    description,
+    tooltip: lines.join("\n"),
+    icon: failed && !batch
+      ? { id: "warning", color: "problemsWarningIcon.foreground" }
+      : entry.mode === "pr" ? { id: "git-pull-request" } : { id: "git-branch" },
+    contextValue: "git",
+  };
+}
+
+/** Quick-pick entries for Select Git Branch Mode…: current, branch, pr, the active one marked. */
+function branchModeChoices(currentMode) {
+  return BRANCH_MODES.map((m) => (m.mode === currentMode
+    ? { label: m.label, description: "current", detail: m.detail, mode: m.mode }
+    : { label: m.label, detail: m.detail, mode: m.mode }));
+}
+
+/** Whether the chat (the planner) reviews each round itself. */
+function plannerReviews(data) {
+  if (!data) return true;
+  if (data.reviewer === "orchestrator") return true;
+  const review = data.review;
+  if (!review) return true;
+  return !!review.planner_reviews;
+}
+
+/** The Reviewer view's node: "the chat", or the reviewer job and what it is doing. */
+function reviewerItem(data) {
+  if (plannerReviews(data)) {
+    return {
+      id: "reviewer",
+      label: "Planner (the chat)",
+      description: "reviews each round in the chat",
+      tooltip: "The planner reviews each round itself.\nChange Reviewer… picks a Claude or opencode model instead.",
+      icon: { id: "comment-discussion" },
+      contextValue: "reviewer.planner",
+    };
+  }
+  const review = data.review || {};
+  let description;
+  let icon;
+  if (review.state === "running" && review.job) {
+    description = `${PHASE_VERB[review.job.phase] || review.job.phase} ${review.job.task.split("-")[0]} r${review.job.round}`;
+    icon = { id: "sync~spin" };
+  } else if (review.state === "idle") {
+    description = "waiting for a round";
+    icon = { id: "circle-filled", color: "testing.iconPassed" };
+  } else {
+    description = "stopped";
+    icon = { id: "circle-outline" };
+  }
+  if (review.thinking) description += ` · ${review.thinking}`;
+  if (review.queued) description += ` · ${review.queued} queued`;
+  const thinking = review.thinking ? `thinking: ${review.thinking}\n` : "thinking: default\n";
+  const backend = review.backend ? `backend: ${review.backend}\n` : "";
+  return {
+    id: "reviewer",
+    label: shortModel(review.model),
+    description,
+    tooltip: `reviewer: ${review.model}\n${backend}${thinking}${review.pid ? `pid ${review.pid}` : "not running"}`,
+    icon,
+    contextValue: `reviewer.model.${review.state || "stopped"}`,
+  };
+}
+
 /** `aaagent model --json` → the quick-pick list of things whose model can be changed. */
 function modelTargets(info) {
   const planner = (info && info.planner) || {};
+  const reviewer = (info && info.reviewer) || {};
   const workers = (info && info.workers) || {};
   const out = [{ label: "Planner (Claude)", description: planner.model, target: "planner" }];
+  out.push({
+    label: "Reviewer",
+    description: reviewer.model && reviewer.model !== "planner" ? reviewer.model : "planner (the chat)",
+    target: "reviewer",
+  });
   for (const [name, w] of Object.entries(workers)) {
     out.push({ label: `Worker: ${name}`, description: w.model, target: name });
   }
@@ -188,9 +300,20 @@ function shortModel(id) {
 /** Quick-pick entries for a target's models: a "type a name" entry, then current first. */
 function modelChoices(info, target) {
   const planner = (info && info.planner) || {};
+  const reviewer = (info && info.reviewer) || {};
   const workers = (info && info.workers) || {};
-  const current = target === "planner" ? planner.model : (workers[target] || {}).model;
-  const list = target === "planner" ? (planner.choices || []) : ((info && info.worker_choices) || []);
+  let current;
+  let list;
+  if (target === "planner") {
+    current = planner.model;
+    list = planner.choices || [];
+  } else if (target === "reviewer") {
+    current = reviewer.model;
+    list = reviewer.choices || [];
+  } else {
+    current = (workers[target] || {}).model;
+    list = (info && info.worker_choices) || [];
+  }
   const names = [];
   for (const name of list) if (name && !names.includes(name)) names.push(name);
   if (current) {
@@ -207,9 +330,14 @@ function modelChoices(info, target) {
 /** `aaagent thinking --json` → the quick-pick list of things whose thinking level can be changed. */
 function thinkingTargets(info) {
   const planner = (info && info.planner) || {};
+  const reviewer = (info && info.reviewer) || {};
   const workers = (info && info.workers) || {};
   const out = [{ label: "Planner (Claude)", description: `${planner.thinking || "default"} · ${planner.model}`,
     target: "planner" }];
+  if (reviewer.model && reviewer.model !== "planner") {
+    out.push({ label: "Reviewer", description: `${reviewer.thinking || "default"} · ${reviewer.model}`,
+      target: "reviewer" });
+  }
   for (const [name, w] of Object.entries(workers)) {
     out.push({ label: `Worker: ${name}`, description: `${w.thinking || "default"} · ${w.model}`, target: name });
   }
@@ -219,8 +347,12 @@ function thinkingTargets(info) {
 /** Quick-pick entries for a target's thinking levels: Default, then the choices. */
 function thinkingChoices(info, target) {
   const planner = (info && info.planner) || {};
+  const reviewer = (info && info.reviewer) || {};
   const workers = (info && info.workers) || {};
-  const entry = target === "planner" ? planner : (workers[target] || {});
+  let entry;
+  if (target === "planner") entry = planner;
+  else if (target === "reviewer") entry = reviewer;
+  else entry = workers[target] || {};
   const current = entry.thinking || "";
   const entries = (entry.choices || [])
     .filter((level) => level)
@@ -228,6 +360,50 @@ function thinkingChoices(info, target) {
       ? { label: level, description: "current", level }
       : { label: level, level }));
   return [{ label: "Default", description: "the model's own setting", level: "default" }, ...entries];
+}
+
+/** Quick-pick entries for Change Reviewer…: the planner, typing, then the models. */
+function reviewerChoices(info) {
+  const reviewer = (info && info.reviewer) || {};
+  const current = reviewer.model || "planner";
+  const out = [{
+    label: "Planner (the chat)",
+    description: current === "planner" ? "current" : "the chat reviews each round",
+    reviewer: "planner",
+  }, { label: "$(edit) Type a model name…", typed: true }];
+  const names = [];
+  for (const name of reviewer.choices || []) {
+    if (!name || name === "planner" || names.includes(name)) continue;
+    names.push(name);
+  }
+  if (current !== "planner") {
+    const i = names.indexOf(current);
+    if (i >= 0) names.splice(i, 1);
+    names.unshift(current);
+  }
+  for (const name of names) {
+    out.push(name === current
+      ? { label: name, reviewer: name, description: "current" }
+      : { label: name, reviewer: name });
+  }
+  return out;
+}
+
+/** Quick-pick entries for Add Worker…: typing first, then the models a new worker could run. */
+function addWorkerChoices(info) {
+  return [
+    { label: "$(edit) Type a model name…", typed: true },
+    ...((info && info.worker_choices) || []).map((m) => ({ label: m, model: m })),
+  ];
+}
+
+/** The Workers view description: which worker is the default and which the fallback. */
+function workersDescription(data) {
+  const workers = (data && data.workers) || [];
+  if (!workers.length) return undefined;
+  const def = workers.find((w) => w.default) || workers[0];
+  const fallback = workers.find((w) => w.fallback);
+  return fallback ? `default: ${def.name} · fallback: ${fallback.name}` : `default: ${def.name}`;
 }
 
 function workerItem(w) {
@@ -248,6 +424,8 @@ function workerItem(w) {
     if (w.thinking) description += ` · ${w.thinking}`;
   }
   if (w.queued) description += ` · ${w.queued} queued`;
+  if (w.default) description += " · default";
+  else if (w.fallback) description += " · fallback";
   const thinking = w.thinking ? `thinking: ${w.thinking}\n` : "";
   return {
     id: `worker:${w.name}`,
@@ -255,7 +433,7 @@ function workerItem(w) {
     description,
     tooltip: `${w.name}: ${w.model}\n${thinking}${w.pid ? `pid ${w.pid}` : "not running"}`,
     icon,
-    contextValue: `worker.${w.state}`,
+    contextValue: `worker.${w.state}${w.default ? ".default" : ""}`,
   };
 }
 
@@ -265,7 +443,10 @@ function statusBar(data) {
   const tasks = data.tasks || [];
   const running = tasks.find((t) => t.status === "running" || t.status === "retrying");
   const needs = tasks.find((t) => t.attention && !isFinal(t));
-  const active = tasks.find((t) => t.id === data.active_task);
+  const activeIds = (Array.isArray(data.active_tasks) && data.active_tasks.length)
+    ? data.active_tasks
+    : (data.active_task ? [data.active_task] : []);
+  const active = tasks.find((t) => activeIds.includes(t.id));
   let text = "$(hubot) aaagent";
   if (running) {
     text = `$(sync~spin) aaagent: ${String(running.number).padStart(3, "0")} ${taskSummary(running)}`;
@@ -276,7 +457,10 @@ function statusBar(data) {
   }
   const up = (data.workers || []).filter((w) => w.state !== "stopped").map((w) => w.name);
   const planner = data.planner && data.planner.model ? `planner: ${data.planner.model}\n` : "";
-  const tooltip = `${planner}aaagent: ${up.length ? `workers up: ${up.join(", ")}` : "workers stopped"}\nClick to open the aaagent view`;
+  const reviewer = plannerReviews(data)
+    ? "reviewer: planner (the chat)\n"
+    : `reviewer: ${(data.review || {}).model || "?"}\n`;
+  const tooltip = `${planner}${reviewer}aaagent: ${up.length ? `workers up: ${up.join(", ")}` : "workers stopped"}\nClick to open the aaagent view`;
   return { text, tooltip };
 }
 
@@ -284,6 +468,7 @@ function statusBar(data) {
 function transitions(prev, next) {
   if (!prev || !next) return [];
   const before = new Map((prev.tasks || []).map((t) => [t.id, t]));
+  const reviewer = next.reviewer || "orchestrator";
   const out = [];
   for (const t of next.tasks || []) {
     const old = before.get(t.id);
@@ -293,9 +478,11 @@ function transitions(prev, next) {
       out.push({ level: "info", task: t.id, message: `aaagent: ${label} committed${t.commit ? ` (${t.commit.slice(0, 7)})` : ""}.` });
     } else if (t.attention && t.attention !== old.attention) {
       const why = t.attention === "failed" ? "stopped after both workers failed" : "reached the review round limit";
-      out.push({ level: "warning", task: t.id, message: `aaagent: ${label} ${why}. Opus is waiting for your decision in the chat.` });
-    } else if (t.status === "awaiting_review" && old.status !== "awaiting_review") {
-      out.push({ level: "status", task: t.id, message: `aaagent: ${label}: worker finished round ${t.round}; Opus is reviewing.` });
+      out.push({ level: "warning", task: t.id, message: `aaagent: ${label} ${why}. The planner is waiting for your decision in the chat.` });
+    } else if (t.status === "approved" && old.status !== "approved") {
+      out.push({ level: "status", task: t.id, message: `aaagent: ${label}: approved by the reviewer in round ${t.round}; the planner commits next.` });
+    } else if (t.status === "awaiting_review" && old.status !== "awaiting_review" && reviewer === "orchestrator") {
+      out.push({ level: "status", task: t.id, message: `aaagent: ${label}: worker finished round ${t.round}; the planner is reviewing.` });
     }
   }
   return out;
@@ -378,6 +565,8 @@ function isImagePath(p) {
 module.exports = {
   visibleTasks, taskSummary, taskIcon, taskItem, fileItem, workerItem, statusBar, transitions,
   isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
-  thinkingTargets, thinkingChoices, ago, sessionItem, sessionChoices,
+  thinkingTargets, thinkingChoices, reviewerChoices, workersDescription, ago, sessionItem,
+  sessionChoices, plannerItem, reviewerItem, plannerReviews, addWorkerChoices,
+  BRANCH_MODES, gitItem, branchModeChoices,
   IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
 };

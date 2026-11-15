@@ -5,6 +5,8 @@ PLAN FILE: {plan}
 REVIEW TO ADDRESS: {review}
 EARLIER ROUNDS (reports and reviews, oldest first): {history}
 
+{scope_note}
+
 Steps:
 1. Read the review completely. If you do not already know this task, read the plan and the earlier reports and reviews first. The code changes from earlier rounds are already in the working tree (`git status`, `git diff`).
 2. Address every numbered item under "Required changes". Optional suggestions are yours to judge; say in the report which ones you applied.
