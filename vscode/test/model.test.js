@@ -144,6 +144,78 @@ test("plannerItem shows the chat's model and thinking level", () => {
   assert.strictEqual(model.plannerItem(undefined).label, "planner");
 });
 
+test("gitItem shows the branch mode and the checked-out branch", () => {
+  const current = model.gitItem({ mode: "current", branch: "main", batch: null, last_pr: null });
+  assert.strictEqual(current.id, "git");
+  assert.strictEqual(current.label, "Git: Current branch");
+  assert.strictEqual(current.description, "on main");
+  assert.strictEqual(current.contextValue, "git");
+  assert.deepStrictEqual(current.icon, { id: "git-branch" });
+  assert.match(current.tooltip, /Commit on the checked-out branch/);
+  assert.match(current.tooltip, /Click to change$/);
+
+  const branch = model.gitItem({ mode: "branch", branch: "feat/branch-mode", batch: null, last_pr: null });
+  assert.strictEqual(branch.label, "Git: New branch");
+  assert.match(branch.tooltip, /One feat\/… or fix\/… branch per batch of tasks/);
+
+  const pr = model.gitItem({ mode: "pr", branch: "fix/login-crash", batch: null, last_pr: null });
+  assert.strictEqual(pr.label, "Git: New branch + pull request");
+  assert.deepStrictEqual(pr.icon, { id: "git-pull-request" });
+  assert.match(pr.tooltip, /open a PR \(gh\)/);
+});
+
+test("gitItem describes the open batch, its base and its tasks", () => {
+  const item = model.gitItem({
+    mode: "branch", branch: "fix/login-crash",
+    batch: { branch: "fix/login-crash", base: "main", tasks: ["022-branch-mode", "023-pr"] },
+    last_pr: null,
+  });
+  assert.strictEqual(item.description, "on fix/login-crash (from main)");
+  assert.match(item.tooltip, /batch: fix\/login-crash from main/);
+  assert.match(item.tooltip, /tasks: 022-branch-mode, 023-pr/);
+  assert.deepStrictEqual(item.icon, { id: "git-branch" });
+});
+
+test("gitItem marks a failed PR unless a batch is open", () => {
+  const failed = model.gitItem({
+    mode: "pr", branch: "main", batch: null,
+    last_pr: { branch: "fix/login-crash", url: null, error: "gh is not installed" },
+  });
+  assert.deepStrictEqual(failed.icon, { id: "warning", color: "problemsWarningIcon.foreground" });
+  assert.match(failed.tooltip, /PR failed: gh is not installed — run aaagent pr/);
+  const withBatch = model.gitItem({
+    mode: "pr", branch: "feat/next", batch: { branch: "feat/next", base: "main", tasks: [] },
+    last_pr: { branch: "feat/old", url: null, error: "gh is not installed" },
+  });
+  assert.deepStrictEqual(withBatch.icon, { id: "git-pull-request" });
+  const opened = model.gitItem({
+    mode: "pr", branch: "main", batch: null,
+    last_pr: { branch: "feat/old", url: "https://example.invalid/pr/1", error: null },
+  });
+  assert.match(opened.tooltip, /pull request: https:\/\/example\.invalid\/pr\/1/);
+});
+
+test("gitItem handles a missing mode, a detached HEAD and no input", () => {
+  const unknown = model.gitItem({ mode: "nonsense", branch: null });
+  assert.strictEqual(unknown.label, "Git: Current branch");
+  assert.strictEqual(unknown.description, "detached HEAD");
+  assert.doesNotThrow(() => model.gitItem(undefined));
+  assert.strictEqual(model.gitItem(undefined).label, "Git: Current branch");
+  assert.strictEqual(model.gitItem(null).description, "detached HEAD");
+});
+
+test("branchModeChoices lists current, branch, pr and marks the active one", () => {
+  const choices = model.branchModeChoices("pr");
+  assert.deepStrictEqual(choices.map((c) => c.mode), ["current", "branch", "pr"]);
+  assert.deepStrictEqual(choices.map((c) => c.label),
+    ["Current branch", "New branch", "New branch + pull request"]);
+  assert.deepStrictEqual(choices.map((c) => c.description), [undefined, undefined, "current"]);
+  assert.match(choices[0].detail, /checked-out branch/);
+  assert.deepStrictEqual(model.branchModeChoices("current").map((c) => c.description),
+    ["current", undefined, undefined]);
+  assert.deepStrictEqual(model.branchModeChoices(undefined).map((c) => c.mode), ["current", "branch", "pr"]);
+});
+
 test("reviewerItem shows the planner when the chat reviews", () => {
   const planner = model.reviewerItem({ reviewer: "orchestrator", review: { planner_reviews: true } });
   assert.strictEqual(planner.label, "Planner (the chat)");

@@ -181,6 +181,50 @@ function plannerItem(planner) {
   };
 }
 
+const BRANCH_MODES = [
+  { mode: "current", label: "Current branch", detail: "Commit on the checked-out branch" },
+  { mode: "branch", label: "New branch", detail: "One feat/… or fix/… branch per batch of tasks" },
+  { mode: "pr", label: "New branch + pull request", detail: "Also push it and open a PR (gh) when the batch is done" },
+];
+
+/** The Planner view's second node: where tasks commit (`[git] branch_mode`). */
+function gitItem(git) {
+  const g = git || {};
+  const entry = BRANCH_MODES.find((m) => m.mode === g.mode) || BRANCH_MODES[0];
+  const batch = g.batch || null;
+  const last = g.last_pr || null;
+  const branch = g.branch || "";
+  let description = branch ? `on ${branch}` : "detached HEAD";
+  if (batch) description += ` (from ${batch.base})`;
+  const lines = [entry.detail, `branch: ${branch || "detached HEAD"}`];
+  if (batch) {
+    lines.push(`batch: ${batch.branch} from ${batch.base}`);
+    const tasks = batch.tasks || [];
+    if (tasks.length) lines.push(`tasks: ${tasks.join(", ")}`);
+  }
+  if (last && last.url) lines.push(`pull request: ${last.url}`);
+  if (last && last.error) lines.push(`PR failed: ${last.error} — run aaagent pr`);
+  lines.push("Click to change");
+  const failed = !!(last && last.error);
+  return {
+    id: "git",
+    label: `Git: ${entry.label}`,
+    description,
+    tooltip: lines.join("\n"),
+    icon: failed && !batch
+      ? { id: "warning", color: "problemsWarningIcon.foreground" }
+      : entry.mode === "pr" ? { id: "git-pull-request" } : { id: "git-branch" },
+    contextValue: "git",
+  };
+}
+
+/** Quick-pick entries for Select Git Branch Mode…: current, branch, pr, the active one marked. */
+function branchModeChoices(currentMode) {
+  return BRANCH_MODES.map((m) => (m.mode === currentMode
+    ? { label: m.label, description: "current", detail: m.detail, mode: m.mode }
+    : { label: m.label, detail: m.detail, mode: m.mode }));
+}
+
 /** Whether the chat (the planner) reviews each round itself. */
 function plannerReviews(data) {
   if (!data) return true;
@@ -523,5 +567,6 @@ module.exports = {
   isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
   thinkingTargets, thinkingChoices, reviewerChoices, workersDescription, ago, sessionItem,
   sessionChoices, plannerItem, reviewerItem, plannerReviews, addWorkerChoices,
+  BRANCH_MODES, gitItem, branchModeChoices,
   IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
 };

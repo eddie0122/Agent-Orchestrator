@@ -18,7 +18,7 @@ function toTreeItem(spec, collapsible = vscode.TreeItemCollapsibleState.None) {
   return item;
 }
 
-/** The Planner view: one node, the chat's model and thinking level. */
+/** The Planner view: the chat's model and thinking level, and where tasks commit. */
 class PlannerProvider {
   constructor(store) {
     this.store = store;
@@ -31,14 +31,23 @@ class PlannerProvider {
   }
 
   getTreeItem(node) {
-    const item = toTreeItem(model.plannerItem(node || {}));
+    if (node && node.kind === "git") {
+      const item = toTreeItem(model.gitItem(node.data));
+      item.command = { command: "aaagent.selectBranchMode", title: "Select Git Branch Mode", arguments: [node] };
+      return item;
+    }
+    const item = toTreeItem(model.plannerItem((node && node.data) || {}));
     item.command = { command: "aaagent.changePlannerModel", title: "Change Planner Model", arguments: [node] };
     return item;
   }
 
   getChildren(node) {
     if (node) return [];
-    return this.store.data ? [this.store.data.planner || {}] : [];
+    if (!this.store.data) return [];
+    return [
+      { kind: "planner", data: this.store.data.planner || {} },
+      { kind: "git", data: this.store.data.git || {} },
+    ];
   }
 }
 

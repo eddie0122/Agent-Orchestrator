@@ -91,15 +91,23 @@ test("activate() against a real project", async (t) => {
   assert.strictEqual(rec.watchers.length, 2);
   assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
 
-  // The Planner and Reviewer views each show one node.
+  // The Planner view shows the planner and where tasks commit; the Reviewer view shows one node.
   const plannerTree = rec.treeViews["aaagent.planner"].treeDataProvider;
   const reviewerTree = rec.treeViews["aaagent.reviewer"].treeDataProvider;
-  assert.strictEqual(plannerTree.getChildren().length, 1);
+  assert.strictEqual(plannerTree.getChildren().length, 2);
   const plannerNode = plannerTree.getChildren()[0];
   const plannerItem = plannerTree.getTreeItem(plannerNode);
   assert.strictEqual(plannerItem.label, api.store.data.planner.model);
   assert.strictEqual(plannerItem.description, api.store.data.planner.thinking || "default thinking");
   assert.strictEqual(plannerItem.command.command, "aaagent.changePlannerModel");
+  const checkout = sh(project, "git", ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  const gitNode = plannerTree.getChildren()[1];
+  const gitTreeItem = plannerTree.getTreeItem(gitNode);
+  assert.strictEqual(gitTreeItem.id, "git");
+  assert.strictEqual(gitTreeItem.label, "Git: Current branch");
+  assert.strictEqual(gitTreeItem.description, `on ${checkout}`);
+  assert.strictEqual(gitTreeItem.contextValue, "git");
+  assert.strictEqual(gitTreeItem.command.command, "aaagent.selectBranchMode");
   assert.strictEqual(reviewerTree.getChildren().length, 1);
   const reviewerItem = reviewerTree.getTreeItem(reviewerTree.getChildren()[0]);
   assert.strictEqual(reviewerItem.label, "Planner (the chat)");
@@ -305,6 +313,22 @@ test("activate() against a real project", async (t) => {
   assert.match(reviewConf, /\[reviewer\][\s\S]*?thinking = "high"/);
   assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /reviewer thinking: high/.test(m)),
     JSON.stringify(rec.messages));
+
+  // Select Git Branch Mode…: the quick pick runs `aaagent branch-mode` and refreshes.
+  rec.quickPicks = [(items) => items.find((i) => i.mode === "pr")];
+  await rec.commands.get("aaagent.selectBranchMode")();
+  assert.match(fs.readFileSync(path.join(project, ".aaagent", "config.toml"), "utf8"),
+    /\[git\]\nbranch_mode = "pr"/);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /branch mode: pr/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
+  assert.strictEqual(api.store.data.git.mode, "pr");
+  const prTreeItem = plannerTree.getTreeItem(plannerTree.getChildren()[1]);
+  assert.strictEqual(prTreeItem.label, "Git: New branch + pull request");
+  // Picking the mode that is already set does nothing.
+  rec.quickPicks = [(items) => items[2]];
+  const beforeSamePick = rec.messages.length;
+  await rec.commands.get("aaagent.selectBranchMode")();
+  assert.strictEqual(rec.messages.length, beforeSamePick);
 
   // The reviewer's output opens its own terminal; Stop Reviewer asks only while it runs.
   const reviewerTerm = rec.terminals.find((term) => term.name === "aaagent: reviewer");

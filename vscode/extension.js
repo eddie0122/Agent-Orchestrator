@@ -423,6 +423,24 @@ function activate(context) {
     await terminals.ensureWorkers(p);
   }
 
+  /** Where tasks commit: the checked-out branch, a new branch per batch, or a new branch + PR. */
+  async function selectBranchMode() {
+    const p = project();
+    if (!p) return;
+    const current = (store.data && store.data.git && store.data.git.mode) || "current";
+    const choice = await vscode.window.showQuickPick(model.branchModeChoices(current), {
+      placeHolder: "Where do tasks commit?",
+      matchOnDescription: true,
+    });
+    if (!choice || choice.mode === current) return;
+    const out = await cli.exec(p, ["branch-mode", choice.mode]);
+    const text = model.short(out, 300);
+    const notable = out.split("\n").some((line) => /^(warning|note):/.test(line.trim()));
+    if (notable) await vscode.window.showWarningMessage(text);
+    else await vscode.window.showInformationMessage(text);
+    await refresh();
+  }
+
   function command(id, fn) {
     sub(vscode.commands.registerCommand(id, async (...args) => {
       try {
@@ -474,6 +492,8 @@ function activate(context) {
   command("aaagent.selectThinking", (node) => selectThinking(node));
 
   command("aaagent.selectReviewer", () => selectReviewer());
+
+  command("aaagent.selectBranchMode", () => selectBranchMode());
 
   command("aaagent.changeReviewerThinking", async () => {
     if (model.plannerReviews(store.data)) {
