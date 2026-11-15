@@ -21,6 +21,8 @@ Questions, explanations and investigations that need no file change: answer dire
    - Tasks that touch disjoint files can run in parallel: give each plan a `files:` list covering everything it may change (code, tests, docs), make sure the lists do not overlap, and dispatch each one with its own background `aaagent dispatch`.
    - Tasks that depend on each other or share files still run one after another.
    - `aaagent dispatch` refuses overlapping or undeclared tasks with a clear message; then finish or abandon the other task first. A task without `files:` needs the whole working tree to itself.
+   - When `aaagent branch-mode` is `branch` or `pr`, give the plan a `branch:` with a conventional prefix (`feat/`, `fix/`, `refactor/`, `docs/`, `test/`, `chore/`) plus a short kebab-case name. Tasks that run as one batch share one branch: the first dispatched task names it.
+   - In `pr` mode, aaagent pushes the branch and opens the pull request itself after the last task of the batch is committed. You still never push.
 
 3. **Dispatch.** Run `aaagent dispatch <task>` with the Bash tool's `run_in_background: true`. Jobs can take many minutes, and you are notified when the command exits, so do not poll. Tell the user in one line that the worker has started. If the command was interrupted, `aaagent wait <task>` reattaches. Each dispatch notifies you separately, and each task is reviewed separately.
 

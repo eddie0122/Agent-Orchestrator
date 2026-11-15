@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, sessions, tasks, worker
+from . import __version__, branching, sessions, tasks, worker
 from .config import REVIEWER, Config
 from .tasks import FINAL_STATUSES, FlowError
 
@@ -96,11 +96,16 @@ def status_data(project: Path, cfg: Config) -> dict:
             "path": str(task.path), "files": files, "scope": task.scope(),
         })
     active = tasks.active_tasks(project)
+    try:
+        git_info = branching.git_status(project, cfg)
+    except Exception:  # noqa: BLE001 - a git problem must never break status
+        git_info = {"mode": cfg.branch_mode, "branch": None, "batch": None, "last_pr": None}
     return {"version": __version__, "project": str(project),
             "planner": {"model": cfg.planner_model, "thinking": cfg.planner_thinking},
             "reviewer": cfg.reviewer,
             "review": _review_entry(project, cfg),
             "workers": workers,
+            "git": git_info,
             "tasks": out_tasks, "active_task": active[0] if active else None,
             "active_tasks": active,
             "sessions": sessions.list_sessions(project, limit=30),

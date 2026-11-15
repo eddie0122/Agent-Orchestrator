@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tomllib
 from pathlib import Path
 
@@ -23,6 +24,12 @@ WORKER_THINKING_FALLBACK = ["low", "high", "max"]
 
 # How a worker job runs: in opencode, or in headless Claude Code (`claude -p`).
 BACKENDS = ("opencode", "claude")
+
+# `[git] branch_mode`: where tasks commit.
+BRANCH_MODES = ("current", "branch", "pr")
+
+# Invalid branch_mode values already warned about (one warning per process).
+_warned_branch_modes: set[str] = set()
 
 # Reserved name: the dedicated queue/daemon that runs review jobs when the reviewer
 # is a model. No worker may be called this.
@@ -304,6 +311,20 @@ class Config:
     @property
     def track_agent_dir(self) -> bool:
         return bool(self.data.get("git", {}).get("track_agent_dir", False))
+
+    @property
+    def branch_mode(self) -> str:
+        """Where tasks commit: "current", "branch" or "pr"; anything else means "current"."""
+        raw = str(self.data.get("git", {}).get("branch_mode") or "").strip().lower()
+        if not raw:
+            return "current"
+        if raw in BRANCH_MODES:
+            return raw
+        if raw not in _warned_branch_modes:
+            _warned_branch_modes.add(raw)
+            print(f"aaagent: unknown [git] branch_mode {raw!r} "
+                  f"(choices: {', '.join(BRANCH_MODES)}); using 'current'", file=sys.stderr)
+        return "current"
 
 
 def set_toml_value(path: Path, section: str, key: str, value: str) -> None:

@@ -197,6 +197,8 @@ Opus runs these itself. They are also useful for you:
 | `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner, reviewer and worker models |
 | `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner, reviewer and worker thinking levels |
 | `aaagent reviewer [<model\|planner\|worker>] [--thinking LEVEL]` | show or set who reviews each round: a model with its own job, or planner (the chat); a worker name copies its model |
+| `aaagent branch-mode [current\|branch\|pr] [--json]` | show or set where tasks commit: the current branch, a branch per batch, or that plus a pull request |
+| `aaagent pr` | push the last finished branch and open (or retry) its pull request |
 | `aaagent --model <name>` | start the chat with another planner model for this chat only |
 | `aaagent --session <id>` | reopen a chat session (an id or id prefix from `aaagent sessions`) |
 | `aaagent doctor` | check the installation |
@@ -222,6 +224,24 @@ files: lib/aaagent/health.py, tests/test_health.py, docs/
 - Commits never run at the same time: a task waits while another task is committing, so the shared git index is never touched by two workers at once.
 - Your own uncommitted changes are still kept out of the commits; they are refreshed when the task is first dispatched.
 
+### Branches and pull requests
+
+By default tasks commit on the branch that is checked out. `[git] branch_mode` changes that:
+
+| mode | where the work lands |
+|---|---|
+| `current` | the branch that is checked out (the default) |
+| `branch` | a new branch per batch of tasks (`feat/…`, `fix/…`); the checkout stays on it afterwards |
+| `pr` | like `branch`, and when the last task of the batch is committed aaagent pushes the branch to `origin` and opens a pull request with `gh` |
+
+A **batch** is one branch's worth of work: it starts at the first `aaagent dispatch` while no task is active, every task that becomes active while it is open joins it, and it closes when the last of them is committed or abandoned. Tasks that run in parallel (disjoint `files:`) therefore share one branch.
+
+The branch name comes from the plan's `branch:` frontmatter when it has one, otherwise from the task's title: a leading `fix`, `bug`, `bugfix`, `hotfix`, `docs`, `doc`, `refactor`, `test`, `tests`, `chore`, `feat` or `feature` word becomes the prefix (`021-fix-login-crash` → `fix/login-crash`), anything else is `feat/` (`022-branch-mode-tui` → `feat/branch-mode-tui`). A name that is already taken gets `-2`, `-3`, … appended.
+
+`aaagent branch-mode` shows the mode with the current branch and the open batch, `aaagent branch-mode branch` (or `current`, `pr`) sets it in this project's config, and `aaagent branch-mode --json` prints it for machines. Switching the mode while a batch is open takes effect for that batch's end (`pr` or not) and for the next batch.
+
+In `pr` mode, `gh` (the GitHub CLI) must be installed and logged in, and `origin` must be a GitHub repository. The push and the pull request happen after the commit, and a failure never fails the commit: it is recorded in `.aaagent/batches/` and printed, and `aaagent pr` retries it (also for a `branch`-mode batch that was never pushed).
+
 ### Images
 
 The chat runs on the machine where aaagent runs, so an image has to be on that machine first: copy it with `scp`, or drag it into VSCode's Explorer. Then run `aaagent attach shot.png`; it types `@.aaagent/attachments/…` into the chat, and Opus reads the image. You can also type `@path/to/image.png` in the chat yourself. A path from another computer (for example `/Users/me/Downloads/band.jpg` over Remote-SSH) is not a file on the server, so Opus cannot open it: it tells you to attach the image instead, and in VSCode dropping it on the chat with Shift copies it for you. On a desktop Linux session, `xclip -selection clipboard -t image/png -o | aaagent attach -` attaches the clipboard. Attachments live in `.aaagent/attachments/`: they are never committed, and you can delete them at any time.
@@ -233,7 +253,7 @@ Code enforces these; they are not just prompt instructions:
 - **Opus cannot edit project files.** A hook blocks its edit tools outside `.aaagent/`, and `git commit`/`git push` are denied for it.
 - **Implementing workers cannot commit.** `aaagent-worker` denies `git commit/push/reset/rebase/clean/stash/checkout/switch`, `sudo`, destructive `docker` commands, files outside the project, `.env` files, and edits to plans and reviews.
 - **The commit step happens only after approval.** `aaagent dispatch` sends a commit job only when the latest review says `verdict: approved`. The `aaagent-committer` agent cannot edit files and can only run git status/diff/log/add/commit; `--amend` and `add -A`/`add .` are denied.
-- **Nothing is pushed.** Pushing is up to you.
+- **Nothing is pushed unless `branch_mode = "pr"`.** In pr mode aaagent pushes only the batch's branch to `origin` and opens its pull request; everything else is up to you.
 - **Parallel tasks only with disjoint `files:`.** Several tasks may be active in one working tree, but only when every plan declares the files it may change and those lists do not overlap; anything else keeps the working tree to one task.
 - **Your own uncommitted changes stay out of the commit.** Files that were already modified when a task started are listed and excluded from its commit.
 - **Escalation:** a failed implement/fix job is retried once on the fallback worker; a failed review is retried once on the reviewer itself, then the round goes back to the planner. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
@@ -270,6 +290,7 @@ job_timeout_minutes = 30
 
 [git]
 commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@example.invalid>"
+branch_mode = "current"           # current = the checked-out branch; branch = a branch per batch; pr = that + push and pull request
 ```
 
 `opencode models` lists the model ids you can use. `aaagent workers add|remove` edits the worker list for you; a new worker gets its own pane the next time you run `aaagent`.
@@ -286,6 +307,8 @@ commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@examp
   attachments/      images from `aaagent attach`
   fetch/            image copy requests between the chat and VSCode
   active-tasks.json which tasks are running in this working tree now
+  batch.json        the open branch and the tasks that share it
+  batches/          every closed batch, with its commits and pull request
   chat.json         the last chat's session id, for `aaagent -c`
   sessions.json     the chat sessions and the tasks each one created
   chat-pane         the tmux pane of the chat, for `aaagent attach`

@@ -10,15 +10,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import (__version__, attach, backends, dispatch, gitutil, models, session, sessions, status,
-               tasks, tui, worker)
-from .config import (ROOT, USER_CONFIG, Config, migrate_legacy_workers, project_config_path,
-                     set_toml_value, user_config_path)
+from . import (__version__, attach, backends, branching, dispatch, gitutil, models, session,
+               sessions, status, tasks, tui, worker)
+from .config import (BRANCH_MODES, ROOT, USER_CONFIG, Config, migrate_legacy_workers,
+                     project_config_path, set_toml_value, user_config_path)
 from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "workers", "new", "dispatch", "wait", "status", "diff", "logs",
             "stop", "abandon", "attach", "doctor", "version", "help", "model", "thinking",
-            "sessions", "reviewer"}
+            "sessions", "reviewer", "branch-mode", "pr"}
 # Options of `start` that also work without the word: `aaagent -c`.
 START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model", "--session"}
 
@@ -186,6 +186,51 @@ def cmd_reviewer(args) -> int:
         if answer.strip():
             print("\n".join(models.set_reviewer(project, args.project, answer.strip())))
     return 0
+
+
+def cmd_branch_mode(args) -> int:
+    """`aaagent branch-mode [current|branch|pr]`: where tasks commit."""
+    project = project_root()
+    cfg = Config.load(project)
+    if args.json:
+        data = branching.git_status(project, cfg)
+        data["choices"] = list(BRANCH_MODES)
+        print(json.dumps(data, indent=1))
+        return 0
+    if args.mode:
+        value = args.mode.strip().lower()
+        if value not in BRANCH_MODES:
+            raise FlowError(f"unknown branch mode '{args.mode}' "
+                            f"(choices: {', '.join(BRANCH_MODES)})")
+        try:
+            set_toml_value(project_config_path(project), "git", "branch_mode", value)
+        except ValueError as exc:
+            raise FlowError(str(exc)) from exc
+        print(f"branch mode: {value}")
+        batch = branching.open_batch(project)
+        if batch:
+            print(f"note: the open branch {batch.get('branch')} keeps going; the new mode "
+                  "applies to its end (pr or not) and to the next batch")
+        return 0
+    print(f"branch mode: {cfg.branch_mode}")
+    branch = branching.current_branch(project)
+    if branch:
+        print(f"branch: {branch}")
+    batch = branching.open_batch(project)
+    if batch:
+        print(f"open batch: {batch.get('branch')} from {batch.get('base')} "
+              f"(tasks: {', '.join(batch.get('tasks') or []) or '-'})")
+    return 0
+
+
+def cmd_pr(args) -> int:
+    """`aaagent pr`: push the last finished branch and open its pull request (or retry)."""
+    project = project_root()
+    cfg = Config.load(project)
+    lines = branching.retry_pr(project, cfg)
+    print("\n".join(lines))
+    closed = branching.last_closed(project)
+    return 0 if closed and closed.get("pr_url") else 1
 
 
 def cmd_workers(args) -> int:
@@ -689,6 +734,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--project", action="store_true",
                    help="write <project>/.aaagent/config.toml instead of the user config")
     s.set_defaults(func=cmd_workers)
+
+    s = sub.add_parser("branch-mode", help="show or change where tasks commit: "
+                                            "current, branch or pr")
+    s.add_argument("mode", nargs="?", type=str.lower, choices=BRANCH_MODES,
+                   help="current = the checked-out branch; branch = a new branch per batch; "
+                        "pr = that, then push it and open a pull request")
+    s.add_argument("--json", action="store_true",
+                   help="machine-readable mode, branch, open batch and last pull request")
+    s.set_defaults(func=cmd_branch_mode)
+
+    s = sub.add_parser("pr", help="push the last finished branch and open its pull request")
+    s.set_defaults(func=cmd_pr)
 
     s = sub.add_parser("version")
     s.set_defaults(func=lambda a: print(__version__) or 0)

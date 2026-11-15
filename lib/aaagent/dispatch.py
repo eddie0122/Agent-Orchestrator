@@ -7,7 +7,7 @@ import shlex
 import time
 from pathlib import Path
 
-from . import backends, gitutil, tasks, worker
+from . import backends, branching, gitutil, tasks, worker
 from .config import REVIEWER, ROOT, Config
 from .tasks import FlowError, Step, Task
 
@@ -234,7 +234,21 @@ def dispatch(project: Path, ref: str, worker_override: str | None = None, force:
     cfg = Config.load(project)
     task = tasks.find(project, ref)
     step = tasks.next_step(task, cfg, worker_override=worker_override, force=force)
-    tasks.claim_active(project, task)
+    first = not task.latest_report() and not task.load().get("started")
+    line = None
+    # Claiming and joining the batch happen under one lock, so a commit of another task cannot
+    # close the batch between them. Claim first: a refused task never joins the batch, and a
+    # task that joins is always really active.
+    with tasks.active_lock(project):
+        tasks.claim_active(project, task)
+        if first:
+            try:
+                line = branching.start_if_needed(project, task, cfg)
+            except BaseException:
+                tasks.release_active(project, task)
+                raise
+    if line:
+        print(line, flush=True)
     refresh_base(project, task)
     plan_worker = tasks.frontmatter(task.plan).get("worker") or None
     if step.phase == "implement" and not worker_override and not plan_worker:
@@ -399,6 +413,8 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         if left:
             print(f"  ! still uncommitted after the commit: {', '.join(left)}")
         print(f"Task {task.id} is complete. Tell the user what was done.")
+        for line in branching.finish_if_done(project, cfg):
+            print(line, flush=True)
         return None
 
     if phase == "review":
@@ -465,4 +481,7 @@ def abandon(project: Path, ref: str) -> str:
     text = f"task {task.id} abandoned."
     if left:
         text += f"\nuncommitted changes left in the working tree: {', '.join(left)}"
+    lines = branching.finish_if_done(project, Config.load(project))
+    if lines:
+        text += "\n" + "\n".join(lines)
     return text
