@@ -149,6 +149,7 @@ Dashboard keys:
 | `m` | change a model: the selected row's (planner, reviewer or worker), or pick which one; type a name if it is not listed |
 | `t` | the same for a thinking level (the reviewer has one only while a model reviews) |
 | `v` | choose who reviews each round: the planner (the chat) or a model (Claude or opencode); type a name if it is not listed |
+| `B` | git branch mode: current branch, new branch, or new branch + pull request (see Branches and pull requests) |
 | `+` | add a worker, after picking its model |
 | `-` | remove the selected worker, after a y/n question |
 | `a` | abandon the selected task, after a y/n question |

@@ -380,6 +380,43 @@ class TextTest(unittest.TestCase):
         self.assertLessEqual(status.text_width(status.format_row(row, 12)), 12)
 
 
+class GitSummaryTest(unittest.TestCase):
+    """The git half of the dashboard's top line."""
+
+    def summary(self, **git):
+        base = {"mode": "current", "branch": "main", "batch": None, "last_pr": None}
+        base.update(git)
+        return tui.git_summary({"git": base})
+
+    def test_each_mode(self):
+        self.assertEqual(self.summary(), "on main")
+        self.assertEqual(self.summary(mode="branch"), "new branch · on main")
+        self.assertEqual(self.summary(mode="pr"), "branch + PR · on main")
+
+    def test_without_a_branch(self):
+        self.assertEqual(self.summary(branch=None), "")
+        self.assertEqual(self.summary(mode="branch", branch=None), "new branch")
+        self.assertEqual(self.summary(mode="pr", branch=None), "branch + PR")
+
+    def test_an_open_batch_shows_where_it_started(self):
+        batch = {"branch": "feat/x", "base": "main", "tasks": ["001-a"]}
+        self.assertEqual(self.summary(mode="pr", branch="feat/x", batch=batch),
+                         "branch + PR · on feat/x (from main)")
+
+    def test_a_failed_pull_request_points_at_the_command(self):
+        last_pr = {"branch": "feat/x", "url": None, "error": "gh not found"}
+        self.assertEqual(self.summary(last_pr=last_pr), "on main · PR failed: aaagent pr")
+        batch = {"branch": "feat/x", "base": "main", "tasks": ["001-a"]}
+        self.assertEqual(self.summary(mode="branch", branch="feat/x", batch=batch, last_pr=last_pr),
+                         "new branch · on feat/x (from main)",
+                         "an open batch is not a PR failure")
+
+    def test_no_git_data(self):
+        self.assertEqual(tui.git_summary(None), "")
+        self.assertEqual(tui.git_summary({}), "")
+        self.assertEqual(tui.git_summary({"git": None}), "")
+
+
 class KeysTest(unittest.TestCase):
     def setUp(self):
         self.data = data([task(status="awaiting_review", round=1, files=FILES),
@@ -535,6 +572,9 @@ class KeysTest(unittest.TestCase):
         self.ui.selected = "planner"
         self.assertIsNone(self.press(10), "enter on the planner row still means nothing")
         self.assertEqual(self.press("v"), ("model", "reviewer"))
+
+    def test_branch_mode_key(self):
+        self.assertEqual(self.press("B"), ("branch_mode",))
 
     def test_enter_on_the_reviewer_row_shows_its_output(self):
         self.data = data(reviewer="reviewer", review=review_model(
@@ -927,6 +967,43 @@ class ActTest(unittest.TestCase):
         self.assertEqual([w["name"] for w in self.dash.data["workers"]], ["worker1"])
         self.dash.act(("remove_worker", "worker1"))
         self.assertIn("only worker", self.dash.ui.message)
+
+    def test_branch_mode_picker_marks_the_current_mode(self):
+        self.assertTrue(self.dash.act(("branch_mode",)))
+        picker = self.dash.ui.picker
+        self.assertEqual(picker.title, "where do tasks commit?")
+        self.assertEqual([i[1] for i in picker.items], ["current", "branch", "pr"])
+        self.assertEqual([i[0] for i in picker.items],
+                         ["current branch", "new branch", "new branch + pull request"])
+        self.assertEqual(picker.items[0][2], "current")
+        self.assertEqual(picker.items[1][2], "feat/… or fix/… per batch")
+        self.assertEqual(picker.action, ("branch_mode_pick",))
+
+    def test_branch_mode_pick_writes_the_project_config(self):
+        self.assertTrue(self.dash.act(("branch_mode_pick", "pr")))
+        self.assertEqual(Config.load(self.project).branch_mode, "pr")
+        text = (self.project / ".aaagent" / "config.toml").read_text()
+        self.assertIn("[git]", text)
+        self.assertIn('branch_mode = "pr"', text)
+        self.assertIn("pull request", self.dash.ui.message)
+        self.assertEqual(self.dash.data["git"]["mode"], "pr")
+
+    def test_branch_mode_pick_notes_an_open_batch(self):
+        self.dash.data = dict(data(), git={"mode": "current", "branch": "main",
+                                           "batch": {"branch": "feat/x", "base": "main",
+                                                     "tasks": ["001-a"]},
+                                           "last_pr": None})
+        self.dash.act(("branch_mode_pick", "pr"))
+        self.assertIn("feat/x keeps going", self.dash.ui.message)
+
+    def test_draw_shows_the_git_summary_in_the_top_line(self):
+        self.dash.data = dict(data(), git={"mode": "branch", "branch": "feat/x",
+                                           "batch": {"branch": "feat/x", "base": "main",
+                                                     "tasks": ["001-a"]},
+                                           "last_pr": None})
+        tui.Dashboard.draw(self.dash)
+        top = [text for y, _x, text in self.scr.written if y == 0]
+        self.assertIn("new branch · on feat/x (from main)", top)
 
     def test_errors_go_to_the_message(self):
         self.dash.act(("model_save", "planner", "  ", "project"))

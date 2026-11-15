@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import dispatch, gitutil, models, session, sessions, status, tasks, worker
-from .config import Config
+from .config import Config, project_config_path, set_toml_value
 from .status import Row
 from .tasks import FlowError
 
@@ -38,6 +38,7 @@ HELP = [
     ("m", "change a model: the selected row's (planner, reviewer or worker), or pick which"),
     ("t", "change a thinking level (the same rows as m)"),
     ("v", "choose who reviews each round: the planner (the chat) or a model"),
+    ("B", "git branch mode: work on the current branch, a new branch, or a new branch + pull request"),
     ("+", "add a worker (pick its model)"),
     ("-", "remove the selected worker (asks first)"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
@@ -53,6 +54,12 @@ HELP = [
 KEY_ENTER = (curses.KEY_ENTER, 10, 13)
 KEY_BACK = (27, curses.KEY_LEFT, curses.KEY_BACKSPACE, 127, ord("q"), ord("h"))
 TYPE_NEW = "\x00type"    # picker value of "type a name…"
+# `[git] branch_mode`: label, value, and what the mode does when it is not the current one.
+BRANCH_MODE_CHOICES = [
+    ("current branch", "current", "commit on the checked-out branch"),
+    ("new branch", "branch", "feat/… or fix/… per batch"),
+    ("new branch + pull request", "pr", "push + gh pr create when the batch is done"),
+]
 
 
 @dataclass
@@ -141,7 +148,7 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
     ("quit",) ("refresh",) ("open", path, title) ("diff", task_id) ("abandon", task_id)
     ("restore",) ("open_session", session_id) ("delete_session", session_id) ("new_chat",)
     ("help",) ("model", target) ("thinking", target) ("add_worker",)
-    ("remove_worker", name), or None when the key only changed what is shown.
+    ("remove_worker", name) ("branch_mode",), or None when the key only changed what is shown.
     `reviewer_job` says whether a model reviews each round (so the reviewer has output).
     """
     if key in (-1, curses.KEY_RESIZE):
@@ -231,6 +238,8 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
         return ("thinking", _target_of(row))
     if key == ord("v"):
         return ("model", "reviewer")
+    if key == ord("B"):
+        return ("branch_mode",)
     if key == ord("+"):
         return ("add_worker",)
     if key in (curses.KEY_UP, ord("k")):
@@ -419,6 +428,27 @@ def output_worker(ui: UI, data: dict | None, task: dict | None = None) -> str | 
     return max(names, key=mtime) if names else None
 
 
+def git_summary(data: dict | None) -> str:
+    """Where tasks commit, for the dashboard's top line ("" when there is nothing to say)."""
+    git = (data or {}).get("git") or {}
+    labels = {"current": "", "branch": "new branch", "pr": "branch + PR"}
+    mode = git.get("mode")
+    if mode not in labels:
+        return ""
+    branch = git.get("branch")
+    parts = [labels[mode]] if labels[mode] else []
+    if branch:
+        parts.append(f"on {branch}")
+    text = " · ".join(parts)
+    batch = git.get("batch") or {}
+    base = batch.get("base")
+    if base:
+        text = f"{text} (from {base})" if text else f"from {base}"
+    elif not batch and (git.get("last_pr") or {}).get("error"):
+        text = f"{text} · PR failed: aaagent pr" if text else "PR failed: aaagent pr"
+    return text
+
+
 def snapshot(project: Path, width: int = 80) -> str:
     """The dashboard's lists as plain text (`aaagent ui --snapshot`)."""
     data = status.status_data(project, Config.load(project))
@@ -591,6 +621,16 @@ class Dashboard:
                 notes = models.set_thinking(self.project, scope == "project", target, level)
                 self.load()
                 self.ui.message = "; ".join(notes)
+            elif name == "branch_mode":
+                self.pick_branch_mode()
+            elif name == "branch_mode_pick":
+                value = action[1]
+                note = self.open_batch_note()
+                set_toml_value(project_config_path(self.project), "git", "branch_mode", value)
+                self.load()
+                label = next((text for text, mode, _detail in BRANCH_MODE_CHOICES if mode == value),
+                             value)
+                self.ui.message = f"branch mode: {label}{note}"
         except (FlowError, OSError, RuntimeError, ValueError) as exc:
             self.ui.message = str(exc)
         return True
@@ -656,6 +696,18 @@ class Dashboard:
         items.append(("type a name…", TYPE_NEW, ""))
         self.ui.picker = Picker("model for the new worker", items, action=("add_worker_pick",))
 
+    def pick_branch_mode(self) -> None:
+        """Where tasks commit: the checked-out branch, a new one, or a new one plus a PR."""
+        now = Config.load(self.project).branch_mode
+        items = [(label, value, "current" if value == now else detail)
+                 for label, value, detail in BRANCH_MODE_CHOICES]
+        self.ui.picker = Picker("where do tasks commit?", items, action=("branch_mode_pick",))
+
+    def open_batch_note(self) -> str:
+        """The short note the CLI prints too: a mode change does not move an open batch."""
+        batch = ((self.data or {}).get("git") or {}).get("batch") or {}
+        return f"; the open branch {batch['branch']} keeps going" if batch.get("branch") else ""
+
     # -- drawing ------------------------------------------------------------------
     def put(self, y: int, x: int, text: str, attr: int = 0, width: int | None = None) -> None:
         height, total = self.scr.getmaxyx()
@@ -680,7 +732,13 @@ class Dashboard:
             self.scr.refresh()
             return
         name = Path((self.data or {}).get("project") or self.project).name
-        self.put(0, 0, f" aaagent · {name}", self.styles["title"])
+        title = f" aaagent · {name}"
+        self.put(0, 0, title, self.styles["title"])
+        summary = git_summary(self.data)
+        if summary:
+            x = width - status.text_width(summary) - 1
+            if x > status.text_width(title) + 1:
+                self.put(0, x, summary, self.styles["dim"])
         body_top, footer = 1, height - 1
         if self.ui.picker:
             self.draw_picker(body_top, footer - body_top, width)
@@ -804,7 +862,7 @@ class Dashboard:
         if self.ui.view:
             hints = "↑↓ scroll  space page  q back"
         else:
-            hints = "enter open  d diff  m model  t thinking  v reviewer  a abandon"
+            hints = "enter open  d diff  m model  t thinking  v reviewer  B branch  a abandon"
             row = self.selected_row()
             if row and row.kind == "worker":
                 hints += "  + add  - remove"
