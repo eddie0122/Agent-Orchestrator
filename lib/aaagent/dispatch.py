@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from . import backends, branching, gitutil, tasks, worker
@@ -144,15 +145,27 @@ def refresh_base(project: Path, task: Task) -> None:
     A task planned while another task's changes were still uncommitted used to list those
     files as its own preexisting changes. Files that belong to another active task are not
     preexisting for this one either.
+
+    In No Git mode nothing else records the changes made outside aaagent, so they get a
+    checkpoint of their own before the task's window opens.
     """
     state = task.load()
     if task.latest_report() or state.get("started"):
         return
     other_scopes = [other.scope() for other in _other_active_tasks(project, task)]
-    preexisting = [path for path in gitutil.dirty_paths(project)
-                   if not any(scope is not None and tasks.in_scope(path, scope)
-                              for scope in other_scopes)]
-    base = gitutil.head(project)
+    nogit = gitutil.no_git(project)
+    with tasks.active_lock(project) if nogit else nullcontext():
+        if nogit:
+            outside = [path for path in gitutil.dirty_paths(project)
+                       if not any(scope is not None and tasks.in_scope(path, scope)
+                                  for scope in other_scopes)]
+            if outside:
+                gitutil.checkpoint(project, "aaagent: changes made outside aaagent",
+                                   pathspecs=outside)
+        preexisting = [path for path in gitutil.dirty_paths(project)
+                       if not any(scope is not None and tasks.in_scope(path, scope)
+                                  for scope in other_scopes)]
+        base = gitutil.head(project)
     task.update(base_commit=base, preexisting_dirty=preexisting, started=tasks.now())
     task.log_event("base refreshed at the first dispatch", base_commit=base,
                    preexisting_dirty=preexisting)
@@ -219,6 +232,40 @@ def enqueue_commit(project: Path, task: Task, step: Step, cfg: Config,
         sleep(1)
 
 
+def _checkpoint(project: Path, task: Task, cfg: Config) -> int:
+    """No Git mode: record the approved task as a checkpoint in the shadow repository.
+
+    There is no commit job: aaagent commits on its own, so nothing can run git against the
+    project's own repository. Returns the exit code for `aaagent dispatch`; on failure the
+    task stays claimed (like a failed commit job) and the next dispatch tries again.
+    """
+    with tasks.active_lock(project):
+        state = task.load()
+        exclude = state.get("preexisting_dirty") or []
+        try:
+            commit = gitutil.checkpoint(project, f"{task.id}: approved", task.pathspecs(),
+                                        exclude=exclude)
+        except RuntimeError as exc:
+            task.update(current_job=None, status="failed")
+            task.log_event("checkpoint failed", error=str(exc))
+            print(f"✗ checkpoint failed: {exc}")
+            print(f"Task {task.id} is stopped. Fix the problem, then "
+                  f"`aaagent dispatch {task.id}` again, or tell the user.")
+            return 1
+        left = gitutil.still_dirty(project, task.pathspecs(), exclude)
+        task.update(current_job=None, status="committed", commit=commit)
+        task.log_event("checkpoint", commit=commit)
+        tasks.release_active(project, task)
+    print(f"✓ checkpoint {commit[:7]} recorded for {task.id} "
+          f"(no git: aaagent's own history in .aaagent/shadow.git)")
+    if left:
+        print(f"  ! still uncommitted after the checkpoint: {', '.join(left)}")
+    print(f"Task {task.id} is complete. Tell the user what was done.")
+    for line in branching.on_idle(project, cfg):
+        print(line, flush=True)
+    return 0
+
+
 def changed_outside_scope(project: Path, task: Task, state: dict) -> list[str]:
     """Changed files that no active task declares and that were not dirty before this task."""
     if task.scope() is None:
@@ -262,6 +309,8 @@ def dispatch(project: Path, ref: str, worker_override: str | None = None, force:
         note = f" ({step.reason}; switching worker)" if step.reason else ""
         if step.note:
             note = f" ({step.note})"
+        if step.phase == "commit" and gitutil.no_git(project):
+            return _checkpoint(project, task, cfg)
         print(f"{task.id}: {step.phase} round {step.round} → {step.worker} "
               f"({cfg.worker_label(step.worker)}){note}", flush=True)
         if step.phase == "commit":
@@ -413,7 +462,7 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         if left:
             print(f"  ! still uncommitted after the commit: {', '.join(left)}")
         print(f"Task {task.id} is complete. Tell the user what was done.")
-        for line in branching.finish_if_done(project, cfg):
+        for line in branching.on_idle(project, cfg):
             print(line, flush=True)
         return None
 
@@ -481,7 +530,7 @@ def abandon(project: Path, ref: str) -> str:
     text = f"task {task.id} abandoned."
     if left:
         text += f"\nuncommitted changes left in the working tree: {', '.join(left)}"
-    lines = branching.finish_if_done(project, Config.load(project))
+    lines = branching.on_idle(project, Config.load(project))
     if lines:
         text += "\n" + "\n".join(lines)
     return text

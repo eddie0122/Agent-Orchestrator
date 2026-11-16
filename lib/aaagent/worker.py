@@ -18,7 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import backends
+from . import backends, gitutil
 from .backends import BOLD, DIM, GREEN, RED, RESET, color_enabled, paint
 from .config import REVIEWER, Config, infer_backend
 
@@ -180,7 +180,8 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
 
     with log_path.open("w") as log, open(log_path.with_suffix(".stderr"), "w") as err_log:
         proc = subprocess.Popen(cmd, cwd=project, stdout=subprocess.PIPE, stderr=err_log,
-                                stdin=subprocess.DEVNULL, text=True, start_new_session=True)
+                                stdin=subprocess.DEVNULL, text=True, start_new_session=True,
+                                env=gitutil.git_env(project))
 
         def kill():
             timed_out.set()

@@ -87,8 +87,8 @@ test("activate() against a real project", async (t) => {
   assert.deepStrictEqual(workersTree.getChildren().map((w) => w.name), ["worker1", "worker2"]);
   assert.strictEqual(workersTree.getTreeItem(workersTree.getChildren()[0]).description, "stopped · default");
   assert.deepStrictEqual(tasksTree.getChildren(), []);
-  // The `.aaagent/**` refresh watcher plus the image-fetch watcher.
-  assert.strictEqual(rec.watchers.length, 2);
+  // The `.aaagent/**` refresh watcher, the image-fetch watcher and the new-chat watcher.
+  assert.strictEqual(rec.watchers.length, 3);
   assert.strictEqual(rec.treeViews["aaagent.workers"].description, "default: worker1 · fallback: worker2");
 
   // The Planner view shows the planner and where tasks commit; the Reviewer view shows one node.
@@ -613,4 +613,122 @@ test("not a git repository and missing CLI show the right welcome state", async 
   rec.config = { path: path.join(tmp, "missing-aaagent") };
   await api.refresh();
   assert.strictEqual(rec.context["aaagent.state"], "noCli");
+});
+
+test("the new-chat marker starts a fresh chat with its prompt", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aaagent-ext-"));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const project = fs.realpathSync(fs.mkdtempSync(path.join(tmp, "proj-")));
+  sh(project, "git", ["init", "-q"]);
+  fs.writeFileSync(path.join(project, "README.md"), "hi\n");
+  sh(project, "git", ["add", "."]);
+  sh(project, "git", ["commit", "-q", "-m", "init"]);
+
+  const rec = stub._record;
+  rec.config = { path: AAAGENT };
+  stub.setFolder(project);
+  delete require.cache[require.resolve("../extension")];
+  const ext = require("../extension");
+  const ctx = { subscriptions: [] };
+  const api = ext.activate(ctx);
+  t.after(() => ctx.subscriptions.forEach((d) => d.dispose && d.dispose()));
+  await api.refresh();
+
+  // The request has its own watcher, next to the refresh and image-fetch ones.
+  const patterns = rec.watchers.map((w) => (w.pattern && w.pattern.pattern) || "");
+  assert.ok(patterns.includes(".aaagent/new-chat.json"), JSON.stringify(patterns));
+
+  // `aaagent pr` asked for a new chat: the chat closes and the fresh one starts with the prompt.
+  const marker = path.join(project, ".aaagent", "new-chat.json");
+  const before = rec.terminals.length;
+  const messagesBefore = rec.messages.length;
+  fs.writeFileSync(marker, JSON.stringify({
+    reason: "pull-request", branch: "aaagent/001-health-endpoint", base: "main",
+    pr_url: "https://example.invalid/pr/1", prompt: "the pull request is open; what next?", at: "now",
+  }) + "\n");
+  await api.handleNewChat(project);
+  assert.ok(!fs.existsSync(marker), "the marker is consumed");
+  const chat = rec.terminals.slice(before).find((x) => x.name === "aaagent: chat");
+  assert.ok(chat, JSON.stringify(rec.terminals.slice(before).map((x) => x.name)));
+  assert.deepStrictEqual(chat.creationOptions.shellArgs,
+    ["start", "--no-workers", "the pull request is open; what next?"]);
+  assert.ok(rec.messages.slice(messagesBefore).some(([lvl, m]) => lvl === "info"
+    && /pull request is open; started a new chat/.test(m)), JSON.stringify(rec.messages.slice(messagesBefore)));
+
+  // No pull request: the other wording and no first message.
+  const beforeNoPr = rec.terminals.length;
+  fs.writeFileSync(marker, JSON.stringify({ reason: "finished", pr_url: null, prompt: "" }) + "\n");
+  await api.handleNewChat(project);
+  assert.ok(!fs.existsSync(marker), "the marker is consumed");
+  const plainChat = rec.terminals.slice(beforeNoPr).find((x) => x.name === "aaagent: chat");
+  assert.ok(plainChat);
+  assert.deepStrictEqual(plainChat.creationOptions.shellArgs, ["start", "--no-workers"]);
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info" && /branch is finished; started a new chat/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
+
+  // A marker written while the chat is being replaced is not stranded: one more check runs
+  // when the restart ends.
+  const beforeAgain = rec.terminals.length;
+  const realCreateTerminal = stub.window.createTerminal;
+  let armed = true;
+  stub.window.createTerminal = (options) => {
+    if (armed && options.name === "aaagent: chat") {
+      armed = false;
+      // The second request arrives while the first restart is still running.
+      fs.writeFileSync(marker, JSON.stringify({ pr_url: null, prompt: "the second request" }) + "\n");
+      api.handleNewChat(project); // the watcher's call: busy, so it only marks the request
+    }
+    return realCreateTerminal(options);
+  };
+  try {
+    fs.writeFileSync(marker, JSON.stringify({ pr_url: null, prompt: "the first request" }) + "\n");
+    await api.handleNewChat(project);
+  } finally {
+    stub.window.createTerminal = realCreateTerminal;
+  }
+  const again = rec.terminals.slice(beforeAgain).filter((x) => x.name === "aaagent: chat");
+  assert.deepStrictEqual(again.map((x) => x.creationOptions.shellArgs), [
+    ["start", "--no-workers", "the first request"],
+    ["start", "--no-workers", "the second request"],
+  ]);
+  assert.ok(!fs.existsSync(marker), "the second marker is consumed");
+
+  // A broken marker is dropped and starts nothing.
+  const beforeBroken = rec.terminals.length;
+  fs.writeFileSync(marker, "{not json");
+  await api.handleNewChat(project);
+  assert.ok(!fs.existsSync(marker), "a broken marker is deleted");
+  assert.strictEqual(rec.terminals.length, beforeBroken);
+  // Without a marker there is nothing to restart.
+  await api.handleNewChat(project);
+  assert.strictEqual(rec.terminals.length, beforeBroken);
+});
+
+test("a committed task's diff comes from aaagent diff, so it works in No Git", async () => {
+  const { DiffProvider } = require("../src/diff");
+  const calls = [];
+  const provider = new DiffProvider({
+    diff: async (project, task) => {
+      calls.push([project, task]);
+      return "commit abc123\n\n    the change\n\n+print('ok')";
+    },
+  });
+  const uri = (commit) => stub.Uri.from({
+    scheme: "aaagent-diff",
+    path: "/001-health-endpoint.diff",
+    query: new URLSearchParams({ project: "/p", commit }).toString(),
+  });
+
+  const committed = await provider.provideTextDocumentContent(uri("abc123"));
+  assert.deepStrictEqual(calls, [["/p", "001-health-endpoint"]]);
+  assert.match(committed, /^# aaagent: changes committed by 001-health-endpoint\n\n/);
+  assert.match(committed, /\+print\('ok'\)/);
+
+  const uncommitted = await provider.provideTextDocumentContent(uri(""));
+  assert.match(uncommitted,
+    /^# aaagent: uncommitted changes for 001-health-endpoint \(since the task started\)\n\n/);
+
+  const failed = new DiffProvider({ diff: async () => { throw new Error("boom"); } });
+  assert.match(await failed.provideTextDocumentContent(uri("abc123")),
+    /^Could not load the changes for 001-health-endpoint:\nboom$/);
 });

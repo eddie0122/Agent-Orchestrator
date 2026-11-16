@@ -1,17 +1,9 @@
 "use strict";
 // Read-only documents showing a task's changes: aaagent-diff:/<task>.diff?<project>
 
-const cp = require("child_process");
 const vscode = require("vscode");
 
 const SCHEME = "aaagent-diff";
-
-function git(cwd, args) {
-  return new Promise((resolve, reject) => {
-    cp.execFile("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) =>
-      err ? reject(new Error(stderr || err.message)) : resolve(stdout));
-  });
-}
 
 class DiffProvider {
   constructor(cli) {
@@ -35,11 +27,13 @@ class DiffProvider {
     const commit = params.get("commit");
     const task = uri.path.replace(/^\//, "").replace(/\.diff$/, "");
     try {
-      if (commit) {
-        return await git(project, ["show", "--stat", "--patch", "--format=commit %H%nAuthor: %an%nDate:   %ad%n%n    %s%n%n%b", commit]);
-      }
+      // `aaagent diff` shows the task's commit for a committed task (in every mode, No Git
+      // included) and its uncommitted changes otherwise; plain `git show` fails in No Git.
       const out = await this.cli.diff(project, task);
-      return `# aaagent: uncommitted changes for ${task} (since the task started)\n\n${out}`;
+      const header = commit
+        ? `# aaagent: changes committed by ${task}\n\n`
+        : `# aaagent: uncommitted changes for ${task} (since the task started)\n\n`;
+      return `${header}${out}`;
     } catch (err) {
       return `Could not load the changes for ${task}:\n${err.message}`;
     }

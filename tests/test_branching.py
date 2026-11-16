@@ -1,4 +1,4 @@
-"""Branches per batch: `[git] branch_mode = current | branch | pr`."""
+"""One session branch: `[git] branch_mode = current | branch | pr`."""
 
 import io
 import json
@@ -197,26 +197,139 @@ class BranchModeTest(FlowCase):
         self.assertEqual(self.git("branch", "--show-current").strip(), "fix/login-crash")
         self.assertEqual(branching.open_batch(self.project)["tasks"], [task.id])
 
-        self.commit(task)
+        out = self.commit(task)
         self.assertEqual(self.git("branch", "--show-current").strip(), "fix/login-crash",
-                         "the checkout stays on the batch's branch")
+                         "the checkout stays on the branch until it is finished")
+        self.assertIn("All tasks on branch fix/login-crash are done (1 commit(s) since main).", out)
+        self.assertIn("`aaagent branch-done`", out)
+        self.assertTrue(branching.batch_file(self.project).exists(), "the branch is still open")
+        self.assertIsNone(branching.last_closed(self.project))
+        self.assertEqual(self.git("rev-parse", "main").strip(), main_head, "main is unchanged")
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), task.load()["commit"])
+        self.assertEqual(self.calls(self.gh_log), [], "branch mode never calls gh")
+
+        lines = branching.finish(self.project, self.cfg, push=False)
+        self.assertEqual(lines, ["branch fix/login-crash finished (1 commit(s)); not pushed",
+                                 "switched back to main"])
         self.assertFalse(branching.batch_file(self.project).exists())
         closed = branching.last_closed(self.project)
-        self.assertIsNotNone(closed)
         self.assertEqual(closed["branch"], "fix/login-crash")
         self.assertEqual(closed["base"], "main")
         self.assertEqual(len(closed["commits"]), 1)
         self.assertIn("fake work", closed["commits"][0])
         self.assertIsNone(closed["pr_url"])
         self.assertIsNone(closed["pr_error"])
+        self.assertTrue(closed["switched_back"])
         self.assertEqual(len(list(branching.batches_dir(self.project).glob("*.json"))), 1)
-        self.assertEqual(self.git("rev-parse", "main").strip(), main_head, "main is unchanged")
-        self.assertEqual(self.git("rev-parse", "HEAD").strip(), task.load()["commit"])
-        self.assertEqual(self.calls(self.gh_log), [], "branch mode never calls gh")
+        self.assertEqual(self.git("branch", "--show-current").strip(), "main")
+        self.assertEqual(self.calls(self.gh_log), [])
+
+    def test_git_status_counts_the_commits_and_reports_idle(self):
+        self.write_mode("branch")
+        one = self.new_task("fix alpha", "alpha.txt")
+        two = self.new_task("fix beta", "beta.txt")
+        self.implement(one)
+        self.implement(two)
+        batch = branching.git_status(self.project, self.cfg)["batch"]
+        self.assertEqual(batch["commits"], 0)
+        self.assertFalse(batch["idle"], "tasks are still active")
+
+        self.commit(one)
+        batch = branching.git_status(self.project, self.cfg)["batch"]
+        self.assertEqual(batch["commits"], 1)
+        self.assertFalse(batch["idle"])
+
+        self.commit(two)
+        batch = branching.git_status(self.project, self.cfg)["batch"]
+        self.assertEqual(batch["commits"], 2)
+        self.assertTrue(batch["idle"])
+
+
+class SessionBranchTest(FlowCase):
+    """One branch per chat session: the tasks keep joining it until it is finished."""
+
+    def test_a_second_task_after_a_commit_joins_the_same_branch(self):
+        self.write_mode("branch")
+        one = self.new_task("fix alpha", "alpha.txt")
+        two = self.new_task("fix beta", "beta.txt")
+        self.implement(one)
+        out = self.commit(one)
+        self.assertIn("All tasks on branch fix/alpha are done", out)
+        self.assertEqual(branching.open_batch(self.project)["tasks"], [one.id])
+
+        out = self.implement(two)
+        self.assertIn(f"{two.id} works on fix/alpha", out)
+        self.assertEqual(branching.open_batch(self.project)["branch"], "fix/alpha")
+        self.assertEqual(branching.open_batch(self.project)["tasks"], [one.id, two.id])
+        branches = self.git("branch", "--list", "--format=%(refname:short)").split()
+        self.assertEqual([name for name in branches if name.startswith("fix/")], ["fix/alpha"],
+                         "no new branch for the second task")
+        self.assertEqual(self.git("branch", "--show-current").strip(), "fix/alpha")
+
+        self.commit(two)
+        self.assertEqual(branching.git_status(self.project, self.cfg)["batch"]["commits"], 2)
+
+    def test_finish_refuses_while_a_task_is_still_active(self):
+        self.write_mode("branch")
+        task = self.new_task("fix active", "alpha.txt")
+        branching.start_if_needed(self.project, task, self.cfg)
+        tasks.claim_active(self.project, task)
+        with self.assertRaisesRegex(FlowError, f"tasks are still active on fix/active: {task.id}"):
+            branching.finish(self.project, self.cfg, push=False)
+        self.assertIsNotNone(branching.open_batch(self.project))
+        tasks.release_active(self.project, task)
+
+    def test_finish_refuses_when_no_branch_is_open(self):
+        with self.assertRaisesRegex(FlowError, "no open branch to finish"):
+            branching.finish(self.project, self.cfg, push=False)
+
+    def test_finish_stays_on_the_branch_when_the_tree_is_dirty(self):
+        self.write_mode("branch")
+        task = self.new_task("fix dirty", "dirty.txt")
+        self.implement(task)
+        self.commit(task)
+        (self.project / "README.md").write_text("changed\n")
+
+        lines = branching.finish(self.project, self.cfg, push=False)
+        self.assertEqual(lines, ["branch fix/dirty finished (1 commit(s)); not pushed",
+                                 "stayed on fix/dirty: uncommitted changes in README.md; "
+                                 "run `git switch main` yourself"])
+        self.assertEqual(self.git("branch", "--show-current").strip(), "fix/dirty")
+        self.assertFalse(branching.last_closed(self.project)["switched_back"])
+
+    def test_finish_switches_back_with_an_untracked_file(self):
+        self.write_mode("branch")
+        task = self.new_task("fix stray", "stray.txt")
+        self.implement(task)
+        self.commit(task)
+        (self.project / "untracked.txt").write_text("kept\n")
+
+        lines = branching.finish(self.project, self.cfg, push=False)
+        self.assertEqual(lines, ["branch fix/stray finished (1 commit(s)); not pushed",
+                                 "switched back to main"])
+        self.assertEqual(self.git("branch", "--show-current").strip(), "main")
+        self.assertEqual((self.project / "untracked.txt").read_text(), "kept\n",
+                         "git switch carries the untracked file over")
+
+    def test_the_prompt_tells_a_new_chat_about_the_open_branch(self):
+        self.write_mode("branch")
+        task = self.new_task("fix prompt", "prompt.txt")
+        self.assertNotIn("Open branch from an earlier chat",
+                         session.orchestrator_prompt(self.cfg, self.project))
+        branching.start_if_needed(self.project, task, self.cfg)
+        prompt = session.orchestrator_prompt(self.cfg, self.project)
+        self.assertIn("## Open branch from an earlier chat", prompt)
+        self.assertIn("fix/prompt", prompt)
+        self.assertIn("0 commit(s)", prompt)
+        self.assertIn(task.id, prompt)
+
+        branching.finish(self.project, self.cfg, push=False)
+        self.assertNotIn("Open branch from an earlier chat",
+                         session.orchestrator_prompt(self.cfg, self.project))
 
 
 class PrModeTest(FlowCase):
-    def test_pr_opens_after_the_last_task_of_the_batch_is_committed(self):
+    def test_nothing_is_pushed_after_the_last_task_is_committed(self):
         self.write_mode("pr")
         one = self.new_task("fix alpha", "alpha.txt")
         two = self.new_task("fix beta", "beta.txt")
@@ -230,38 +343,73 @@ class PrModeTest(FlowCase):
         self.assertIn(f"{two.id} works on fix/alpha", out)
 
         self.commit(one)
-        self.assertIsNone(branching.last_closed(self.project), "the batch is still open")
+        self.assertIsNone(branching.last_closed(self.project), "the branch is still open")
         self.assertEqual(self.calls(self.gh_log), [], "no pull request before the last commit")
         self.assertEqual(branching.open_batch(self.project)["tasks"], [one.id, two.id])
 
+        out = self.commit(two)
+        self.assertIn("All tasks on branch fix/alpha are done (2 commit(s) since main).", out)
+        self.assertIn("Ask the user whether to open a pull request into main now.", out)
+        self.assertIn("`aaagent pr`", out)
+        self.assertEqual(self.calls(self.gh_log), [], "nothing is pushed without `aaagent pr`")
+        self.assertNotIn("fix/alpha", self.origin_branches(), "the branch was not pushed")
+        self.assertTrue(branching.batch_file(self.project).exists())
+        self.assertIsNone(branching.last_closed(self.project))
+        self.assertEqual(self.git("branch", "--show-current").strip(), "fix/alpha")
+
+    def test_pr_finishes_the_idle_branch_and_switches_back(self):
+        self.write_mode("pr")
+        one = self.new_task("fix alpha", "alpha.txt")
+        two = self.new_task("fix beta", "beta.txt")
+        self.implement(one)
+        self.implement(two)
+        self.commit(one)
         self.commit(two)
+        commits = self.git("log", "--format=%h", "main..fix/alpha").split()
+        self.assertEqual(len(commits), 2)
+        self.assertEqual(self.calls(self.gh_log), [])
+
+        lines = branching.retry_pr(self.project, self.cfg)
+        self.assertEqual(lines, [f"pull request: {GH_URL}", "switched back to main"])
         closed = branching.last_closed(self.project)
         self.assertIsNotNone(closed)
         self.assertFalse(branching.batch_file(self.project).exists())
+        self.assertEqual(len(list(branching.batches_dir(self.project).glob("*.json"))), 1)
         self.assertEqual(closed["branch"], "fix/alpha")
         self.assertEqual(closed["tasks"], [one.id, two.id])
         self.assertEqual(len(closed["commits"]), 2)
-        self.assertIsNone(closed["pr_error"])
         self.assertEqual(closed["pr_url"], GH_URL)
+        self.assertIsNone(closed["pr_error"])
+        self.assertTrue(closed["switched_back"])
+        self.assertEqual(self.git("branch", "--show-current").strip(), "main")
         self.assertIn("fix/alpha", self.origin_branches(), "the branch was pushed to origin")
         gh_calls = self.calls(self.gh_log)
-        self.assertEqual(len(gh_calls), 1, "one pull request for the batch")
+        self.assertEqual(len(gh_calls), 1, "one pull request for the branch")
         call = gh_calls[0]
         self.assertEqual(call[:2], ["pr", "create"])
         self.assertEqual(call[call.index("--base") + 1], "main")
         self.assertEqual(call[call.index("--head") + 1], "fix/alpha")
-        self.assertEqual(self.git("branch", "--show-current").strip(), "fix/alpha")
+        body = call[call.index("--body") + 1]
+        for sha in commits:
+            self.assertIn(sha, body, "the pull request body lists both commits")
+        self.assertIn(one.id, body)
+        self.assertIn(two.id, body)
 
     def test_a_failed_pull_request_is_recorded_and_retried(self):
         self.write_mode("pr")
         task = self.new_task("feat gamma", "gamma.txt")
         self.implement(task)
-        os.environ["FAKE_GH_FAIL"] = "1"
         out = self.commit(task)
-        self.assertIn("run `aaagent pr` to retry", out)
+        self.assertIn("`aaagent pr`", out)
+
+        os.environ["FAKE_GH_FAIL"] = "1"
+        lines = branching.retry_pr(self.project, self.cfg)
+        self.assertIn("run `aaagent pr` to retry", lines)
         closed = branching.last_closed(self.project)
         self.assertIsNone(closed["pr_url"])
         self.assertIn("could not create pull request", closed["pr_error"])
+        self.assertEqual(self.git("branch", "--show-current").strip(), "main",
+                         "the checkout still goes back to the base branch")
 
         os.environ.pop("FAKE_GH_FAIL", None)
         lines = branching.retry_pr(self.project, self.cfg)
@@ -274,15 +422,19 @@ class PrModeTest(FlowCase):
         self.assertEqual(branching.retry_pr(self.project, self.cfg),
                          ["no finished branch to open a pull request for"])
 
-    def test_pr_switched_on_mid_batch_applies_at_its_end(self):
+    def test_pr_switched_on_mid_branch_asks_at_its_end(self):
         self.write_mode("branch")
         task = self.new_task("feat epsilon", "epsilon.txt")
         self.implement(task)
-        self.assertEqual(self.calls(self.gh_log), [], "branch mode never pushes")
         self.write_mode("pr")
-        self.commit(task)
+        out = self.commit(task)
+        self.assertIn("`aaagent pr`", out)
+        self.assertEqual(self.calls(self.gh_log), [], "branch mode never pushes")
+
+        branching.retry_pr(self.project, self.cfg)
         self.assertEqual(branching.last_closed(self.project)["pr_url"], GH_URL)
         self.assertIn("feat/epsilon", self.origin_branches())
+        self.assertEqual(self.git("branch", "--show-current").strip(), "main")
 
 
 class TimeoutTest(FlowCase):
@@ -308,8 +460,9 @@ class TimeoutTest(FlowCase):
         """open_pr must not run under the project-wide active-task flock."""
         self.write_mode("pr")
         task = self.new_task("feat zeta", "zeta.txt")
-        self.implement(task)                      # opens the batch and claims the task
+        self.implement(task)                      # opens the branch and claims the task
         other = self.new_task("feat eta", "eta.txt")
+        self.commit(task)                         # the branch stays open, with one commit
         depths = []
         real_open_pr = branching.open_pr
 
@@ -320,10 +473,11 @@ class TimeoutTest(FlowCase):
             return real_open_pr(project, record)
 
         with mock.patch.object(branching, "open_pr", side_effect=spy_open_pr):
-            self.commit(task)
+            lines = branching.retry_pr(self.project, self.cfg)
         self.assertEqual(depths, [0], "open_pr runs with no active-task lock held")
         self.assertEqual(tasks.active_tasks(self.project), [other.id])
         self.assertEqual(branching.last_closed(self.project)["pr_url"], GH_URL)
+        self.assertIn(f"pull request: {GH_URL}", lines)
 
 
 class JoinTest(FlowCase):
@@ -341,16 +495,19 @@ class JoinTest(FlowCase):
 
 
 class AbandonTest(RepoCase):
-    def test_abandoning_the_only_task_closes_the_batch(self):
+    def test_abandoning_the_only_task_deletes_the_empty_branch(self):
         self.write_mode("branch")
         task = self.new_task("fix login crash", "alpha.txt")
         branching.start_if_needed(self.project, task, self.cfg)
         tasks.claim_active(self.project, task)
         text = dispatch.abandon(self.project, task.id)
-        self.assertIn("branch fix/login-crash done (0 commits); not pushed (branch_mode = branch)",
+        self.assertIn("branch fix/login-crash had no commits; switched back to main and deleted it",
                       text)
         self.assertFalse(branching.batch_file(self.project).exists())
         self.assertEqual(branching.last_closed(self.project)["branch"], "fix/login-crash")
+        self.assertEqual(self.git("branch", "--show-current").strip(), "main")
+        self.assertNotIn("fix/login-crash",
+                         self.git("branch", "--list", "--format=%(refname:short)"))
 
 
 class DetachedHeadTest(RepoCase):
@@ -398,7 +555,8 @@ class GitStatusTest(RepoCase):
         data = status.status_data(self.project, self.cfg)
         self.assertEqual(data["git"]["branch"], "fix/login-crash")
         self.assertEqual(data["git"]["batch"],
-                         {"branch": "fix/login-crash", "base": "main", "tasks": [task.id]})
+                         {"branch": "fix/login-crash", "base": "main", "tasks": [task.id],
+                          "commits": 0, "idle": True})
 
 
 if __name__ == "__main__":

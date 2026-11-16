@@ -156,24 +156,85 @@ test("gitItem shows the branch mode and the checked-out branch", () => {
 
   const branch = model.gitItem({ mode: "branch", branch: "feat/branch-mode", batch: null, last_pr: null });
   assert.strictEqual(branch.label, "Git: New branch");
-  assert.match(branch.tooltip, /One feat\/… or fix\/… branch per batch of tasks/);
+  assert.match(branch.tooltip, /One branch per chat session; the planner asks before finishing it/);
 
   const pr = model.gitItem({ mode: "pr", branch: "fix/login-crash", batch: null, last_pr: null });
   assert.strictEqual(pr.label, "Git: New branch + pull request");
   assert.deepStrictEqual(pr.icon, { id: "git-pull-request" });
-  assert.match(pr.tooltip, /open a PR \(gh\)/);
+  assert.match(pr.tooltip, /One branch per chat session; the planner asks before opening the PR/);
+});
+
+test("gitItem shows No Git as its own mode", () => {
+  const none = model.gitItem({ mode: "none", branch: null, batch: null, last_pr: null });
+  assert.strictEqual(none.id, "git");
+  assert.strictEqual(none.label, "Git: No Git");
+  assert.strictEqual(none.description, "own history");
+  assert.strictEqual(none.contextValue, "git");
+  assert.deepStrictEqual(none.icon, { id: "circle-slash" });
+  assert.match(none.tooltip, /^No repository needed; aaagent keeps its own history in \.aaagent\/shadow\.git/);
+  assert.match(none.tooltip, /Click to change$/);
 });
 
 test("gitItem describes the open batch, its base and its tasks", () => {
   const item = model.gitItem({
     mode: "branch", branch: "fix/login-crash",
-    batch: { branch: "fix/login-crash", base: "main", tasks: ["022-branch-mode", "023-pr"] },
+    batch: { branch: "fix/login-crash", base: "main", tasks: ["022-branch-mode", "023-pr"], commits: 3 },
     last_pr: null,
   });
   assert.strictEqual(item.description, "on fix/login-crash (from main)");
   assert.match(item.tooltip, /batch: fix\/login-crash from main/);
+  assert.match(item.tooltip, /commits: 3/);
   assert.match(item.tooltip, /tasks: 022-branch-mode, 023-pr/);
+  assert.doesNotMatch(item.tooltip, /all tasks done/);
   assert.deepStrictEqual(item.icon, { id: "git-branch" });
+});
+
+test("gitItem says an idle branch with commits waits for the user", () => {
+  const batch = { branch: "feat/x", base: "main", tasks: ["001-a"], commits: 2, idle: true };
+  const pr = model.gitItem({ mode: "pr", branch: "feat/x", batch, last_pr: null });
+  assert.strictEqual(pr.description, "on feat/x (from main) · waiting: PR?");
+  assert.match(pr.tooltip, /commits: 2/);
+  assert.match(pr.tooltip, /all tasks done \(2 commits\): the planner asks whether to open the pull request/);
+
+  const branch = model.gitItem({ mode: "branch", branch: "feat/x", batch, last_pr: null });
+  assert.strictEqual(branch.description, "on feat/x (from main) · waiting: finish?");
+  assert.match(branch.tooltip, /all tasks done \(2 commits\): the planner asks whether to finish the branch/);
+
+  const busy = model.gitItem({
+    mode: "pr", branch: "feat/x",
+    batch: { ...batch, idle: false }, last_pr: null,
+  });
+  assert.strictEqual(busy.description, "on feat/x (from main)");
+  assert.doesNotMatch(busy.tooltip, /all tasks done/);
+
+  const fresh = model.gitItem({
+    mode: "pr", branch: "feat/x",
+    batch: { ...batch, commits: 0 }, last_pr: null,
+  });
+  assert.strictEqual(fresh.description, "on feat/x (from main)");
+});
+
+test("gitItem shows pr-auto with the pull request icon and its own idle hint", () => {
+  const auto = model.gitItem({ mode: "pr-auto", branch: "feat/x", batch: null, last_pr: null });
+  assert.strictEqual(auto.label, "Git: New branch + pull request (auto)");
+  assert.strictEqual(auto.description, "on feat/x");
+  assert.deepStrictEqual(auto.icon, { id: "git-pull-request" });
+  assert.match(auto.tooltip,
+    /the planner opens the PR itself when your request is done, then the chat restarts/);
+
+  const batch = { branch: "feat/x", base: "main", tasks: ["001-a"], commits: 2, idle: true };
+  const idle = model.gitItem({ mode: "pr-auto", branch: "feat/x", batch, last_pr: null });
+  assert.strictEqual(idle.description, "on feat/x (from main) · auto PR pending");
+  assert.match(idle.tooltip,
+    /all tasks done \(2 commits\): the planner opens the pull request when your request is done, then the chat restarts/);
+  assert.deepStrictEqual(idle.icon, { id: "git-pull-request" });
+
+  const busy = model.gitItem({
+    mode: "pr-auto", branch: "feat/x",
+    batch: { ...batch, idle: false }, last_pr: null,
+  });
+  assert.strictEqual(busy.description, "on feat/x (from main)");
+  assert.doesNotMatch(busy.tooltip, /all tasks done/);
 });
 
 test("gitItem marks a failed PR unless a batch is open", () => {
@@ -204,16 +265,27 @@ test("gitItem handles a missing mode, a detached HEAD and no input", () => {
   assert.strictEqual(model.gitItem(null).description, "detached HEAD");
 });
 
-test("branchModeChoices lists current, branch, pr and marks the active one", () => {
+test("branchModeChoices lists the five modes and marks the active one", () => {
   const choices = model.branchModeChoices("pr");
-  assert.deepStrictEqual(choices.map((c) => c.mode), ["current", "branch", "pr"]);
+  assert.deepStrictEqual(choices.map((c) => c.mode), ["current", "branch", "pr", "pr-auto", "none"]);
   assert.deepStrictEqual(choices.map((c) => c.label),
-    ["Current branch", "New branch", "New branch + pull request"]);
-  assert.deepStrictEqual(choices.map((c) => c.description), [undefined, undefined, "current"]);
+    ["Current branch", "New branch", "New branch + pull request",
+      "New branch + pull request (auto)", "No Git"]);
+  assert.deepStrictEqual(choices.map((c) => c.description),
+    [undefined, undefined, "current", undefined, undefined]);
   assert.match(choices[0].detail, /checked-out branch/);
+  assert.match(choices[1].detail, /one branch per chat session/i);
+  assert.match(choices[3].detail,
+    /the planner opens the PR itself when your request is done, then the chat restarts/);
+  assert.match(choices[4].detail, /\.aaagent\/shadow\.git/);
   assert.deepStrictEqual(model.branchModeChoices("current").map((c) => c.description),
-    ["current", undefined, undefined]);
-  assert.deepStrictEqual(model.branchModeChoices(undefined).map((c) => c.mode), ["current", "branch", "pr"]);
+    ["current", undefined, undefined, undefined, undefined]);
+  assert.deepStrictEqual(model.branchModeChoices("pr-auto").map((c) => c.description),
+    [undefined, undefined, undefined, "current", undefined]);
+  assert.deepStrictEqual(model.branchModeChoices("none").map((c) => c.description),
+    [undefined, undefined, undefined, undefined, "current"]);
+  assert.deepStrictEqual(model.branchModeChoices(undefined).map((c) => c.mode),
+    ["current", "branch", "pr", "pr-auto", "none"]);
 });
 
 test("reviewerItem shows the planner when the chat reviews", () => {

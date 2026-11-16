@@ -78,7 +78,7 @@ It also cleans up an install from before the rename (the `aa` command, `aa-*` ag
 
 After installing, run **Developer: Reload Window** once. Then:
 
-1. Open a project folder (a git repository) and click the **aaagent** icon in the activity bar.
+1. Open a project folder (a git repository, or any folder in No Git mode) and click the **aaagent** icon in the activity bar.
 2. Click **New Session** (or run `aaagent: Ask Opus…` from the command palette and type the request). **New Session** closes the open chat and starts a fresh one; **Restore Previous Session…** reopens an earlier one, and **Open Chat** is in the Sessions view's `…` menu.
    The Opus chat opens as an editor tab, and each worker (and the reviewer, when a model reviews) opens as a split terminal in the panel.
 3. Talk to Opus. The sidebar follows along:
@@ -105,7 +105,7 @@ Settings: `aaagent.chatLocation` (`editor` or `panel`), `aaagent.notifications` 
 ## Use in a terminal
 
 ```bash
-cd ~/my-project    # any git repository (aaagent offers `git init` if it isn't one)
+cd ~/my-project    # any git repository (aaagent offers `git init` or No Git if it isn't one)
 aaagent            # open the chat
 aaagent "add a /health endpoint with a test"   # open the chat with a first request
 aaagent -c         # reopen this project's last chat
@@ -198,8 +198,9 @@ Opus runs these itself. They are also useful for you:
 | `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner, reviewer and worker models |
 | `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner, reviewer and worker thinking levels |
 | `aaagent reviewer [<model\|planner\|worker>] [--thinking LEVEL]` | show or set who reviews each round: a model with its own job, or planner (the chat); a worker name copies its model |
-| `aaagent branch-mode [current\|branch\|pr] [--json]` | show or set where tasks commit: the current branch, a branch per batch, or that plus a pull request |
-| `aaagent pr` | push the last finished branch and open (or retry) its pull request |
+| `aaagent branch-mode [current\|branch\|pr\|pr-auto\|none] [--json]` | show or set where tasks commit: the current branch, a new branch per chat session, that plus a pull request, that without asking and with a chat restart, or no git at all |
+| `aaagent pr` | finish the open branch: push it, open its pull request and switch back to the base branch (or retry the last failed one) |
+| `aaagent branch-done` | finish the open branch without pushing and switch back to the base branch |
 | `aaagent --model <name>` | start the chat with another planner model for this chat only |
 | `aaagent --session <id>` | reopen a chat session (an id or id prefix from `aaagent sessions`) |
 | `aaagent doctor` | check the installation |
@@ -232,16 +233,38 @@ By default tasks commit on the branch that is checked out. `[git] branch_mode` c
 | mode | where the work lands |
 |---|---|
 | `current` | the branch that is checked out (the default) |
-| `branch` | a new branch per batch of tasks (`feat/…`, `fix/…`); the checkout stays on it afterwards |
-| `pr` | like `branch`, and when the last task of the batch is committed aaagent pushes the branch to `origin` and opens a pull request with `gh` |
+| `branch` | one new branch per chat session (`feat/…`, `fix/…`); every task in the session commits on it |
+| `pr` | like `branch`, and the branch becomes one pull request when you say yes |
+| `pr-auto` | like `pr`, but the planner opens the pull request without asking and the chat restarts afterwards with a summary of it |
 
-A **batch** is one branch's worth of work: it starts at the first `aaagent dispatch` while no task is active, every task that becomes active while it is open joins it, and it closes when the last of them is committed or abandoned. Tasks that run in parallel (disjoint `files:`) therefore share one branch.
+A **session branch** starts at the first `aaagent dispatch` of a chat while no branch is open. Every task dispatched while it is open joins it with its own commit — also tasks dispatched later, after a pause with no active task — so one chat's work lands on one branch instead of a branch and a pull request per group of tasks. Tasks that run in parallel (disjoint `files:`) therefore share one branch too.
 
-The branch name comes from the plan's `branch:` frontmatter when it has one, otherwise from the task's title: a leading `fix`, `bug`, `bugfix`, `hotfix`, `docs`, `doc`, `refactor`, `test`, `tests`, `chore`, `feat` or `feature` word becomes the prefix (`021-fix-login-crash` → `fix/login-crash`), anything else is `feat/` (`022-branch-mode-tui` → `feat/branch-mode-tui`). A name that is already taken gets `-2`, `-3`, … appended.
+The branch name comes from the first plan's `branch:` frontmatter when it has one, otherwise from the task's title: a leading `fix`, `bug`, `bugfix`, `hotfix`, `docs`, `doc`, `refactor`, `test`, `tests`, `chore`, `feat` or `feature` word becomes the prefix (`021-fix-login-crash` → `fix/login-crash`), anything else is `feat/` (`022-branch-mode-tui` → `feat/branch-mode-tui`). A name that is already taken gets `-2`, `-3`, … appended. Later plans' `branch:` is ignored while the branch is open.
 
-`aaagent branch-mode` shows the mode with the current branch and the open batch, `aaagent branch-mode branch` (or `current`, `pr`) sets it in this project's config, and `aaagent branch-mode --json` prints it for machines. Switching the mode while a batch is open takes effect for that batch's end (`pr` or not) and for the next batch.
+When the last active task on the branch is committed, aaagent prints that the tasks are done and tells the planner to **ask you**; nothing is pushed yet. The branch stays open until the planner runs one of these after your yes:
 
-In `pr` mode, `gh` (the GitHub CLI) must be installed and logged in, and `origin` must be a GitHub repository. The push and the pull request happen after the commit, and a failure never fails the commit: it is recorded in `.aaagent/batches/` and printed, and `aaagent pr` retries it (also for a `branch`-mode batch that was never pushed).
+- `aaagent pr` pushes the branch to `origin`, opens one pull request with `gh` (its body lists every commit and task on the branch), and switches the checkout back to the base branch.
+- `aaagent branch-done` switches the checkout back to the base branch; nothing is pushed.
+
+Both refuse while a task is still active. On no, keep working: new tasks join the open branch, and the question comes again when they are done. An idle branch with no commits at all (for example its only task was abandoned) closes itself, returns to the base branch and is deleted.
+
+`aaagent branch-mode` shows the mode with the current branch and the open branch, `aaagent branch-mode branch` (or `current`, `pr`, `pr-auto`, `none`) sets it in this project's config, and `aaagent branch-mode --json` prints it for machines. Switching the mode while a branch is open changes which command the planner asks you about at its end.
+
+In `pr` mode, `gh` (the GitHub CLI) must be installed and logged in, and `origin` must be a GitHub repository. A push or pull request failure never fails the commit: it is recorded in `.aaagent/batches/` and printed, and `aaagent pr` retries it (also for a branch that was finished in `branch` mode and never pushed).
+
+In `pr-auto` mode the planner never asks: once every task it planned for your request is committed, it runs `aaagent pr` by itself. The pull request is pushed and opened exactly as in `pr` mode, and the checkout returns to the base branch. aaagent then leaves `.aaagent/new-chat-pending.json`, and the chat is replaced by a fresh one that opens with a short summary of the pull request, so your next request starts cleanly on the base branch. If the push or the pull request fails, the same thing happens, and the new chat offers to retry with `aaagent pr`.
+
+### No Git
+
+Use No Git when the folder cannot or must not be a git repository: a shared or synced folder, a checkout managed by another tool, or a project whose git history aaagent must never touch.
+
+Choose it in the start-up prompt (in a folder that is not a repository, `aaagent` offers `git init` or No Git), with `aaagent branch-mode none`, or with `[git] branch_mode = "none"` in the project's config.
+
+In No Git mode aaagent keeps its own hidden repository in `.aaagent/shadow.git`, with the project folder as its work tree and the project's `.gitignore` files honoured. `git status`, `git diff` and `git log` — in the chat and in the workers — read that history, so diffs and reviews work as usual. An approved task becomes a checkpoint commit there instead of a worker commit job (there is no commit job at all); the planner reports the checkpoint id instead of a commit hash. There are no branches, no pull requests and no pushes, and a real repository in the folder is never touched.
+
+The `git` program is still required: aaagent runs it against the shadow repository.
+
+Switching to or from `none` is refused while tasks are active or a branch is open, and leaving `none` needs a real repository in the folder. After switching the mode, restart the chat so its own git commands follow the new one.
 
 ### Images
 
@@ -254,7 +277,7 @@ Code enforces these; they are not just prompt instructions:
 - **Opus cannot edit project files.** A hook blocks its edit tools outside `.aaagent/`, and `git commit`/`git push` are denied for it.
 - **Implementing workers cannot commit.** `aaagent-worker` denies `git commit/push/reset/rebase/clean/stash/checkout/switch`, `sudo`, destructive `docker` commands, files outside the project, `.env` files, and edits to plans and reviews.
 - **The commit step happens only after approval.** `aaagent dispatch` sends a commit job only when the latest review says `verdict: approved`. The `aaagent-committer` agent cannot edit files and can only run git status/diff/log/add/commit; `--amend` and `add -A`/`add .` are denied.
-- **Nothing is pushed unless `branch_mode = "pr"`.** In pr mode aaagent pushes only the batch's branch to `origin` and opens its pull request; everything else is up to you.
+- **Nothing is pushed until you say yes.** Only `aaagent pr` pushes a branch to `origin` and opens its pull request; `aaagent branch-done` finishes the branch without touching the network, and nothing else does either. Everything else is up to you.
 - **Parallel tasks only with disjoint `files:`.** Several tasks may be active in one working tree, but only when every plan declares the files it may change and those lists do not overlap; anything else keeps the working tree to one task.
 - **Your own uncommitted changes stay out of the commit.** Files that were already modified when a task started are listed and excluded from its commit.
 - **Escalation:** a failed implement/fix job is retried once on the fallback worker; a failed review is retried once on the reviewer itself, then the round goes back to the planner. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
@@ -291,7 +314,7 @@ job_timeout_minutes = 30
 
 [git]
 commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@example.invalid>"
-branch_mode = "current"           # current = the checked-out branch; branch = a branch per batch; pr = that + push and pull request
+branch_mode = "current"           # current = the checked-out branch; branch = a branch per chat session; pr = that + push and pull request when you say yes; pr-auto = that without asking, then the chat restarts; none = No Git, aaagent keeps its own history in .aaagent/shadow.git
 ```
 
 `opencode models` lists the model ids you can use. `aaagent workers add|remove` edits the worker list for you; a new worker gets its own pane the next time you run `aaagent`.
@@ -307,9 +330,10 @@ branch_mode = "current"           # current = the checked-out branch; branch = a
   workers/          worker pids and logs
   attachments/      images from `aaagent attach`
   fetch/            image copy requests between the chat and VSCode
+  shadow.git/       aaagent's own git history in No Git mode
   active-tasks.json which tasks are running in this working tree now
-  batch.json        the open branch and the tasks that share it
-  batches/          every closed batch, with its commits and pull request
+  batch.json        the open session branch and the tasks that share it
+  batches/          every finished branch, with its commits and pull request
   chat.json         the last chat's session id, for `aaagent -c`
   sessions.json     the chat sessions and the tasks each one created
   chat-pane         the tmux pane of the chat, for `aaagent attach`
