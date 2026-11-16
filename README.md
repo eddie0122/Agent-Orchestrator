@@ -198,7 +198,7 @@ Opus runs these itself. They are also useful for you:
 | `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner, reviewer and worker models |
 | `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner, reviewer and worker thinking levels |
 | `aaagent reviewer [<model\|planner\|worker>] [--thinking LEVEL]` | show or set who reviews each round: a model with its own job, or planner (the chat); a worker name copies its model |
-| `aaagent branch-mode [current\|branch\|pr\|none] [--json]` | show or set where tasks commit: the current branch, a new branch per chat session, that plus a pull request, or no git at all |
+| `aaagent branch-mode [current\|branch\|pr\|pr-auto\|none] [--json]` | show or set where tasks commit: the current branch, a new branch per chat session, that plus a pull request, that without asking and with a chat restart, or no git at all |
 | `aaagent pr` | finish the open branch: push it, open its pull request and switch back to the base branch (or retry the last failed one) |
 | `aaagent branch-done` | finish the open branch without pushing and switch back to the base branch |
 | `aaagent --model <name>` | start the chat with another planner model for this chat only |
@@ -235,6 +235,7 @@ By default tasks commit on the branch that is checked out. `[git] branch_mode` c
 | `current` | the branch that is checked out (the default) |
 | `branch` | one new branch per chat session (`feat/…`, `fix/…`); every task in the session commits on it |
 | `pr` | like `branch`, and the branch becomes one pull request when you say yes |
+| `pr-auto` | like `pr`, but the planner opens the pull request without asking and the chat restarts afterwards with a summary of it |
 
 A **session branch** starts at the first `aaagent dispatch` of a chat while no branch is open. Every task dispatched while it is open joins it with its own commit — also tasks dispatched later, after a pause with no active task — so one chat's work lands on one branch instead of a branch and a pull request per group of tasks. Tasks that run in parallel (disjoint `files:`) therefore share one branch too.
 
@@ -247,9 +248,11 @@ When the last active task on the branch is committed, aaagent prints that the ta
 
 Both refuse while a task is still active. On no, keep working: new tasks join the open branch, and the question comes again when they are done. An idle branch with no commits at all (for example its only task was abandoned) closes itself, returns to the base branch and is deleted.
 
-`aaagent branch-mode` shows the mode with the current branch and the open branch, `aaagent branch-mode branch` (or `current`, `pr`, `none`) sets it in this project's config, and `aaagent branch-mode --json` prints it for machines. Switching the mode while a branch is open changes which command the planner asks you about at its end.
+`aaagent branch-mode` shows the mode with the current branch and the open branch, `aaagent branch-mode branch` (or `current`, `pr`, `pr-auto`, `none`) sets it in this project's config, and `aaagent branch-mode --json` prints it for machines. Switching the mode while a branch is open changes which command the planner asks you about at its end.
 
 In `pr` mode, `gh` (the GitHub CLI) must be installed and logged in, and `origin` must be a GitHub repository. A push or pull request failure never fails the commit: it is recorded in `.aaagent/batches/` and printed, and `aaagent pr` retries it (also for a branch that was finished in `branch` mode and never pushed).
+
+In `pr-auto` mode the planner never asks: once every task it planned for your request is committed, it runs `aaagent pr` by itself. The pull request is pushed and opened exactly as in `pr` mode, and the checkout returns to the base branch. aaagent then leaves `.aaagent/new-chat-pending.json`, and the chat is replaced by a fresh one that opens with a short summary of the pull request, so your next request starts cleanly on the base branch. If the push or the pull request fails, the same thing happens, and the new chat offers to retry with `aaagent pr`.
 
 ### No Git
 
@@ -311,7 +314,7 @@ job_timeout_minutes = 30
 
 [git]
 commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@example.invalid>"
-branch_mode = "current"           # current = the checked-out branch; branch = a branch per chat session; pr = that + push and pull request when you say yes; none = No Git, aaagent keeps its own history in .aaagent/shadow.git
+branch_mode = "current"           # current = the checked-out branch; branch = a branch per chat session; pr = that + push and pull request when you say yes; pr-auto = that without asking, then the chat restarts; none = No Git, aaagent keeps its own history in .aaagent/shadow.git
 ```
 
 `opencode models` lists the model ids you can use. `aaagent workers add|remove` edits the worker list for you; a new worker gets its own pane the next time you run `aaagent`.

@@ -355,7 +355,7 @@ class ChangeModeTest(NoGitCase):
         self.assertEqual(branching.change_mode(self.project, "NONE"), ["branch mode: none"])
 
     def test_an_unknown_mode_lists_the_choices(self):
-        with self.assertRaisesRegex(FlowError, "choices: current, branch, pr, none"):
+        with self.assertRaisesRegex(FlowError, "choices: current, branch, pr, pr-auto, none"):
             branching.change_mode(self.project, "git")
 
     def test_none_to_a_git_mode_needs_a_repository(self):

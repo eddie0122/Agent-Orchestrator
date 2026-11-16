@@ -1,15 +1,18 @@
-"""One session branch at a time: `[git] branch_mode = current | branch | pr | none`.
+"""One session branch at a time: `[git] branch_mode = current | branch | pr | pr-auto | none`.
 
 A working tree has one branch checked out, so a branch belongs to a chat session. It starts at
 the first `aaagent dispatch` of a task while no batch is open, every task dispatched while it is
 open joins it (also after a pause with no active task), and it ends only when `aaagent pr` or
 `aaagent branch-done` finishes it — or by itself, without pushing and with the branch deleted,
 when it goes idle with no commits at all. When its last active task is committed, the branch
-stays open and the lines that dispatch prints tell the planner to ask the user what to do.
+stays open and the lines that dispatch prints tell the planner to ask the user what to do; in
+`pr-auto` mode they tell the planner to run `aaagent pr` by itself. That pull request leaves
+`.aaagent/new-chat-pending.json`, so the chat restarts with a summary of the pull request.
 
 Files, inside `.aaagent/`:
     batch.json                                   the open batch (session branch)
     batches/<YYYYmmdd-HHMMSS>-<branch>.json      every finished branch
+    new-chat-pending.json                        a pr-auto pull request: the chat restarts
 """
 
 from __future__ import annotations
@@ -43,6 +46,11 @@ def batch_file(project: Path) -> Path:
 
 def batches_dir(project: Path) -> Path:
     return tasks.agent_dir(project) / "batches"
+
+
+def new_chat_pending_file(project: Path) -> Path:
+    """The marker that asks for a fresh chat after a `pr-auto` pull request."""
+    return tasks.agent_dir(project) / "new-chat-pending.json"
 
 
 def _load_json(path: Path) -> dict | None:
@@ -273,6 +281,13 @@ def on_idle(project: Path, cfg: Config) -> list[str]:
                 f"`aaagent pr` (it pushes, opens the pull request and switches back to {base}). "
                 f"No → keep the branch: tasks dispatched later join it, so ask again when they "
                 f"are done.")
+        elif mode == "pr-auto":
+            lines.append(
+                f"branch_mode is pr-auto: do not ask the user. If every task you planned for "
+                f"the user's current request is now committed, run `aaagent pr` yourself (it "
+                f"pushes, opens the pull request into {base} and switches back to {base}). If "
+                f"tasks of this request are still to be dispatched, dispatch them first: they "
+                f"join this branch, and you run `aaagent pr` after the last one.")
         else:
             lines.append(
                 f"Ask the user whether to finish the branch now. Yes → run `aaagent branch-done` "
@@ -476,13 +491,63 @@ def open_pr(project: Path, record: dict) -> list[str]:
     return [f"pull request: {url}"]
 
 
+def request_new_chat(project: Path, record: dict, lines: list[str]) -> Path:
+    """Write the marker that restarts the chat; its path.
+
+    `record` is the closed batch and `lines` what `finish` returned, so the new chat's first
+    message can stand on its own: its planner has not seen the old chat.
+    """
+    branch = str(record.get("branch") or "")
+    base = str(record.get("base") or "main")
+    pr_url = record.get("pr_url")
+    pr_error = record.get("pr_error")
+    commits = list(record.get("commits") or [])
+    switched = next((line for line in lines if line.startswith(
+        ("switched back to ", "stayed on ", "could not switch back to ",
+         "the checkout is on "))), "")
+    prompt = ["aaagent started this chat automatically: the previous chat's request is "
+              "finished (branch_mode = pr-auto)."]
+    if pr_url:
+        prompt.append(f"Branch {branch} was pushed and pull request {pr_url} was opened into "
+                      f"{base}.")
+        prompt.append("Commits:")
+        for commit in commits:
+            sha, subject = _commit_parts(str(commit))
+            prompt.append(f"- {subject} ({sha})")
+    else:
+        error = pr_error or "the branch had no commits"
+        prompt.append(f"Branch {branch} ({len(commits)} commit(s)) was finished, but the pull "
+                      f"request could not be opened: {error}.")
+    if switched:
+        prompt.append(switched)
+    if pr_url:
+        prompt.append("Tell me this in two or three short lines, then wait for my next request.")
+    else:
+        prompt.append("Tell me this in two or three short lines and offer to retry with "
+                      "`aaagent pr`, then wait for my next request.")
+    path = new_chat_pending_file(project)
+    _save_json(path, {"reason": "pull-request", "branch": branch, "base": base,
+                      "pr_url": pr_url, "pr_error": pr_error,
+                      "prompt": "\n".join(prompt), "at": tasks.now()})
+    return path
+
+
 def retry_pr(project: Path, cfg: Config) -> list[str]:
     """`aaagent pr`: finish the open branch, else open the newest closed batch's pull request."""
     if cfg.branch_mode == "none":
         raise tasks.FlowError("this project runs without git (branch_mode = none): there is no "
                               "branch or pull request")
     if open_batch(project) is not None:
-        return finish(project, cfg, push=True)
+        lines = finish(project, cfg, push=True)
+        if cfg.branch_mode == "pr-auto":
+            request_new_chat(project, last_closed(project) or {}, lines)
+            lines += [
+                "This chat is replaced by a new one after your reply (in aaagent's tmux "
+                "layout and in VSCode); the new chat opens with a summary of this pull request.",
+                "Give the user a short final report now: the pull request link and what it "
+                "contains.",
+            ]
+        return lines
     with tasks.active_lock(project):
         files = _closed_files(project)
         if not files:

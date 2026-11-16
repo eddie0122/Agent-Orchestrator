@@ -190,7 +190,7 @@ def cmd_reviewer(args) -> int:
 
 
 def cmd_branch_mode(args) -> int:
-    """`aaagent branch-mode [current|branch|pr|none]`: where tasks commit."""
+    """`aaagent branch-mode [current|branch|pr|pr-auto|none]`: where tasks commit."""
     project = project_root()
     cfg = Config.load(project)
     if args.json:
@@ -749,10 +749,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_workers)
 
     s = sub.add_parser("branch-mode", help="show or change where tasks commit: "
-                                            "current, branch, pr or none")
+                                            "current, branch, pr, pr-auto or none")
     s.add_argument("mode", nargs="?", type=str.lower, choices=BRANCH_MODES,
                    help="current = the checked-out branch; branch = a new branch per chat "
                         "session; pr = that, then push it and open a pull request; "
+                        "pr-auto = like pr, but the planner opens the pull request without "
+                        "asking and the chat restarts afterwards; "
                         "none = no git: aaagent keeps its own history in .aaagent/shadow.git")
     s.add_argument("--json", action="store_true",
                    help="machine-readable mode, branch, open batch and last pull request")

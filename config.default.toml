@@ -77,6 +77,8 @@ thinking = ""
 track_agent_dir = false
 # Where tasks commit: "current" = the checked-out branch; "branch" = a new branch per batch of
 # tasks (feat/…, fix/…); "pr" = like "branch", then push it and open a pull request (gh) when
-# the last task of the batch is committed. The checkout stays on the new branch.
+# the last task of the batch is committed; "pr-auto" = like "pr", but the planner opens the
+# pull request without asking and the chat restarts afterwards. The checkout stays on the
+# new branch.
 # "none" = No Git (aaagent keeps its own history in .aaagent/shadow.git)
 branch_mode = "current"
