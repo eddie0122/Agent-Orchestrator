@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import attach, branching, dispatch, gitutil, sessions, tasks, worker
 from .backends import find_claude
-from .config import REVIEWER, ROOT, Config
+from .config import REVIEWER, ROOT, Config, project_config_path, set_toml_value
 
 AAAGENT_BIN = ROOT / "bin" / "aaagent"
 HOOKS = ROOT / "claude" / "hooks"
@@ -59,7 +59,10 @@ def orchestrator_prompt(cfg: Config, project: Path | None = None) -> str:
                  "These tasks were open when this chat started:\n\n"
                  + "\n".join(f"- {line}" for line in pending) + "\n")
     if project:
-        text += open_branch_section(cfg, project)
+        if gitutil.no_git(project):
+            text += (ROOT / "prompts" / "orchestrator-no-git.md").read_text()
+        else:
+            text += open_branch_section(cfg, project)
     return text
 
 
@@ -68,11 +71,15 @@ def _hook(name: str) -> str:
 
 
 def claude_settings(project: Path) -> dict:
+    deny = ["Bash(git push*)", "Bash(git commit*)", "Bash(git reset*)"]
+    if gitutil.no_git(project):
+        # There is no repository to create: aaagent's own history lives in .aaagent/shadow.git.
+        deny.append("Bash(git init*)")
     return {
         "permissions": {
             "allow": ["Bash(aaagent *)", "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)",
                       "Bash(git show*)", "Read", "Glob", "Grep"],
-            "deny": ["Bash(git push*)", "Bash(git commit*)", "Bash(git reset*)"],
+            "deny": deny,
         },
         "hooks": {
             "PreToolUse": [{
@@ -144,30 +151,70 @@ def previous_chat(project: Path) -> str | None:
 
 
 def session_env(project: Path) -> dict:
-    env = dict(os.environ)
+    """The env for the chat: in No Git mode GIT_DIR/GIT_WORK_TREE point at the shadow."""
+    env = gitutil.git_env(project)
     env["AAAGENT_PROJECT"] = str(project)
     env["PATH"] = f"{ROOT / 'bin'}{os.pathsep}{env.get('PATH', '')}"
     return env
 
 
 def ensure_repo(start: Path) -> Path | None:
-    root = gitutil.find_root(start)
-    if root:
-        return root
-    print(f"{start} is not a git repository. aaagent needs git to diff and commit work.")
+    """The project for `start`: a No Git folder or repository root; else ask git init or No Git."""
+    project = gitutil.find_project(start)
+    if project:
+        return project
+    print(f"{start} is not a git repository.")
+    print("  g  run `git init` here (aaagent commits each task; branches and pull requests work)")
+    print("  n  No Git: work in this folder without git "
+          "(aaagent keeps its own history in .aaagent/shadow.git)")
     if not sys.stdin.isatty():
+        print("Start aaagent in a terminal to choose, or run `git init` first.")
         return None
-    answer = input("Run `git init` here? [y/N] ").strip().lower()
-    if answer not in ("y", "yes"):
-        return None
-    subprocess.run(["git", "init", "-q"], cwd=start, check=True)
-    return start
+    answer = input("Choose [g/n], anything else cancels: ").strip().lower()
+    if answer in ("g", "git"):
+        subprocess.run(["git", "init", "-q"], cwd=start, check=True)
+        return start
+    if answer in ("n", "no", "none"):
+        (start / ".aaagent").mkdir(parents=True, exist_ok=True)
+        set_toml_value(project_config_path(start), "git", "branch_mode", "none")
+        gitutil.ensure_shadow(start)
+        print("No Git mode: aaagent keeps its own history in .aaagent/shadow.git")
+        return start
+    return None
+
+
+def _exclude_in_the_real_repository(project: Path) -> None:
+    """Add .aaagent/ to the real repository's .git/info/exclude (No Git mode).
+
+    `gitutil.ensure_excluded` cannot do this in No Git mode: its env points at the shadow.
+    The file is local and never committed.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in gitutil.GIT_ENV_KEYS}
+    proc = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=project,
+                          capture_output=True, text=True, env=env)
+    if proc.returncode != 0:
+        return
+    git_dir = Path(proc.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = project / git_dir
+    exclude = git_dir / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    text = exclude.read_text() if exclude.exists() else ""
+    if f"/{gitutil.AGENT_DIR}/" not in text.split():
+        with exclude.open("a") as fh:
+            fh.write(("" if text.endswith("\n") or not text else "\n")
+                     + f"/{gitutil.AGENT_DIR}/\n")
 
 
 def init_project(project: Path, cfg: Config) -> None:
     for sub in ("tasks", "queue", "results", "workers", "attachments", "fetch"):
         (project / ".aaagent" / sub).mkdir(parents=True, exist_ok=True)
-    if not cfg.track_agent_dir:
+    if gitutil.no_git(project):
+        gitutil.ensure_shadow(project)
+        # The real repository, when there is one, must not list .aaagent/ as untracked.
+        if not cfg.track_agent_dir and gitutil.find_root(project) == project.resolve():
+            _exclude_in_the_real_repository(project)
+    elif not cfg.track_agent_dir:
         gitutil.ensure_excluded(project)
 
 
@@ -234,8 +281,16 @@ def _write_chat_script(project: Path, claude_cmd: list[str], env: dict, close: s
 
 
 def _exports(project: Path, env: dict, **extra: str) -> str:
-    pairs = {"AAAGENT_PROJECT": str(project), "PATH": env["PATH"], **extra}
-    return "export " + " ".join(f"{k}={shlex.quote(v)}" for k, v in pairs.items()) + "; "
+    pairs = {"AAAGENT_PROJECT": str(project), "PATH": env["PATH"]}
+    for key in ("GIT_DIR", "GIT_WORK_TREE"):
+        if key in env:
+            pairs[key] = env[key]
+    pairs.update(extra)
+    script = "export " + " ".join(f"{k}={shlex.quote(v)}" for k, v in pairs.items()) + "; "
+    if "GIT_DIR" not in env and "GIT_WORK_TREE" not in env:
+        # tmux starts the pane from a shell that may have them set: never leak a stale value.
+        script = "unset GIT_DIR GIT_WORK_TREE; " + script
+    return script
 
 
 def _launch_tmux(project: Path, claude_cmd: list[str], names: list[str], env: dict) -> int:
