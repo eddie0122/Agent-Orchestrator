@@ -68,20 +68,84 @@ function activate(context) {
 
   let watcher = null;
   let fetchWatcher = null;
+  let newChatWatcher = null;
   let fetcher = null;
   let watchedProject = null;
   function watch(project) {
     if (project === watchedProject) return;
     if (watcher) watcher.dispose();
     if (fetchWatcher) fetchWatcher.dispose();
+    if (newChatWatcher) newChatWatcher.dispose();
     watchedProject = project;
     watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(project), ".aaagent/**"));
     watcher.onDidCreate(scheduleRefresh);
     watcher.onDidChange(scheduleRefresh);
     watcher.onDidDelete(scheduleRefresh);
     watchFetches(project);
+    watchNewChat(project);
   }
-  sub({ dispose: () => { if (watcher) watcher.dispose(); if (fetchWatcher) fetchWatcher.dispose(); } });
+  sub({
+    dispose: () => {
+      if (watcher) watcher.dispose();
+      if (fetchWatcher) fetchWatcher.dispose();
+      if (newChatWatcher) newChatWatcher.dispose();
+    },
+  });
+
+  // The chat's Stop hook asks for a new chat after `aaagent pr` (git mode `pr-auto`).
+  function watchNewChat(project) {
+    newChatWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(project), ".aaagent/new-chat.json"));
+    newChatWatcher.onDidCreate(() => handleNewChat(project));
+    newChatWatcher.onDidChange(() => handleNewChat(project));
+    // A request written while the extension was not watching still gets its chat.
+    handleNewChat(project);
+  }
+
+  let newChatBusy = false;
+  let newChatAgain = false;
+  async function handleNewChat(project) {
+    if (newChatBusy) {
+      newChatAgain = true; // an event that arrives during a restart must not be stranded
+      return;
+    }
+    newChatBusy = true;
+    try {
+      const file = path.join(project, ".aaagent", "new-chat.json");
+      let text;
+      try {
+        text = await fs.promises.readFile(file, "utf8");
+      } catch (err) {
+        return; // nothing to do, unless the file is there but cannot be read
+      }
+      // Delete before acting, so a failure can never restart the chat a second time.
+      await fs.promises.unlink(file).catch(() => undefined);
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (err) {
+        return; // a broken marker is dropped and ignored
+      }
+      if (!data || typeof data !== "object") return;
+      const prompt = typeof data.prompt === "string" && data.prompt.trim() ? data.prompt : undefined;
+      try {
+        await terminals.newChat(project, prompt);
+      } catch (err) {
+        vscode.window.showErrorMessage(`aaagent: ${err.message}`);
+        return;
+      }
+      vscode.window.showInformationMessage(data.pr_url
+        ? "aaagent: the request's pull request is open; started a new chat"
+        : "aaagent: the branch is finished; started a new chat");
+    } finally {
+      newChatBusy = false;
+      if (newChatAgain) {
+        // A marker written while the chat was being replaced: look once more.
+        newChatAgain = false;
+        await handleNewChat(project);
+      }
+    }
+  }
 
   // The chat hook asks us to copy an image that a prompt mentions from the user's computer.
   function watchFetches(project) {
@@ -799,7 +863,7 @@ function activate(context) {
   });
 
   refresh().then(poll);
-  return { store, refresh }; // exposed for tests
+  return { store, refresh, handleNewChat }; // exposed for tests
 }
 
 function deactivate() {}

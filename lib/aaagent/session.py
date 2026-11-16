@@ -95,6 +95,8 @@ def claude_settings(project: Path) -> dict:
                 {"type": "command", "command": _hook("local_images.py"), "timeout": 30},
                 {"type": "command", "command": _hook("record_session.py")},
             ]}],
+            # `aaagent pr` asks for a new chat: restart it once the reply has ended.
+            "Stop": [{"hooks": [{"type": "command", "command": _hook("chat_stop.py")}]}],
         },
     }
 
@@ -273,7 +275,8 @@ def _write_chat_script(project: Path, claude_cmd: list[str], env: dict, close: s
     py, aaagent = shlex.quote(sys.executable), shlex.quote(str(AAAGENT_BIN))
     script = project / ".aaagent" / "run-orchestrator.sh"
     tmp = script.with_name(f"{script.name}.{os.getpid()}.tmp")
-    tmp.write_text(f"#!/bin/sh\n{_exports(project, env)}\n{shlex.join(claude_cmd)}\n"
+    tmp.write_text(f"#!/bin/sh\n{_exports(project, env, AAAGENT_TMUX_CLOSE=close)}\n"
+                   f"{shlex.join(claude_cmd)}\n"
                    f"{py} {aaagent} stop >/dev/null 2>&1\n{close}\n")
     tmp.chmod(0o700)
     tmp.replace(script)
@@ -332,17 +335,64 @@ def _launch_tmux(project: Path, claude_cmd: list[str], names: list[str], env: di
     return subprocess.call(["tmux", "attach", "-t", session])
 
 
-def respawn_chat(project: Path, chat_pane: str, resume_id: str | None, close: str) -> None:
+def respawn_chat(project: Path, chat_pane: str, resume_id: str | None, close: str,
+                 first_prompt: str | None = None) -> None:
     """Restart the chat pane on an earlier conversation (the dashboard's `R` key), or on a
-    fresh chat when resume_id is None (the `N` key)."""
+    fresh chat when resume_id is None (the `N` key, and `aaagent pr`'s new chat). A first
+    prompt is passed as the chat command's last argument, so the fresh chat answers it."""
     cfg = Config.load(project)
     claude = find_claude(cfg)
     if not claude:
         raise RuntimeError("Claude Code CLI not found")
     env = session_env(project)
-    cmd = claude_command(project, cfg, claude, None, resume_id)
+    cmd = claude_command(project, cfg, claude, first_prompt, resume_id)
     script = _write_chat_script(project, cmd, env, close)
     proc = subprocess.run(["tmux", "respawn-pane", "-k", "-t", chat_pane, "-c", str(project),
                            f"sh {shlex.quote(str(script))}"], capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "tmux could not restart the chat pane")
+
+
+def restart_pending_chat(project: Path, delay: float = 1.0) -> bool:
+    """Start a fresh chat when `aaagent pr` left `.aaagent/new-chat-pending.json` behind.
+
+    Runs detached from the chat's Stop hook, a moment after the final reply, so the reply is
+    on screen before the pane is replaced. The marker is claimed with `os.replace` first, so
+    two stops that race start at most one new chat. True when a new chat was started.
+    """
+    if delay > 0:
+        time.sleep(delay)
+    pending = project / ".aaagent" / "new-chat-pending.json"
+    claimed = pending.with_name(f"new-chat-claimed.{os.getpid()}.json")
+    try:
+        os.replace(pending, claimed)    # another restart may have claimed it first
+    except OSError:
+        return False
+    try:
+        text = claimed.read_text()
+    except OSError:
+        return False
+    finally:
+        try:
+            claimed.unlink()
+        except OSError:
+            pass
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    prompt = data.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        prompt = None
+
+    try:
+        pane = attach.chat_pane_file(project).read_text().strip()
+    except OSError:
+        return False
+    if not pane:
+        return False
+    close = os.environ.get("AAAGENT_TMUX_CLOSE") or "tmux kill-window"
+    respawn_chat(project, pane, None, close, first_prompt=prompt)
+    return True
