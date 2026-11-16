@@ -27,9 +27,10 @@ def project_root() -> Path:
     env = os.environ.get("AAAGENT_PROJECT")
     if env:
         return Path(env)
-    root = gitutil.find_root(Path.cwd())
+    root = gitutil.find_project(Path.cwd())
     if root is None:
-        raise FlowError("not inside a git repository. Run `aaagent` from your project folder.")
+        raise FlowError("not inside a git repository or a No Git aaagent folder. Run `aaagent` "
+                        "from your project folder.")
     return root
 
 
@@ -189,7 +190,7 @@ def cmd_reviewer(args) -> int:
 
 
 def cmd_branch_mode(args) -> int:
-    """`aaagent branch-mode [current|branch|pr]`: where tasks commit."""
+    """`aaagent branch-mode [current|branch|pr|none]`: where tasks commit."""
     project = project_root()
     cfg = Config.load(project)
     if args.json:
@@ -198,19 +199,11 @@ def cmd_branch_mode(args) -> int:
         print(json.dumps(data, indent=1))
         return 0
     if args.mode:
-        value = args.mode.strip().lower()
-        if value not in BRANCH_MODES:
-            raise FlowError(f"unknown branch mode '{args.mode}' "
-                            f"(choices: {', '.join(BRANCH_MODES)})")
-        try:
-            set_toml_value(project_config_path(project), "git", "branch_mode", value)
-        except ValueError as exc:
-            raise FlowError(str(exc)) from exc
-        print(f"branch mode: {value}")
-        batch = branching.open_batch(project)
-        if batch:
-            print(f"note: the open branch {batch.get('branch')} keeps going; the new mode "
-                  "applies to its end (pr or not) and to the next batch")
+        print("\n".join(branching.change_mode(project, args.mode)))
+        return 0
+    if cfg.branch_mode == "none":
+        # The shadow repository's own branch (and any batch file) is not the user's git state.
+        print("branch mode: none (no git; aaagent's own history in .aaagent/shadow.git)")
         return 0
     print(f"branch mode: {cfg.branch_mode}")
     branch = branching.current_branch(project)
@@ -479,10 +472,22 @@ def _delete_sessions(args, project: Path) -> int:
 def cmd_diff(args) -> int:
     project = project_root()
     task = tasks.find(project, args.task)
-    base = task.load().get("base_commit")
-    paths = task.pathspecs()
-    text = (gitutil.diff_stat(project, base, paths) if args.stat
-            else gitutil.full_diff(project, base, paths))
+    state = task.load()
+    commit = state.get("commit")
+    if state.get("status") == "committed" and commit:
+        # A committed task's own commit: works in both modes, and in No Git it is the only
+        # record of the change (the VSCode extension uses it too).
+        if args.stat:
+            text = gitutil.git(project, "show", "--stat",
+                               "--format=commit %H%nDate:   %ad%n%n    %s%n%n%b", commit,
+                               check=False)
+        else:
+            text = gitutil.show(project, commit)
+    else:
+        base = state.get("base_commit")
+        paths = task.pathspecs()
+        text = (gitutil.diff_stat(project, base, paths) if args.stat
+                else gitutil.full_diff(project, base, paths))
     print(text if text.strip() else "(no changes)")
     return 0
 
@@ -540,7 +545,7 @@ def _check(ok: bool, label: str, hint: str = "", optional: bool = False) -> bool
 
 
 def cmd_doctor(args) -> int:
-    root = gitutil.find_root(Path.cwd())
+    root = gitutil.find_project(Path.cwd())
     cfg = Config.load(root)
     good = True
     print(f"aaagent {__version__} at {ROOT}")
@@ -744,10 +749,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_workers)
 
     s = sub.add_parser("branch-mode", help="show or change where tasks commit: "
-                                            "current, branch or pr")
+                                            "current, branch, pr or none")
     s.add_argument("mode", nargs="?", type=str.lower, choices=BRANCH_MODES,
                    help="current = the checked-out branch; branch = a new branch per chat "
-                        "session; pr = that, then push it and open a pull request")
+                        "session; pr = that, then push it and open a pull request; "
+                        "none = no git: aaagent keeps its own history in .aaagent/shadow.git")
     s.add_argument("--json", action="store_true",
                    help="machine-readable mode, branch, open batch and last pull request")
     s.set_defaults(func=cmd_branch_mode)
@@ -786,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
 def _migrate() -> None:
     """Rename legacy model-named workers once; never fails a command."""
     try:
-        found = os.environ.get("AAAGENT_PROJECT") or gitutil.find_root(Path.cwd())
+        found = os.environ.get("AAAGENT_PROJECT") or gitutil.find_project(Path.cwd())
         project = Path(found) if found else None
         for line in migrate_legacy_workers(project):
             print(line, file=sys.stderr)

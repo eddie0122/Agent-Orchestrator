@@ -1,4 +1,4 @@
-"""One session branch at a time: `[git] branch_mode = current | branch | pr`.
+"""One session branch at a time: `[git] branch_mode = current | branch | pr | none`.
 
 A working tree has one branch checked out, so a branch belongs to a chat session. It starts at
 the first `aaagent dispatch` of a task while no batch is open, every task dispatched while it is
@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from . import gitutil, tasks
-from .config import Config
+from .config import BRANCH_MODES, Config, project_config_path, set_toml_value
 
 # The first word of a task's slug picks the branch prefix; anything else is a feature.
 PREFIXES = {"fix": "fix", "bug": "fix", "bugfix": "fix", "hotfix": "fix", "docs": "docs",
@@ -150,7 +150,8 @@ def branch_name(task: tasks.Task) -> str:
 
 def _branch_exists(project: Path, name: str) -> bool:
     proc = subprocess.run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{name}"],
-                          cwd=project, capture_output=True, text=True)
+                          cwd=project, capture_output=True, text=True,
+                          env=gitutil.git_env(project))
     return proc.returncode == 0
 
 
@@ -174,6 +175,8 @@ def current_branch(project: Path) -> str | None:
 
 def start_if_needed(project: Path, task: tasks.Task, cfg: Config) -> str | None:
     """Join or open the batch for this task's first dispatch; the line to print, or None."""
+    if cfg.branch_mode == "none":
+        return None
     with tasks.active_lock(project):
         batch = open_batch(project)
         if batch:
@@ -207,7 +210,7 @@ def start_if_needed(project: Path, task: tasks.Task, cfg: Config) -> str | None:
         name = unique_branch(project, branch_name(task))
         mode = cfg.branch_mode
         proc = subprocess.run(["git", "switch", "-c", name], cwd=project,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=gitutil.git_env(project))
         if proc.returncode != 0:
             detail = (proc.stderr.strip() or proc.stdout.strip()
                       or f"git switch exited {proc.returncode}")
@@ -246,6 +249,8 @@ def on_idle(project: Path, cfg: Config) -> list[str]:
     only task was abandoned) it closes itself, switches back to the base branch and deletes the
     empty branch. Everything that touches the checkout runs after the lock is released.
     """
+    if cfg.branch_mode == "none":
+        return []
     with tasks.active_lock(project):
         batch = open_batch(project)
         if not batch:
@@ -290,6 +295,9 @@ def on_idle(project: Path, cfg: Config) -> list[str]:
 
 def finish(project: Path, cfg: Config, push: bool) -> list[str]:
     """End the open branch (`aaagent pr` with push, `aaagent branch-done` without it)."""
+    if cfg.branch_mode == "none":
+        raise tasks.FlowError("this project runs without git (branch_mode = none): there is no "
+                              "branch or pull request")
     with tasks.active_lock(project):
         batch = open_batch(project)
         if not batch:
@@ -307,10 +315,28 @@ def finish(project: Path, cfg: Config, push: bool) -> list[str]:
     elif push:
         lines = [f"branch {branch} has no commits; no pull request opened"]
     else:
-        lines = [f"branch {branch} finished ({len(commits)} commits); not pushed"]
+        lines = [f"branch {branch} finished ({len(commits)} commit(s)); not pushed"]
     lines += _switch_back(project, record)
     _save_json(path, record)
     return lines
+
+
+def _tracked_changes(project: Path) -> list[str]:
+    """Changed tracked paths, excluding the agent folder.
+
+    Untracked files do not stop `git switch`: it carries them over to the other branch.
+    """
+    out = gitutil.git(project, "status", "--porcelain", "--untracked-files=no", "--",
+                      ".", f":(exclude){gitutil.AGENT_DIR}", check=False)
+    found = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        found.append(path.strip('"'))
+    return found
 
 
 def _switch_back(project: Path, record: dict) -> list[str]:
@@ -322,11 +348,12 @@ def _switch_back(project: Path, record: dict) -> list[str]:
     if current != branch:
         return [f"the checkout is on {current or 'a detached HEAD'}, not {branch}; "
                 f"left as it is"]
-    dirty = gitutil.dirty_paths(project)
+    dirty = _tracked_changes(project)
     if dirty:
         return [f"stayed on {branch}: uncommitted changes in {', '.join(dirty)}; "
                 f"run `git switch {base}` yourself"]
-    proc = subprocess.run(["git", "switch", base], cwd=project, capture_output=True, text=True)
+    proc = subprocess.run(["git", "switch", base], cwd=project, capture_output=True, text=True,
+                          env=gitutil.git_env(project))
     if proc.returncode != 0:
         detail = (proc.stderr.strip() or proc.stdout.strip()
                   or f"git switch exited {proc.returncode}")
@@ -338,7 +365,7 @@ def _switch_back(project: Path, record: dict) -> list[str]:
 def _delete_branch(project: Path, branch: str) -> str:
     """`git branch -d` the empty branch; "" on success, else git's error."""
     proc = subprocess.run(["git", "branch", "-d", branch], cwd=project,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=gitutil.git_env(project))
     if proc.returncode == 0:
         return ""
     return (proc.stderr.strip() or proc.stdout.strip() or f"git branch exited {proc.returncode}")
@@ -396,9 +423,11 @@ def open_pr(project: Path, record: dict) -> list[str]:
         return [f"could not push {branch} to origin: {detail}", "run `aaagent pr` to retry"]
 
     try:
+        push_env = {**_pr_env(), **gitutil.git_env(project),
+                    "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
         push = subprocess.run(["git", "push", "-u", "origin", branch], cwd=project,
                               capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              timeout=PUSH_TIMEOUT_SECONDS, env=_pr_env())
+                              timeout=PUSH_TIMEOUT_SECONDS, env=push_env)
     except subprocess.TimeoutExpired:
         record["pr_error"] = f"git push timed out after {PUSH_TIMEOUT_SECONDS} s"
         return push_failed(record["pr_error"])
@@ -449,6 +478,9 @@ def open_pr(project: Path, record: dict) -> list[str]:
 
 def retry_pr(project: Path, cfg: Config) -> list[str]:
     """`aaagent pr`: finish the open branch, else open the newest closed batch's pull request."""
+    if cfg.branch_mode == "none":
+        raise tasks.FlowError("this project runs without git (branch_mode = none): there is no "
+                              "branch or pull request")
     if open_batch(project) is not None:
         return finish(project, cfg, push=True)
     with tasks.active_lock(project):
@@ -470,6 +502,8 @@ def retry_pr(project: Path, cfg: Config) -> list[str]:
 
 def git_status(project: Path, cfg: Config) -> dict:
     """The `git` entry of `aaagent status --json`."""
+    if cfg.branch_mode == "none":
+        return {"mode": "none", "branch": None, "batch": None, "last_pr": None}
     batch = open_batch(project)
     closed = last_closed(project)
     return {
@@ -482,3 +516,46 @@ def git_status(project: Path, cfg: Config) -> dict:
         "last_pr": {"branch": closed.get("branch"), "url": closed.get("pr_url"),
                     "error": closed.get("pr_error")} if closed else None,
     }
+
+
+# -- the mode ------------------------------------------------------------------
+
+def change_mode(project: Path, value: str) -> list[str]:
+    """Switch `[git] branch_mode`; the lines to print. FlowError when that is not allowed.
+
+    Switching to or from No Git while tasks are active is refused: their `base_commit`
+    belongs to the other repository.
+    """
+    value = str(value).strip().lower()
+    if value not in BRANCH_MODES:
+        raise tasks.FlowError(f"unknown branch mode '{value}' "
+                              f"(choices: {', '.join(BRANCH_MODES)})")
+    old = Config.load(project).branch_mode
+    if old == value:
+        return [f"branch mode: {value}"]
+    if "none" in (old, value):
+        active = tasks.active_tasks(project)
+        if active:
+            raise tasks.FlowError(
+                f"finish or abandon the active tasks first: {', '.join(active)}")
+    if value == "none" and open_batch(project) is not None:
+        raise tasks.FlowError("finish the open branch first: `aaagent pr` or "
+                              "`aaagent branch-done`")
+    if old == "none" and gitutil.find_root(project) is None:
+        raise tasks.FlowError("this folder is not a git repository; run `git init` first")
+    try:
+        set_toml_value(project_config_path(project), "git", "branch_mode", value)
+    except ValueError as exc:
+        raise tasks.FlowError(str(exc)) from exc
+    lines = [f"branch mode: {value}"]
+    batch = open_batch(project)
+    if batch:
+        lines.append(f"note: the open branch {batch.get('branch')} keeps going; the new mode "
+                     "applies to its end (pr or not) and to the next batch")
+    if value == "none":
+        gitutil.ensure_shadow(project)
+        lines.append("no git: aaagent keeps its own history in .aaagent/shadow.git; restart "
+                     "the chat so its git commands use it")
+    elif old == "none":
+        lines.append("restart the chat so its git commands use the project's repository")
+    return lines

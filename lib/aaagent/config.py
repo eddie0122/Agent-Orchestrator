@@ -25,8 +25,9 @@ WORKER_THINKING_FALLBACK = ["low", "high", "max"]
 # How a worker job runs: in opencode, or in headless Claude Code (`claude -p`).
 BACKENDS = ("opencode", "claude")
 
-# `[git] branch_mode`: where tasks commit.
-BRANCH_MODES = ("current", "branch", "pr")
+# `[git] branch_mode`: where tasks commit. "none" is No Git: aaagent keeps its own
+# history in `.aaagent/shadow.git` and never touches the project's repository.
+BRANCH_MODES = ("current", "branch", "pr", "none")
 
 # Invalid branch_mode values already warned about (one warning per process).
 _warned_branch_modes: set[str] = set()
@@ -314,7 +315,11 @@ class Config:
 
     @property
     def branch_mode(self) -> str:
-        """Where tasks commit: "current", "branch" or "pr"; anything else means "current"."""
+        """Where tasks commit: "current", "branch", "pr", or "none" (No Git).
+
+        "none" means the folder is not a git repository (or must not be touched): aaagent
+        keeps its own history in `.aaagent/shadow.git`. Anything else means "current".
+        """
         raw = str(self.data.get("git", {}).get("branch_mode") or "").strip().lower()
         if not raw:
             return "current"

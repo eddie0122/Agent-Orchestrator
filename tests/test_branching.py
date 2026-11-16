@@ -209,7 +209,7 @@ class BranchModeTest(FlowCase):
         self.assertEqual(self.calls(self.gh_log), [], "branch mode never calls gh")
 
         lines = branching.finish(self.project, self.cfg, push=False)
-        self.assertEqual(lines, ["branch fix/login-crash finished (1 commits); not pushed",
+        self.assertEqual(lines, ["branch fix/login-crash finished (1 commit(s)); not pushed",
                                  "switched back to main"])
         self.assertFalse(branching.batch_file(self.project).exists())
         closed = branching.last_closed(self.project)
@@ -291,11 +291,25 @@ class SessionBranchTest(FlowCase):
         (self.project / "README.md").write_text("changed\n")
 
         lines = branching.finish(self.project, self.cfg, push=False)
-        self.assertEqual(lines, ["branch fix/dirty finished (1 commits); not pushed",
+        self.assertEqual(lines, ["branch fix/dirty finished (1 commit(s)); not pushed",
                                  "stayed on fix/dirty: uncommitted changes in README.md; "
                                  "run `git switch main` yourself"])
         self.assertEqual(self.git("branch", "--show-current").strip(), "fix/dirty")
         self.assertFalse(branching.last_closed(self.project)["switched_back"])
+
+    def test_finish_switches_back_with_an_untracked_file(self):
+        self.write_mode("branch")
+        task = self.new_task("fix stray", "stray.txt")
+        self.implement(task)
+        self.commit(task)
+        (self.project / "untracked.txt").write_text("kept\n")
+
+        lines = branching.finish(self.project, self.cfg, push=False)
+        self.assertEqual(lines, ["branch fix/stray finished (1 commit(s)); not pushed",
+                                 "switched back to main"])
+        self.assertEqual(self.git("branch", "--show-current").strip(), "main")
+        self.assertEqual((self.project / "untracked.txt").read_text(), "kept\n",
+                         "git switch carries the untracked file over")
 
     def test_the_prompt_tells_a_new_chat_about_the_open_branch(self):
         self.write_mode("branch")
