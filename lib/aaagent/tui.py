@@ -38,7 +38,7 @@ HELP = [
     ("m", "change a model: the selected row's (planner, reviewer or worker), or pick which"),
     ("t", "change a thinking level (the same rows as m)"),
     ("v", "choose who reviews each round: the planner (the chat) or a model"),
-    ("B", "git mode: current branch, new branch, new branch + pull request, or no git"),
+    ("B", "git mode: current branch, new branch, new branch + pull request (ask or auto), or no git"),
     ("+", "add a worker (pick its model)"),
     ("-", "remove the selected worker (asks first)"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
@@ -59,6 +59,7 @@ BRANCH_MODE_CHOICES = [
     ("current branch", "current", "commit on the checked-out branch"),
     ("new branch", "branch", "one branch per chat session; asks before finishing it"),
     ("new branch + pull request", "pr", "one branch per chat session; asks before the pull request"),
+    ("new branch + pull request (auto)", "pr-auto", "like pr, but opens the PR without asking; the chat restarts after it"),
     ("no git", "none", "no repository needed; aaagent keeps its own history"),
 ]
 
@@ -432,7 +433,8 @@ def output_worker(ui: UI, data: dict | None, task: dict | None = None) -> str | 
 def git_summary(data: dict | None) -> str:
     """Where tasks commit, for the dashboard's top line ("" when there is nothing to say)."""
     git = (data or {}).get("git") or {}
-    labels = {"current": "", "branch": "new branch", "pr": "branch + PR", "none": "no git"}
+    labels = {"current": "", "branch": "new branch", "pr": "branch + PR",
+              "pr-auto": "branch + auto PR", "none": "no git"}
     mode = git.get("mode")
     if mode not in labels:
         return ""
@@ -451,8 +453,12 @@ def git_summary(data: dict | None) -> str:
         text = f"{text} · PR failed: aaagent pr" if text else "PR failed: aaagent pr"
     commits = batch.get("commits") or 0
     if batch.get("idle") and commits > 0:
-        waiting = "PR?" if mode == "pr" else "finish?"
-        text = f"{text} · {commits} commit(s), waiting: {waiting}"
+        if mode == "pr":
+            text = f"{text} · {commits} commit(s), waiting: PR?"
+        elif mode == "pr-auto":
+            text = f"{text} · {commits} commit(s), auto PR when the request is done"
+        else:
+            text = f"{text} · {commits} commit(s), waiting: finish?"
     return text
 
 

@@ -392,6 +392,7 @@ class GitSummaryTest(unittest.TestCase):
         self.assertEqual(self.summary(), "on main")
         self.assertEqual(self.summary(mode="branch"), "new branch · on main")
         self.assertEqual(self.summary(mode="pr"), "branch + PR · on main")
+        self.assertEqual(self.summary(mode="pr-auto"), "branch + auto PR · on main")
 
     def test_no_git_mode(self):
         self.assertEqual(self.summary(mode="none", branch=None), "no git")
@@ -406,6 +407,9 @@ class GitSummaryTest(unittest.TestCase):
                          "new branch · on feat/x (from main) · 2 commit(s), waiting: finish?")
         self.assertEqual(self.summary(mode="current", branch="feat/x", batch=batch),
                          "on feat/x (from main) · 2 commit(s), waiting: finish?")
+        self.assertEqual(self.summary(mode="pr-auto", branch="feat/x", batch=batch),
+                         "branch + auto PR · on feat/x (from main) · "
+                         "2 commit(s), auto PR when the request is done")
 
     def test_a_busy_branch_or_one_without_commits_does_not_wait(self):
         busy = {"branch": "feat/x", "base": "main", "commits": 2, "idle": False}
@@ -414,11 +418,16 @@ class GitSummaryTest(unittest.TestCase):
         fresh = {"branch": "feat/x", "base": "main", "commits": 0, "idle": True}
         self.assertEqual(self.summary(mode="pr", branch="feat/x", batch=fresh),
                          "branch + PR · on feat/x (from main)")
+        self.assertEqual(self.summary(mode="pr-auto", branch="feat/x", batch=busy),
+                         "branch + auto PR · on feat/x (from main)")
+        self.assertEqual(self.summary(mode="pr-auto", branch="feat/x", batch=fresh),
+                         "branch + auto PR · on feat/x (from main)")
 
     def test_without_a_branch(self):
         self.assertEqual(self.summary(branch=None), "")
         self.assertEqual(self.summary(mode="branch", branch=None), "new branch")
         self.assertEqual(self.summary(mode="pr", branch=None), "branch + PR")
+        self.assertEqual(self.summary(mode="pr-auto", branch=None), "branch + auto PR")
 
     def test_an_open_batch_shows_where_it_started(self):
         batch = {"branch": "feat/x", "base": "main", "tasks": ["001-a"]}
@@ -994,15 +1003,18 @@ class ActTest(unittest.TestCase):
         self.assertTrue(self.dash.act(("branch_mode",)))
         picker = self.dash.ui.picker
         self.assertEqual(picker.title, "where do tasks commit?")
-        self.assertEqual([i[1] for i in picker.items], ["current", "branch", "pr", "none"])
+        self.assertEqual([i[1] for i in picker.items], ["current", "branch", "pr", "pr-auto", "none"])
         self.assertEqual([i[0] for i in picker.items],
-                         ["current branch", "new branch", "new branch + pull request", "no git"])
+                         ["current branch", "new branch", "new branch + pull request",
+                          "new branch + pull request (auto)", "no git"])
         self.assertEqual(picker.items[0][2], "current")
         self.assertEqual(picker.items[1][2],
                          "one branch per chat session; asks before finishing it")
         self.assertEqual(picker.items[2][2],
                          "one branch per chat session; asks before the pull request")
         self.assertEqual(picker.items[3][2],
+                         "like pr, but opens the PR without asking; the chat restarts after it")
+        self.assertEqual(picker.items[4][2],
                          "no repository needed; aaagent keeps its own history")
         self.assertEqual(picker.action, ("branch_mode_pick",))
 

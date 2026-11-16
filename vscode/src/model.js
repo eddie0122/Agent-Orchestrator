@@ -185,6 +185,7 @@ const BRANCH_MODES = [
   { mode: "current", label: "Current branch", detail: "Commit on the checked-out branch" },
   { mode: "branch", label: "New branch", detail: "One branch per chat session; the planner asks before finishing it" },
   { mode: "pr", label: "New branch + pull request", detail: "One branch per chat session; the planner asks before opening the PR" },
+  { mode: "pr-auto", label: "New branch + pull request (auto)", detail: "One branch per chat session; the planner opens the PR itself when your request is done, then the chat restarts" },
   { mode: "none", label: "No Git", detail: "No repository needed; aaagent keeps its own history in .aaagent/shadow.git" },
 ];
 
@@ -209,7 +210,11 @@ function gitItem(git) {
   const idle = !!(batch && batch.idle && commits > 0);
   let description = branch ? `on ${branch}` : "detached HEAD";
   if (batch) description += ` (from ${batch.base})`;
-  if (idle) description += entry.mode === "pr" ? " · waiting: PR?" : " · waiting: finish?";
+  if (idle) {
+    if (entry.mode === "pr") description += " · waiting: PR?";
+    else if (entry.mode === "pr-auto") description += " · auto PR pending";
+    else description += " · waiting: finish?";
+  }
   const lines = [entry.detail, `branch: ${branch || "detached HEAD"}`];
   if (batch) {
     lines.push(`batch: ${batch.branch} from ${batch.base}`);
@@ -217,8 +222,13 @@ function gitItem(git) {
     const tasks = batch.tasks || [];
     if (tasks.length) lines.push(`tasks: ${tasks.join(", ")}`);
     if (idle) {
-      const next = entry.mode === "pr" ? "open the pull request" : "finish the branch";
-      lines.push(`all tasks done (${commits} commits): the planner asks whether to ${next}`);
+      if (entry.mode === "pr") {
+        lines.push(`all tasks done (${commits} commits): the planner asks whether to open the pull request`);
+      } else if (entry.mode === "pr-auto") {
+        lines.push(`all tasks done (${commits} commits): the planner opens the pull request when your request is done, then the chat restarts`);
+      } else {
+        lines.push(`all tasks done (${commits} commits): the planner asks whether to finish the branch`);
+      }
     }
   }
   if (last && last.url) lines.push(`pull request: ${last.url}`);
@@ -232,12 +242,12 @@ function gitItem(git) {
     tooltip: lines.join("\n"),
     icon: failed && !batch
       ? { id: "warning", color: "problemsWarningIcon.foreground" }
-      : entry.mode === "pr" ? { id: "git-pull-request" } : { id: "git-branch" },
+      : entry.mode === "pr" || entry.mode === "pr-auto" ? { id: "git-pull-request" } : { id: "git-branch" },
     contextValue: "git",
   };
 }
 
-/** Quick-pick entries for Select Git Branch Mode…: the four modes, the active one marked. */
+/** Quick-pick entries for Select Git Branch Mode…: the five modes, the active one marked. */
 function branchModeChoices(currentMode) {
   return BRANCH_MODES.map((m) => (m.mode === currentMode
     ? { label: m.label, description: "current", detail: m.detail, mode: m.mode }
