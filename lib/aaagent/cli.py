@@ -18,7 +18,7 @@ from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "workers", "new", "dispatch", "wait", "status", "diff", "logs",
             "stop", "abandon", "attach", "doctor", "version", "help", "model", "thinking",
-            "sessions", "reviewer", "branch-mode", "pr"}
+            "sessions", "reviewer", "branch-mode", "pr", "branch-done"}
 # Options of `start` that also work without the word: `aaagent -c`.
 START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model", "--session"}
 
@@ -224,13 +224,21 @@ def cmd_branch_mode(args) -> int:
 
 
 def cmd_pr(args) -> int:
-    """`aaagent pr`: push the last finished branch and open its pull request (or retry)."""
+    """`aaagent pr`: push the open branch, open its pull request and switch back (or retry)."""
     project = project_root()
     cfg = Config.load(project)
     lines = branching.retry_pr(project, cfg)
     print("\n".join(lines))
     closed = branching.last_closed(project)
     return 0 if closed and closed.get("pr_url") else 1
+
+
+def cmd_branch_done(args) -> int:
+    """`aaagent branch-done`: finish the open branch without pushing and switch back."""
+    project = project_root()
+    cfg = Config.load(project)
+    print("\n".join(branching.finish(project, cfg, push=False)))
+    return 0
 
 
 def cmd_workers(args) -> int:
@@ -738,14 +746,19 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("branch-mode", help="show or change where tasks commit: "
                                             "current, branch or pr")
     s.add_argument("mode", nargs="?", type=str.lower, choices=BRANCH_MODES,
-                   help="current = the checked-out branch; branch = a new branch per batch; "
-                        "pr = that, then push it and open a pull request")
+                   help="current = the checked-out branch; branch = a new branch per chat "
+                        "session; pr = that, then push it and open a pull request")
     s.add_argument("--json", action="store_true",
                    help="machine-readable mode, branch, open batch and last pull request")
     s.set_defaults(func=cmd_branch_mode)
 
-    s = sub.add_parser("pr", help="push the last finished branch and open its pull request")
+    s = sub.add_parser("pr", help="finish the open branch: push it, open its pull request and "
+                                  "switch back to the base branch (or retry the last failed one)")
     s.set_defaults(func=cmd_pr)
+
+    s = sub.add_parser("branch-done", help="finish the open branch without pushing and switch "
+                                           "back to the base branch")
+    s.set_defaults(func=cmd_branch_done)
 
     s = sub.add_parser("version")
     s.set_defaults(func=lambda a: print(__version__) or 0)

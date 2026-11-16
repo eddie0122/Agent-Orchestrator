@@ -413,7 +413,7 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         if left:
             print(f"  ! still uncommitted after the commit: {', '.join(left)}")
         print(f"Task {task.id} is complete. Tell the user what was done.")
-        for line in branching.finish_if_done(project, cfg):
+        for line in branching.on_idle(project, cfg):
             print(line, flush=True)
         return None
 
@@ -481,7 +481,7 @@ def abandon(project: Path, ref: str) -> str:
     text = f"task {task.id} abandoned."
     if left:
         text += f"\nuncommitted changes left in the working tree: {', '.join(left)}"
-    lines = branching.finish_if_done(project, Config.load(project))
+    lines = branching.on_idle(project, Config.load(project))
     if lines:
         text += "\n" + "\n".join(lines)
     return text

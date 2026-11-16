@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import attach, dispatch, gitutil, sessions, tasks, worker
+from . import attach, branching, dispatch, gitutil, sessions, tasks, worker
 from .backends import find_claude
 from .config import REVIEWER, ROOT, Config
 
@@ -24,6 +24,23 @@ def unfinished_tasks(project: Path, cfg: Config) -> list[str]:
     """One status line per task that is neither committed nor abandoned."""
     return [dispatch.status_line(task, cfg) for task in tasks.all_tasks(project)
             if task.load().get("status") not in tasks.FINAL_STATUSES]
+
+
+def open_branch_section(cfg: Config, project: Path) -> str:
+    """The paragraph that tells a new chat about a branch that is still open; "" if none."""
+    try:
+        info = branching.git_status(project, cfg).get("batch")
+    except Exception:  # noqa: BLE001 - a git problem must never block the chat from starting
+        return ""
+    if not info:
+        return ""
+    ids = ", ".join(info.get("tasks") or []) or "-"
+    return ("\n## Open branch from an earlier chat\n"
+            f"The branch {info.get('branch')} (from {info.get('base')}) is still open with "
+            f"{info.get('commits') or 0} commit(s); tasks: {ids}.\n"
+            "Tell the user in your first reply and ask whether to open a pull request "
+            "(`aaagent pr`), finish it without one (`aaagent branch-done`), or keep working on "
+            "it (new tasks join it).\n")
 
 
 def orchestrator_prompt(cfg: Config, project: Path | None = None) -> str:
@@ -41,6 +58,8 @@ def orchestrator_prompt(cfg: Config, project: Path | None = None) -> str:
         text += ("\n## Unfinished work from an earlier chat\n"
                  "These tasks were open when this chat started:\n\n"
                  + "\n".join(f"- {line}" for line in pending) + "\n")
+    if project:
+        text += open_branch_section(cfg, project)
     return text
 
 
