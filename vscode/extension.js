@@ -423,13 +423,17 @@ function activate(context) {
     await terminals.ensureWorkers(p);
   }
 
-  /** Where tasks commit: the checked-out branch, a new branch per batch, or a new branch + PR. */
+  /**
+   * Where tasks commit: the checked-out branch, one branch per chat session (with or without
+   * a pull request), or No Git (aaagent keeps its own history). Refusals, such as switching
+   * to No Git while tasks are active, come back as `aaagent branch-mode`'s error.
+   */
   async function selectBranchMode() {
     const p = project();
     if (!p) return;
     const current = (store.data && store.data.git && store.data.git.mode) || "current";
     const choice = await vscode.window.showQuickPick(model.branchModeChoices(current), {
-      placeHolder: "Where do tasks commit?",
+      placeHolder: "Where do tasks commit? (or No Git)",
       matchOnDescription: true,
     });
     if (!choice || choice.mode === current) return;

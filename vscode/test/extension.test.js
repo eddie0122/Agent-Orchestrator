@@ -614,3 +614,32 @@ test("not a git repository and missing CLI show the right welcome state", async 
   await api.refresh();
   assert.strictEqual(rec.context["aaagent.state"], "noCli");
 });
+
+test("a committed task's diff comes from aaagent diff, so it works in No Git", async () => {
+  const { DiffProvider } = require("../src/diff");
+  const calls = [];
+  const provider = new DiffProvider({
+    diff: async (project, task) => {
+      calls.push([project, task]);
+      return "commit abc123\n\n    the change\n\n+print('ok')";
+    },
+  });
+  const uri = (commit) => stub.Uri.from({
+    scheme: "aaagent-diff",
+    path: "/001-health-endpoint.diff",
+    query: new URLSearchParams({ project: "/p", commit }).toString(),
+  });
+
+  const committed = await provider.provideTextDocumentContent(uri("abc123"));
+  assert.deepStrictEqual(calls, [["/p", "001-health-endpoint"]]);
+  assert.match(committed, /^# aaagent: changes committed by 001-health-endpoint\n\n/);
+  assert.match(committed, /\+print\('ok'\)/);
+
+  const uncommitted = await provider.provideTextDocumentContent(uri(""));
+  assert.match(uncommitted,
+    /^# aaagent: uncommitted changes for 001-health-endpoint \(since the task started\)\n\n/);
+
+  const failed = new DiffProvider({ diff: async () => { throw new Error("boom"); } });
+  assert.match(await failed.provideTextDocumentContent(uri("abc123")),
+    /^Could not load the changes for 001-health-endpoint:\nboom$/);
+});

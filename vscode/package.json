@@ -67,7 +67,7 @@
       },
       {
         "view": "aaagent.tasks",
-        "contents": "This folder is not a git repository. aaagent needs git to diff and commit the workers' changes.\n[Initialize Repository](command:git.init)",
+        "contents": "This folder is not a git repository. aaagent can work here anyway in No Git mode: run aaagent in a terminal in this folder and choose No Git, or set [git] branch_mode = \"none\" in .aaagent/config.toml. It then keeps its own history in .aaagent/shadow.git, with no commits.\n[Initialize Repository](command:git.init)",
         "when": "aaagent.state == noRepo"
       },
       {

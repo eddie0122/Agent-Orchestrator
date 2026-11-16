@@ -17,8 +17,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dispatch, gitutil, models, session, sessions, status, tasks, worker
-from .config import Config, project_config_path, set_toml_value
+from . import branching, dispatch, gitutil, models, session, sessions, status, tasks, worker
+from .config import Config
 from .status import Row
 from .tasks import FlowError
 
@@ -38,7 +38,7 @@ HELP = [
     ("m", "change a model: the selected row's (planner, reviewer or worker), or pick which"),
     ("t", "change a thinking level (the same rows as m)"),
     ("v", "choose who reviews each round: the planner (the chat) or a model"),
-    ("B", "git branch mode: work on the current branch, a new branch, or a new branch + pull request"),
+    ("B", "git mode: current branch, new branch, new branch + pull request, or no git"),
     ("+", "add a worker (pick its model)"),
     ("-", "remove the selected worker (asks first)"),
     ("a", "abandon the selected task (its changes stay in the working tree)"),
@@ -57,8 +57,9 @@ TYPE_NEW = "\x00type"    # picker value of "type a name…"
 # `[git] branch_mode`: label, value, and what the mode does when it is not the current one.
 BRANCH_MODE_CHOICES = [
     ("current branch", "current", "commit on the checked-out branch"),
-    ("new branch", "branch", "feat/… or fix/… per batch"),
-    ("new branch + pull request", "pr", "push + gh pr create when the batch is done"),
+    ("new branch", "branch", "one branch per chat session; asks before finishing it"),
+    ("new branch + pull request", "pr", "one branch per chat session; asks before the pull request"),
+    ("no git", "none", "no repository needed; aaagent keeps its own history"),
 ]
 
 
@@ -431,10 +432,12 @@ def output_worker(ui: UI, data: dict | None, task: dict | None = None) -> str | 
 def git_summary(data: dict | None) -> str:
     """Where tasks commit, for the dashboard's top line ("" when there is nothing to say)."""
     git = (data or {}).get("git") or {}
-    labels = {"current": "", "branch": "new branch", "pr": "branch + PR"}
+    labels = {"current": "", "branch": "new branch", "pr": "branch + PR", "none": "no git"}
     mode = git.get("mode")
     if mode not in labels:
         return ""
+    if mode == "none":
+        return "no git"
     branch = git.get("branch")
     parts = [labels[mode]] if labels[mode] else []
     if branch:
@@ -446,6 +449,10 @@ def git_summary(data: dict | None) -> str:
         text = f"{text} (from {base})" if text else f"from {base}"
     elif not batch and (git.get("last_pr") or {}).get("error"):
         text = f"{text} · PR failed: aaagent pr" if text else "PR failed: aaagent pr"
+    commits = batch.get("commits") or 0
+    if batch.get("idle") and commits > 0:
+        waiting = "PR?" if mode == "pr" else "finish?"
+        text = f"{text} · {commits} commit(s), waiting: {waiting}"
     return text
 
 
@@ -624,13 +631,9 @@ class Dashboard:
             elif name == "branch_mode":
                 self.pick_branch_mode()
             elif name == "branch_mode_pick":
-                value = action[1]
-                note = self.open_batch_note()
-                set_toml_value(project_config_path(self.project), "git", "branch_mode", value)
+                lines = branching.change_mode(self.project, action[1])
                 self.load()
-                label = next((text for text, mode, _detail in BRANCH_MODE_CHOICES if mode == value),
-                             value)
-                self.ui.message = f"branch mode: {label}{note}"
+                self.ui.message = "; ".join(lines)
         except (FlowError, OSError, RuntimeError, ValueError) as exc:
             self.ui.message = str(exc)
         return True
@@ -697,16 +700,11 @@ class Dashboard:
         self.ui.picker = Picker("model for the new worker", items, action=("add_worker_pick",))
 
     def pick_branch_mode(self) -> None:
-        """Where tasks commit: the checked-out branch, a new one, or a new one plus a PR."""
+        """Where tasks commit: the checked-out branch, a new one, a new one plus a PR, or no git."""
         now = Config.load(self.project).branch_mode
         items = [(label, value, "current" if value == now else detail)
                  for label, value, detail in BRANCH_MODE_CHOICES]
         self.ui.picker = Picker("where do tasks commit?", items, action=("branch_mode_pick",))
-
-    def open_batch_note(self) -> str:
-        """The short note the CLI prints too: a mode change does not move an open batch."""
-        batch = ((self.data or {}).get("git") or {}).get("batch") or {}
-        return f"; the open branch {batch['branch']} keeps going" if batch.get("branch") else ""
 
     # -- drawing ------------------------------------------------------------------
     def put(self, y: int, x: int, text: str, attr: int = 0, width: int | None = None) -> None:

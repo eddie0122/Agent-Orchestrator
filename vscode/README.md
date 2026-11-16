@@ -3,7 +3,7 @@
 Chat with Claude as the planner; a reviewer (the planner or any model) checks each round, and opencode or Claude workers implement and commit.
 
 - **Sidebar** (aaagent icon in the activity bar), with five views:
-  - **Planner**: the chat's Claude model and thinking level, and the **Git** node: the branch mode and the branch tasks commit on. Click either to change it.
+  - **Planner**: the chat's Claude model and thinking level, and the **Git** node: where tasks commit — the checked-out branch, one branch per chat session (with or without a pull request), or **No Git** (no repository; aaagent keeps its own history). Click either to change it.
   - **Reviewer**: who reviews each round — the planner (the chat) itself, or any Claude/opencode model. **Change Reviewer…** switches; while a model reviews, its thinking level, output terminal and **Stop Reviewer** are here too.
   - **Workers**: the workers and what they are doing. Add one with **+**, and right-click a worker to change its model or thinking level, use it as the default, or remove it.
   - **Sessions**: each Opus chat session, newest first, with the tasks it created. Expand one to see its tasks; the ↻ button on a session reopens it, and right-click → **Delete Session…** (or the trash button) deletes a session that is not the open chat.
@@ -15,7 +15,7 @@ Chat with Claude as the planner; a reviewer (the planner or any model) checks ea
 - **Delete Session…**: right-click a session (or use the trash button) to remove it and its conversation, after a modal confirmation. The open chat cannot be deleted.
 - **Ask Opus…**: type a request; the chat starts if it is not running yet.
 - **Change Planner Model…**/**Change Planner Thinking Level…** (Planner view): the chat's Claude model and reasoning effort, for all projects or just this one.
-- **Select Git Branch Mode…** (Planner view title, or click the Git node): picks current branch / new branch / new branch + pull request; it is the same setting as `aaagent branch-mode`.
+- **Select Git Branch Mode…** (Planner view title, or click the Git node): picks current branch / new branch / new branch + pull request / No Git. A new branch lasts the whole chat session: the planner asks before finishing it, and only then does `aaagent pr` push and open the pull request (or `aaagent branch-done` switch back without pushing). No Git needs no repository: aaagent keeps its own history in `.aaagent/shadow.git`. It is the same setting as `aaagent branch-mode`.
 - **Change Reviewer…** (Reviewer view title): choose who reviews each round: the planner (the chat) or any Claude/opencode model, from a list or typed, for all projects or just this one.
 - **Change Reviewer Thinking Level…**/**Show Reviewer Output**/**Stop Reviewer** (Reviewer view, while a model reviews): its reasoning effort or model variant, its terminal, and stopping it.
 - **Add Worker…** (Workers view title): pick or type a model for a new worker; it gets its own terminal like the others.
