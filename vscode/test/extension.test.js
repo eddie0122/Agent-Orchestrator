@@ -605,6 +605,29 @@ test("activate() against a real project", async (t) => {
   await api.refresh();
   assert.deepStrictEqual(api.store.data.workers.map((w) => w.name), ["worker1"]);
   rec.answer = undefined;
+
+  // Kill aaagent…: a dismissed modal does nothing; confirmed runs `aaagent kill` in this
+  // project and closes the chat and every worker/reviewer terminal.
+  const aliveBefore = rec.terminals.filter((term) => term.exitStatus === undefined).length;
+  const messagesBeforeKill = rec.messages.length;
+  await rec.commands.get("aaagent.killAll")();
+  assert.ok(rec.messages.slice(messagesBeforeKill).some(([lvl, m]) => lvl === "warning"
+    && /Kill every aaagent process/.test(m)), JSON.stringify(rec.messages.slice(messagesBeforeKill)));
+  assert.strictEqual(rec.terminals.filter((term) => term.exitStatus === undefined).length, aliveBefore,
+    "a dismissed modal closes nothing");
+
+  rec.answer = "Kill";
+  await rec.commands.get("aaagent.killAll")();
+  assert.ok(!rec.messages.some(([lvl]) => lvl === "error"), JSON.stringify(rec.messages));
+  assert.ok(rec.messages.some(([lvl, m]) => lvl === "info"
+    && /^aaagent: (killed \d+ aaagent process\(es\)|no aaagent processes are running in this project)$/.test(m)),
+    JSON.stringify(rec.messages.slice(-5)));
+  assert.ok(!stub.window.terminals.some((term) => term.name === "aaagent: chat"
+    || term.name.startsWith("aaagent: worker") || term.name === "aaagent: reviewer"),
+    JSON.stringify(stub.window.terminals.map((term) => term.name)));
+  assert.ok(!rec.terminals.some((term) => term.name.startsWith("aaagent: ") && term.exitStatus === undefined),
+    JSON.stringify(rec.terminals.map((term) => term.name)));
+  rec.answer = undefined;
 });
 
 test("not a git repository and missing CLI show the right welcome state", async (t) => {

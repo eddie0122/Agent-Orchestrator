@@ -844,6 +844,24 @@ function activate(context) {
     if (p) await cli.exec(p, ["stop"]);
   });
 
+  command("aaagent.killAll", async () => {
+    const p = project();
+    if (!p) return;
+    const ok = await vscode.window.showWarningMessage(
+      "Kill every aaagent process in this project?",
+      { modal: true, detail: "Stops the chat (planner), the workers, the reviewer, and every running job or dispatch. Running jobs fail; their tasks stay and can be dispatched again." },
+      "Kill");
+    if (ok !== "Kill") return;
+    let out;
+    try {
+      out = await cli.exec(p, ["kill"], { timeout: 60000 });
+    } finally {
+      await terminals.closeAll();
+    }
+    const lines = out.trim().split("\n");
+    vscode.window.showInformationMessage(`aaagent: ${lines[lines.length - 1]}`);
+  });
+
   command("aaagent.doctor", async () => {
     const bin = cli.require();
     const term = vscode.window.createTerminal({
