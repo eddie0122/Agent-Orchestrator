@@ -193,11 +193,14 @@ Dashboard keys:
 | `x` | delete the selected session and its conversation, after a y/n question |
 | `N` | start a new session (closes this chat; shown in aaagent's tmux layout) |
 | `R` | restore an earlier session, picked from a list (shown in aaagent's tmux layout) |
+| `K` | kill every aaagent process of this project: chat, workers, reviewer and running jobs, after a y/n question |
 | `?` | all keys · `q` closes a view, or quits the dashboard |
 
 **SESSIONS** lists the chat sessions newest first, the open one marked `open`, with the tasks each one created. `enter` on a session shows those tasks; `enter` on one of them jumps to it in TASKS, so its plan, reports, reviews and diff are there too. `N` starts a new session, `R` picks an earlier one from a list, and `o` reopens the one that is selected.
 
 The dashboard beeps and says so in its bottom line when a task is committed or needs you.
+
+`K` (or `aaagent kill` in any terminal) is the emergency stop: it kills the chat, the workers, the reviewer, their running jobs and background dispatches, and closes aaagent's tmux window. Queued jobs and task statuses stay as they are, so `aaagent dispatch` can pick them up again later; `aaagent kill --dry-run` only lists what it would kill.
 
 ### Sessions
 
@@ -231,6 +234,7 @@ Opus runs these itself. They are also useful for you:
 | `aaagent wait <task>` | reattach to a running job |
 | `aaagent abandon <task>` | drop a task (its uncommitted changes stay; a worktree task keeps its worktree) |
 | `aaagent stop` | stop this project's workers |
+| `aaagent kill [--dry-run]` | kill every aaagent process of this project: the chat, workers, reviewer, running jobs and dispatches; closes aaagent's tmux window (dashboard key `K`) |
 | `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner, reviewer and worker models |
 | `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner, reviewer and worker thinking levels |
 | `aaagent reviewer [<model\|planner\|worker>] [--thinking LEVEL]` | show or set who reviews each round: a model with its own job, or planner (the chat); a worker name copies its model |
@@ -412,6 +416,7 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | `lib/aaagent/tui.py` | the terminal dashboard (`aaagent ui`) |
 | `lib/aaagent/status.py` | status data and the dashboard's view logic |
 | `lib/aaagent/worker.py` | worker daemon and file queue |
+| `lib/aaagent/killer.py` | `aaagent kill`: finds and kills the project's aaagent processes |
 | `lib/aaagent/backends.py` | worker backends: opencode and headless Claude Code |
 | `lib/aaagent/dispatch.py` | queues phases, waits, falls back, checks results |
 | `lib/aaagent/tasks.py` | task files and the rules for the next phase |

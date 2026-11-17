@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import branching, dispatch, gitutil, models, session, sessions, status, tasks, worker
+from . import branching, dispatch, gitutil, killer, models, session, sessions, status, tasks, worker
 from .config import Config
 from .status import Row
 from .tasks import FlowError
@@ -46,6 +46,7 @@ HELP = [
     ("x", "delete the selected session (its conversation file too)"),
     ("N", "start a new chat session"),
     ("R", "restore an earlier session (pick from a list)"),
+    ("K", "kill every aaagent process of this project: chat, workers, reviewer, jobs (asks first)"),
     ("r", "refresh now"),
     ("q", "close this view; from the list, quit the dashboard"),
     ("Ctrl-b o", "tmux: move between the chat and this dashboard (or click)"),
@@ -150,7 +151,8 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
     ("quit",) ("refresh",) ("open", path, title) ("diff", task_id) ("abandon", task_id)
     ("restore",) ("open_session", session_id) ("delete_session", session_id) ("new_chat",)
     ("help",) ("model", target) ("thinking", target) ("add_worker",)
-    ("remove_worker", name) ("branch_mode",), or None when the key only changed what is shown.
+    ("remove_worker", name) ("branch_mode",) ("kill_all",), or None when the key only changed
+    what is shown.
     `reviewer_job` says whether a model reviews each round (so the reviewer has output).
     """
     if key in (-1, curses.KEY_RESIZE):
@@ -357,6 +359,9 @@ def handle_key(ui: UI, key: int, rows: list[Row], worker_names: tuple[str, ...] 
             return ("restore",)
         ui.message = ("restore works in aaagent's tmux layout; otherwise use `aaagent sessions` "
                       "and `aaagent --session <id>`")
+    elif key == ord("K"):
+        ui.confirm = Confirm("Kill every aaagent process of this project (chat, workers, "
+                             "reviewer, jobs) and close this window? (y/n)", ("kill_all",))
     return None
 
 
@@ -559,6 +564,12 @@ class Dashboard:
                 self.ui.view = View(f"{task.id} / changes since the task started", lines, "diff")
             elif name == "abandon":
                 self.ui.message = dispatch.abandon(self.project, action[1]).splitlines()[0]
+                self.load()
+            elif name == "kill_all":
+                result = killer.kill_project(self.project)
+                self.ui.message = f"killed {len(result.killed)} aaagent process(es)"
+                if result.survivors:
+                    self.ui.message += f", {len(result.survivors)} could not be killed"
                 self.load()
             elif name == "new_chat":
                 if not self.chat_pane:

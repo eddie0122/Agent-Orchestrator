@@ -614,6 +614,18 @@ class KeysTest(unittest.TestCase):
     def test_branch_mode_key(self):
         self.assertEqual(self.press("B"), ("branch_mode",))
 
+    def test_kill_asks_first(self):
+        self.assertIsNone(self.press("K"))
+        self.assertIsNotNone(self.ui.confirm)
+        self.assertIn("kill every aaagent process", self.ui.confirm.prompt.lower())
+        self.assertEqual(self.ui.confirm.action, ("kill_all",))
+        self.assertIsNone(self.press("n"))
+        self.assertIsNone(self.ui.confirm)
+        self.assertEqual(self.ui.message, "cancelled")
+
+        self.press("K")
+        self.assertEqual(self.press("y"), ("kill_all",))
+
     def test_enter_on_the_reviewer_row_shows_its_output(self):
         self.data = data(reviewer="reviewer", review=review_model(
             state="running", job={"task": "016-x", "phase": "review", "round": 2, "created": 0}))

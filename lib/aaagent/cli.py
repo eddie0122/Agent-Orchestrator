@@ -10,14 +10,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import (__version__, attach, backends, branching, dispatch, gitutil, models, session,
-               sessions, status, tasks, tui, worker, worktrees)
+from . import (__version__, attach, backends, branching, dispatch, gitutil, killer, models,
+               session, sessions, status, tasks, tui, worker, worktrees)
 from .config import (BRANCH_MODES, ROOT, USER_CONFIG, Config, migrate_legacy_workers,
                      project_config_path, set_toml_value, user_config_path)
 from .tasks import FlowError
 
 COMMANDS = {"start", "ui", "worker", "workers", "new", "dispatch", "wait", "status", "diff", "logs",
-            "stop", "abandon", "attach", "doctor", "version", "help", "model", "thinking",
+            "stop", "kill", "abandon", "attach", "doctor", "version", "help", "model", "thinking",
             "sessions", "reviewer", "branch-mode", "pr", "branch-done"}
 # Options of `start` that also work without the word: `aaagent -c`.
 START_FLAGS = {"-c", "--continue", "--resume", "--no-tmux", "--no-workers", "--model", "--session"}
@@ -519,6 +519,34 @@ def cmd_stop(args) -> int:
     return 0
 
 
+def cmd_kill(args) -> int:
+    """Kill every aaagent process of this project, then its tmux window (last)."""
+    project = project_root()
+    result = killer.kill_project(project, dry_run=args.dry_run)
+    for target in result.killed:
+        if args.dry_run:
+            print(f"would kill {target.role} (pid {target.pid}): {target.command}")
+        else:
+            print(f"killed {target.role} (pid {target.pid})")
+    for target in result.spared:
+        print(f"left alone {target.role} (pid {target.pid}): it runs this command; "
+              "close it yourself")
+    for target in result.survivors:
+        print(f"could not kill {target.role} (pid {target.pid})")
+    if result.window:
+        print(f"would close tmux window {result.window}" if args.dry_run
+              else f"closed tmux window {result.window}")
+    if not result.killed and result.survivors:
+        print(f"could not kill {len(result.survivors)} aaagent process(es)")
+    elif not result.killed:
+        print("no aaagent processes are running in this project")
+    elif args.dry_run:
+        print(f"would kill {len(result.killed)} aaagent process(es)")
+    else:
+        print(f"killed {len(result.killed)} aaagent process(es)")
+    return 1 if result.survivors else 0
+
+
 def cmd_abandon(args) -> int:
     print(dispatch.abandon(project_root(), args.task))
     return 0
@@ -677,6 +705,12 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("stop", help="stop this project's workers (all, or the ones named)")
     s.add_argument("workers", nargs="*")
     s.set_defaults(func=cmd_stop)
+
+    s = sub.add_parser("kill", help="kill every aaagent process of this project: the chat, "
+                                    "workers, reviewer, running jobs and dispatches")
+    s.add_argument("--dry-run", action="store_true",
+                   help="only list the processes that would be killed")
+    s.set_defaults(func=cmd_kill)
 
     s = sub.add_parser("abandon", help="drop a task (keeps its uncommitted changes)")
     s.add_argument("task")
