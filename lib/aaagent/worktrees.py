@@ -13,8 +13,8 @@ all worktrees of a repository, so those copies never show up in git status there
 `links` entries that exist in the project are symlinked into the worktree (`.venv` and the
 like); `setup` is a shell command run once in the new worktree. The commit job commits in the
 worktree on `aaagent/<task>`; `integrate` then applies those commits to the checked-out branch
-(a fast-forward, or a cherry-pick when other tasks committed meanwhile) and `remove` drops the
-worktree and its branch.
+(a fast-forward, or a cherry-pick when other tasks committed meanwhile), skipping the commits
+whose change is already on the branch, and `remove` drops the worktree and its branch.
 """
 
 from __future__ import annotations
@@ -215,13 +215,29 @@ def branch_commits(project: Path, task) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def _empty_pick(project: Path) -> bool:
+    """Whether the cherry-pick in progress is empty: the change is already on the branch.
+
+    Git 2.39 has no `cherry-pick --empty=drop`. An empty pick leaves no unmerged paths and an
+    index that equals HEAD; a real conflict always has unmerged paths.
+    """
+    unmerged = _git(project, "diff", "--name-only", "--diff-filter=U", check=False)
+    if unmerged.returncode != 0 or unmerged.stdout.strip():
+        return False
+    staged = _git(project, "diff", "--cached", "--quiet", "HEAD", check=False)
+    return staged.returncode == 0
+
+
 def integrate(project: Path, task) -> str:
     """Apply the task branch's commits to the project's checked-out branch; the new HEAD.
 
     A fast-forward when HEAD is still the task's base commit (the normal case: the project's
     checkout did not move while the task worked), otherwise a cherry-pick of the branch's
-    commits, so tasks that committed meanwhile are kept. A conflict is aborted so the checkout
-    is left exactly as it was; the caller keeps the worktree and the branch for a retry.
+    commits one at a time, so tasks that committed meanwhile are kept. A commit whose change is
+    already on the branch makes an empty cherry-pick: it is skipped (the branch already has it,
+    from another task or the user), so a retried merge succeeds instead of failing forever.
+    A conflict is aborted and any commit already picked in this run is rolled back, so the
+    checkout is left exactly as it was; the caller keeps the worktree and the branch for a retry.
     """
     state = task.load()
     base = state.get("base_commit")
@@ -232,15 +248,34 @@ def integrate(project: Path, task) -> str:
     if not base:
         raise tasks.FlowError(
             f"task {task.id} has no recorded base commit, so {branch} cannot be applied")
+    head_before = gitutil.head(project)
+    skipped: list[str] = []
     try:
-        if gitutil.head(project) == base:
+        if head_before == base:
             _git(project, "merge", "--ff-only", branch)
         else:
-            _git(project, "cherry-pick", f"{base}..{branch}")
-    except tasks.FlowError:
+            for sha in commits:
+                proc = _git(project, "cherry-pick", sha, check=False)
+                if proc.returncode == 0:
+                    continue
+                if _empty_pick(project):
+                    _git(project, "cherry-pick", "--skip")
+                    skipped.append(sha)
+                    continue
+                detail = _tail(proc.stderr) or _tail(proc.stdout) or f"exited {proc.returncode}"
+                raise tasks.FlowError(f"git cherry-pick {sha} failed in {project}: {detail}")
+    except tasks.FlowError as exc:
         # Never leave the checkout mid-cherry-pick (it would block every later git command).
         _git(project, "cherry-pick", "--abort", check=False)
+        # Undo the commits this run already picked: the task must not be half-applied.
+        if head_before and gitutil.head(project) != head_before:
+            try:
+                _git(project, "reset", "--keep", head_before)
+            except tasks.FlowError as reset_exc:
+                raise tasks.FlowError(
+                    f"{exc} (and rolling the branch back failed: {reset_exc})") from None
         raise
+    task.update(merge_skipped=skipped or None)
     new_head = gitutil.head(project)
     if not new_head:
         raise tasks.FlowError(f"applying {branch} did not leave a commit checked out")

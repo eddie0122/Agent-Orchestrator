@@ -169,6 +169,56 @@ class ImplementInWorktreeTest(WorktreeCase):
         self.assertEqual(one.load()["status"], "committed")
         self.assertEqual(two.load()["status"], "committed")
 
+    def test_already_applied_change_is_skipped(self):
+        task = self.new_task("feat already applied", "a.txt")
+        self.implement(task)
+        worktree = self.worktree_of(task)
+        # The very same change is already on the branch, by a commit of our own.
+        content = (worktree / "a.txt").read_text()
+        (self.project / "a.txt").write_text(content)
+        self.git("add", "a.txt")
+        self.git("commit", "-q", "-m", "the same change, already on the branch")
+        manual_head = self.git("rev-parse", "HEAD").strip()
+
+        out = self.commit(task)
+
+        self.assertIn("already on the branch", out)
+        self.assertIn("1 commit(s) already on the branch were skipped", out)
+        self.assertIn("nothing new", out)
+        self.assertNotIn("UU", self.git("status", "--porcelain"), "the checkout is left clean")
+        self.assertFalse((self.project / ".git" / "CHERRY_PICK_HEAD").exists(),
+                         "no cherry-pick is left in progress")
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), manual_head,
+                         "the identical change is not committed a second time")
+        self.assertFalse(worktree.exists(), "the worktree is removed after the merge")
+
+    def test_partial_apply_is_rolled_back(self):
+        task = self.new_task("feat partial", "a.txt")
+        self.implement(task)
+        worktree = self.worktree_of(task)
+        # Two commits on the task branch: the first applies cleanly, the second conflicts.
+        self.git_in(worktree, "add", "a.txt")
+        self.git_in(worktree, "commit", "-q", "-m", "feat: task change to a.txt")
+        (worktree / "b.txt").write_text("from the task\n")
+        self.git_in(worktree, "add", "b.txt")
+        self.git_in(worktree, "commit", "-q", "-m", "feat: task change to b.txt")
+        (self.project / "b.txt").write_text("from main\n")
+        self.git("add", "b.txt")
+        self.git("commit", "-q", "-m", "conflicting change to b.txt")
+        conflict_head = self.git("rev-parse", "HEAD").strip()
+
+        code, out = self.run_dispatch(task)
+
+        self.assertEqual(code, 1, out)
+        self.assertEqual(task.load()["status"], "failed", out)
+        self.assertIn("could not apply", out)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), conflict_head,
+                         "the commit picked before the conflict is rolled back")
+        self.assertFalse((self.project / "a.txt").exists(), "nothing of the task stays applied")
+        self.assertNotIn("UU", self.git("status", "--porcelain"), "the checkout is left clean")
+        self.assertFalse((self.project / ".git" / "CHERRY_PICK_HEAD").exists())
+        self.assertTrue(worktree.is_dir(), "the worktree is kept for the retry")
+
     def test_merge_failure_keeps_the_worktree_and_retries_only_the_merge(self):
         args_log = Path(self.tmp.name) / "oc-args.jsonl"
         os.environ["FAKE_OC_ARGS_LOG"] = str(args_log)

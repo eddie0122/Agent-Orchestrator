@@ -347,6 +347,7 @@ def _merge_worktree(project: Path, task: Task, cfg: Config,
                   f"`aaagent dispatch {task.id}` to retry the merge, or abandon the task.")
             return 1
         commits = worktrees.branch_commits(project, task)
+        skipped = task.load().get("merge_skipped") or []
         task.update(current_job=None, status="committed", commit=new_head, merge_failed=None)
         task.log_event("committed", **({"worker": who} if who else {}), commit=new_head)
         tasks.release_active(project, task)
@@ -358,11 +359,16 @@ def _merge_worktree(project: Path, task: Task, cfg: Config,
         print(f"✓ committed by {who} in {mins:.1f} min:")
     else:
         print("✓ merged:")
-    listing = gitutil.git(project, "log", f"--format=%h %s", "-n", str(max(len(commits), 1)),
-                          check=False)
-    for line in listing.splitlines():
-        if line.strip():
-            print("  " + line.strip())
+    applied = len(commits) - len(skipped)
+    if skipped:
+        print(f"  {len(skipped)} commit(s) already on the branch were skipped")
+    if applied <= 0:
+        print("  (nothing new: the change was already on the branch)")
+    else:
+        listing = gitutil.git(project, "log", f"--format=%h %s", "-n", str(applied), check=False)
+        for line in listing.splitlines():
+            if line.strip():
+                print("  " + line.strip())
     for warning in warnings:
         print(f"  ! {warning}")
     print(f"Task {task.id} is complete. Tell the user what was done.")
