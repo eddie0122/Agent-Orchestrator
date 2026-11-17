@@ -14,12 +14,27 @@ from .tasks import FlowError, Step, Task
 
 PROMPTS = ROOT / "prompts"
 HEARTBEAT_SECONDS = 300
+LESSONS_LIMIT = 6000
 
 
 def _fill(template: str, values: dict) -> str:
     for key, value in values.items():
         template = template.replace("{" + key + "}", str(value))
     return template
+
+
+def lessons_note(project: Path) -> str:
+    """The project's lessons (.aaagent/lessons.md) for a worker prompt, or "" when there are none."""
+    try:
+        text = (tasks.agent_dir(project) / "lessons.md").read_text(errors="replace")
+    except OSError:
+        return ""
+    if not text.strip():
+        return ""
+    if len(text) > LESSONS_LIMIT:
+        text = text[:LESSONS_LIMIT] + "\n(truncated; read the full file: .aaagent/lessons.md)"
+    return ("\nPROJECT LESSONS (from earlier tasks in this project; follow them, and as a "
+            "reviewer, check them):\n" + text + "\n")
 
 
 def scope_note(task: Task, phase: str) -> str:
@@ -87,6 +102,8 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
         text += ("\nNOTE: a previous attempt at this round by another worker failed part-way. "
                  "Its partial changes may be in the working tree; check `git status` and "
                  "`git diff` and build on them rather than starting over.\n")
+    if step.phase in ("implement", "fix", "review"):
+        text += lessons_note(task.project)
     return text
 
 

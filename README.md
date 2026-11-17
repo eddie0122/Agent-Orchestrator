@@ -53,6 +53,10 @@ The reviewer is a role of its own, with its own model, thinking level, queue, da
 
 With a reviewer model, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. A reviewer that finds the plan itself wrong writes `verdict: plan_problem`: the loop stops, the chat revises `plan.md`, and the next dispatch runs a fix round against the revised plan (it refuses until the plan has changed). The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails (or writes no valid verdict) it is retried once on the reviewer itself; if that fails too, the round comes back to the chat to review itself.
 
+### Project lessons
+
+The chat keeps `.aaagent/lessons.md`: one line per mistake reviewers caught that is likely to recur, project conventions, the right test command. aaagent appends this file to every implement, fix and review prompt (up to 6000 characters), so workers and reviewers learn from earlier tasks. Edit it by hand too; delete it to turn the feature off.
+
 ## Install
 
 ```bash

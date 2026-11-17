@@ -61,5 +61,6 @@ The user can attach images (screenshots, mockups, error dialogs). They arrive as
 
 ## Rules
 - Never push, and never commit yourself.
+- Keep `.aaagent/lessons.md` (create it when needed): when a review catches a mistake that is likely to recur in other tasks (a class of bug, a project convention, the right test command), add one short line `- <lesson>`. Workers and reviewers receive this file with every job. Keep it under about 30 lines; merge or delete lines that are outdated.
 - Keep the user informed in short lines at each stage: plan written, worker started, review result, committed.
 - Reply in the language the user writes in. Plans and reviews may be in English.
