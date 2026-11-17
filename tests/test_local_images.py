@@ -1,4 +1,4 @@
-"""`claude/hooks/local_images.py`: finding the user's image paths and the fetch round trip."""
+"""`claude/hooks/local_images.py`: finding the user's file paths and the fetch round trip."""
 
 import importlib.util
 import json
@@ -66,8 +66,30 @@ class FindPathsTest(unittest.TestCase):
         self.assertEqual(local_images.find_paths(prompt),
                          ["/Users/a/one.png", "/Users/a/two.webp"])
 
-    def test_non_image_paths_are_ignored(self):
-        self.assertEqual(local_images.find_paths("/Users/a/notes.txt please read"), [])
+    def test_a_windows_drop_with_forward_slashes(self):
+        # Exactly what dropping refresh-pages.js from a Windows PC typed into the chat.
+        prompt = "'c:/Users/hanul/Downloads/refresh-pages.js' please explain"
+        self.assertEqual(local_images.find_paths(prompt),
+                         ["c:/Users/hanul/Downloads/refresh-pages.js"])
+
+    def test_an_unquoted_windows_path_keeps_its_drive_letter(self):
+        prompt = "C:\\Users\\a\\b.js what does this do"
+        self.assertEqual(local_images.find_paths(prompt), ["C:/Users/a/b.js"])
+
+    def test_a_windows_file_url(self):
+        self.assertEqual(local_images.find_paths("file:///C:/x/y.png"), ["C:/x/y.png"])
+
+    def test_a_non_image_posix_path_is_found(self):
+        self.assertEqual(local_images.find_paths("/Users/a/script.js please read"),
+                         ["/Users/a/script.js"])
+
+    def test_paths_without_an_extension_are_ignored(self):
+        self.assertEqual(local_images.find_paths("/usr/bin and /etc/hosts and ~/Downloads"), [])
+
+    def test_a_windows_path_is_not_dropped_by_the_project_check(self):
+        # On Linux `Path("c:/Users/x").resolve()` is relative to the cwd, which is the project.
+        self.assertEqual(local_images.find_paths("'C:\\Users\\a\\b.js'", Path.cwd()),
+                         ["C:/Users/a/b.js"])
 
     def test_a_path_that_exists_on_the_server_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +142,70 @@ class HookTest(unittest.TestCase):
         self.assertIn("on their own computer", context)
         self.assertIn("Attach Image", context)
         self.assertIn("aaagent attach", context)
+
+    def answer_once(self, answer, seen):
+        """A fake extension: answer the first fetch request with `answer`."""
+        folder = self.project / ".aaagent" / "fetch"
+
+        def extension():
+            deadline = time.time() + 10
+            request = None
+            while time.time() < deadline:
+                found = list(folder.glob("*.request.json")) if folder.is_dir() else []
+                if found:
+                    request = found[0]
+                    break
+                time.sleep(0.02)
+            if request is None:
+                seen["error"] = "no request"
+                return
+            seen["request"] = json.loads(request.read_text())
+            result = request.with_name(request.name.replace(".request.json", ".result.json"))
+            result.write_text(json.dumps(answer))
+
+        thread = threading.Thread(target=extension)
+        thread.start()
+        return thread
+
+    def test_the_extension_copies_a_windows_drop_of_any_file(self):
+        seen = {}
+        thread = self.answer_once({"ok": True, "rel": ".aaagent/attachments/x.js"}, seen)
+        try:
+            result = self.run_hook("'c:/Users/hanul/Downloads/refresh-pages.js' please explain",
+                                   AAAGENT_VSCODE=1, AAAGENT_FETCH_TIMEOUT=5)
+        finally:
+            thread.join()
+        context = self.context(result)
+        self.assertNotIn("error", seen, seen.get("error"))
+        self.assertEqual(seen["request"]["path"], "c:/Users/hanul/Downloads/refresh-pages.js")
+        self.assertIn(".aaagent/attachments/x.js", context)
+        self.assertIn("Read tool", context)
+        self.assertIn("the user's file", context)
+
+    def test_a_path_that_is_not_a_local_file_is_silent(self):
+        seen = {}
+        thread = self.answer_once({"ok": False, "missing": True, "error": "no such file"}, seen)
+        try:
+            result = self.run_hook("'/etc/foo.conf' what is this", AAAGENT_VSCODE=1,
+                                   AAAGENT_FETCH_TIMEOUT=5)
+        finally:
+            thread.join()
+        self.assertNotIn("error", seen, seen.get("error"))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_without_the_extension_a_non_image_path_is_silent(self):
+        result = self.run_hook("'/etc/foo.conf' what is this")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_without_the_extension_a_windows_path_is_reported(self):
+        result = self.run_hook("'c:/Users/hanul/Downloads/refresh-pages.js' what is this")
+        context = self.context(result)
+        self.assertIn("c:/Users/hanul/Downloads/refresh-pages.js", context)
+        self.assertIn("the file", context)
+        self.assertIn("scp", context)
+        self.assertNotIn("Attach Image", context)
 
     def test_the_extension_copies_the_image(self):
         folder = self.project / ".aaagent" / "fetch"

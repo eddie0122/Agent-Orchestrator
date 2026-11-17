@@ -541,6 +541,8 @@ function mention(relPath, startLine, endLine) {
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp"];
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+// Any file a prompt mentions (not only images) may come over the local-file bridge.
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 function startsWithBytes(buf, bytes, offset = 0) {
   if (!buf || buf.length < offset + bytes.length) return false;
@@ -591,11 +593,31 @@ function isImagePath(p) {
   return IMAGE_EXTS.includes(base.slice(dot + 1).toLowerCase());
 }
 
+/** `<YYYYmmdd-HHMMSS>-<stem>.<ext>` for any file: the original extension is kept. */
+function fileAttachmentName(originalName, date) {
+  const d = date || new Date();
+  const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-` +
+    `${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+  const parts = splitName(originalName);
+  const stem = parts.stem.replace(/[^A-Za-z0-9._-]/g, "-").replace(/-+/g, "-").trim()
+    .replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "") || "file";
+  const ext = parts.ext.replace(/^\./, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return ext ? `${stamp}-${stem}.${ext}` : `${stamp}-${stem}`;
+}
+
+/** A URI path for `p`: `C:\a\b.js` and `c:/a/b.js` become `/c:/a/b.js`; POSIX paths stay. */
+function localUriPath(p) {
+  const text = String(p || "").replace(/\\/g, "/");
+  if (/^[A-Za-z]:\//.test(text)) return `/${text}`;
+  return text;
+}
+
 module.exports = {
   visibleTasks, taskSummary, taskIcon, taskItem, fileItem, workerItem, statusBar, transitions,
   isBusy, bracketedPaste, mention, short, isFinal, modelTargets, modelChoices,
   thinkingTargets, thinkingChoices, reviewerChoices, workersDescription, ago, sessionItem,
   sessionChoices, plannerItem, reviewerItem, plannerReviews, addWorkerChoices,
   BRANCH_MODES, gitItem, branchModeChoices,
-  IMAGE_EXTS, MAX_IMAGE_BYTES, sniffImage, attachmentName, isImagePath,
+  IMAGE_EXTS, MAX_IMAGE_BYTES, MAX_FILE_BYTES, sniffImage, attachmentName, fileAttachmentName,
+  isImagePath, localUriPath,
 };

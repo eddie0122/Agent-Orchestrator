@@ -15,7 +15,8 @@ Module._resolveFilename = function (request, ...rest) {
 };
 
 const stub = require("./vscode-stub");
-const { LocalFetcher, expandHome } = require("../src/fetch");
+const { LocalFetcher, localUri, expandHome } = require("../src/fetch");
+const model = require("../src/model");
 
 // The first bytes of a PNG; `sniffImage` only looks at the magic bytes.
 const PNG = Buffer.concat([
@@ -121,4 +122,78 @@ test("the default readLocal reads a file and expandHome keeps full paths", async
   // A remote window does not know the client's home directory.
   stub.env.remoteName = "ssh-remote";
   assert.throws(() => expandHome("~/x.png"), /full path instead of ~/);
+});
+
+test("copies a Windows path of any file type into .aaagent/attachments", async (t) => {
+  const dir = makeProject(t);
+  const request = addRequest(dir, "win",
+    { path: "c:/Users/hanul/Downloads/refresh-pages.js", created: Date.now() / 1000 });
+  const text = Buffer.from("console.log('refresh');\n");
+  const asked = [];
+  const fetcher = new LocalFetcher({
+    project: dir,
+    readLocal: async (p) => { asked.push(p); return text; },
+  });
+
+  const answer = await fetcher.handle(request);
+  assert.strictEqual(answer.ok, true);
+  assert.match(answer.rel, /^\.aaagent\/attachments\/\d{8}-\d{6}-refresh-pages\.js$/);
+  assert.deepStrictEqual(readResult(dir, "win"), { ok: true, rel: answer.rel });
+  assert.deepStrictEqual(fs.readFileSync(path.join(dir, answer.rel)), text);
+  assert.deepStrictEqual(asked, ["c:/Users/hanul/Downloads/refresh-pages.js"]);
+});
+
+test("a file that does not exist on the user's computer answers missing and does not warn", async (t) => {
+  const dir = makeProject(t);
+  const failed = [];
+  const fetcher = new LocalFetcher({
+    project: dir,
+    readLocal: async (p) => {
+      const err = new Error("no such file or directory");
+      if (p.endsWith(".js")) err.code = "FileNotFound";
+      else err.name = "EntryNotFound (FileSystemError)";
+      throw err;
+    },
+    onFailed: (from, message) => failed.push([from, message]),
+  });
+  const win = addRequest(dir, "win",
+    { path: "c:/Users/hanul/Downloads/refresh-pages.js", created: Date.now() / 1000 });
+  const posix = addRequest(dir, "posix", { path: "/Users/hanul/notes.txt", created: Date.now() / 1000 });
+
+  const missing = { ok: false, missing: true, error: "no such file or directory" };
+  assert.deepStrictEqual(await fetcher.handle(win), missing);
+  assert.deepStrictEqual(await fetcher.handle(posix), missing);
+  assert.deepStrictEqual(readResult(dir, "win"), missing);
+  assert.deepStrictEqual(readResult(dir, "posix"), missing);
+  assert.deepStrictEqual(failed, [], "no warning popup for a path that was never a local file");
+  assert.ok(!fs.existsSync(path.join(dir, ".aaagent", "attachments")));
+});
+
+test("a non-image over 5 MB is refused and reported", async (t) => {
+  const dir = makeProject(t);
+  const request = addRequest(dir, "big",
+    { path: "C:\\Users\\a\\big.log", created: Date.now() / 1000 });
+  const failed = [];
+  const fetcher = new LocalFetcher({
+    project: dir,
+    readLocal: async () => Buffer.alloc(model.MAX_FILE_BYTES + 1),
+    onFailed: (from, message) => failed.push([from, message]),
+  });
+
+  const answer = await fetcher.handle(request);
+  assert.strictEqual(answer.ok, false);
+  assert.match(answer.error, /big\.log is 5\.0 MB; the limit is 5 MB/);
+  assert.deepStrictEqual(failed, [["C:\\Users\\a\\big.log", answer.error]]);
+  assert.ok(!fs.existsSync(path.join(dir, ".aaagent", "attachments")), "nothing is saved");
+});
+
+test("localUri gives a Windows path a URI path", (t) => {
+  t.after(() => { stub.env.remoteName = undefined; });
+  stub.env.remoteName = "ssh-remote";
+  assert.strictEqual(localUri("C:\\Users\\a\\b.js").path, "/C:/Users/a/b.js");
+  assert.strictEqual(localUri("C:\\Users\\a\\b.js").scheme, "vscode-local");
+  assert.strictEqual(localUri("c:/Users/a/b.js").path, "/c:/Users/a/b.js");
+  stub.env.remoteName = undefined;
+  assert.strictEqual(localUri("/Users/a/b.js").path, "/Users/a/b.js");
+  assert.strictEqual(localUri("/Users/a/b.js").scheme, "file");
 });

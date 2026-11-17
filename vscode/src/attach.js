@@ -29,13 +29,19 @@ function checkImage(buffer, name) {
   return kind;
 }
 
-/** Validate and write one image into the attachments folder. `{ path, rel }`. */
-function saveAttachment(project, name, data) {
-  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
-  const kind = checkImage(buffer, name);
+/** The size check for a file that is not an image, with `checkImage`'s messages. */
+function checkFile(buffer, name) {
+  if (!buffer || !buffer.length) throw new Error(`${name} is empty`);
+  if (buffer.length > model.MAX_FILE_BYTES) {
+    const mb = (buffer.length / (1024 * 1024)).toFixed(1);
+    throw new Error(`${name} is ${mb} MB; the limit is ${model.MAX_FILE_BYTES / (1024 * 1024)} MB`);
+  }
+}
+
+/** Write `buffer` as `base`, adding `-1`, `-2`… when the name is taken. `{ path, rel }`. */
+function writeAttachment(project, base, buffer) {
   const dir = attachmentsDir(project);
   fs.mkdirSync(dir, { recursive: true });
-  const base = model.attachmentName(name, kind);
   const ext = path.extname(base);
   const stem = base.slice(0, base.length - ext.length);
   let target = path.join(dir, base);
@@ -46,6 +52,21 @@ function saveAttachment(project, name, data) {
   }
   fs.writeFileSync(target, buffer);
   return { path: target, rel: path.relative(project, target).split(path.sep).join("/") };
+}
+
+/** Validate and write one image into the attachments folder. `{ path, rel }`. */
+function saveAttachment(project, name, data) {
+  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
+  const kind = checkImage(buffer, name);
+  return writeAttachment(project, model.attachmentName(name, kind), buffer);
+}
+
+/** Validate and write one file into the attachments folder; images keep their own naming. */
+function saveFile(project, name, data) {
+  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
+  if (model.sniffImage(buffer)) return saveAttachment(project, name, buffer);
+  checkFile(buffer, name);
+  return writeAttachment(project, model.fileAttachmentName(name), buffer);
 }
 
 function html(webview, nonce) {
@@ -284,4 +305,4 @@ class AttachPanel {
 
 AttachPanel.current = null;
 
-module.exports = { AttachPanel, saveAttachment, checkImage, attachmentsDir, html };
+module.exports = { AttachPanel, saveAttachment, saveFile, checkImage, attachmentsDir, html };
