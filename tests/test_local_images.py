@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "claude" / "hooks" / "local_images.py"
@@ -105,6 +106,28 @@ class FindPathsTest(unittest.TestCase):
             self.assertEqual(local_images.find_paths(f"'{dropped}'", project), [])
 
 
+class FetchTimeoutTest(unittest.TestCase):
+    """The single deadline every fetch of one hook run shares."""
+
+    def env(self, value):
+        env = {k: v for k, v in os.environ.items() if k != "AAAGENT_FETCH_TIMEOUT"}
+        if value is not None:
+            env["AAAGENT_FETCH_TIMEOUT"] = value
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def test_a_huge_timeout_is_clamped_below_the_hook_limit(self):
+        with self.env("100"):
+            self.assertEqual(local_images._fetch_timeout(), 25.0)
+
+    def test_the_default_is_fifteen_seconds(self):
+        with self.env(None):
+            self.assertEqual(local_images._fetch_timeout(), 15.0)
+
+    def test_a_bad_value_falls_back_to_the_default(self):
+        with self.env("soon"):
+            self.assertEqual(local_images._fetch_timeout(), 15.0)
+
+
 class HookTest(unittest.TestCase):
     """The hook as Claude Code runs it: JSON on stdin, JSON on stdout."""
 
@@ -167,6 +190,38 @@ class HookTest(unittest.TestCase):
         thread.start()
         return thread
 
+    def answer_all(self, count, make_answer, seen):
+        """A fake extension: answer every fetch request with `make_answer(path)`."""
+        folder = self.project / ".aaagent" / "fetch"
+
+        def extension():
+            deadline = time.time() + 10
+            answered = []
+            while time.time() < deadline and len(answered) < count:
+                found = sorted(folder.glob("*.request.json")) if folder.is_dir() else []
+                for request in found:
+                    if request.name in answered:
+                        continue
+                    try:
+                        requested = json.loads(request.read_text())["path"]
+                    except (OSError, KeyError, json.JSONDecodeError):
+                        continue  # the hook cleaned up an answered one while we scanned
+                    seen.setdefault("paths", []).append(requested)
+                    answered.append(request.name)
+                    result = request.with_name(request.name.replace(".request.json", ".result.json"))
+                    try:
+                        result.write_text(json.dumps(make_answer(requested)))
+                    except OSError:
+                        pass
+                if len(answered) < count:
+                    time.sleep(0.02)
+            if len(answered) < count:
+                seen["error"] = f"only {len(answered)} of {count} requests"
+
+        thread = threading.Thread(target=extension)
+        thread.start()
+        return thread
+
     def test_the_extension_copies_a_windows_drop_of_any_file(self):
         seen = {}
         thread = self.answer_once({"ok": True, "rel": ".aaagent/attachments/x.js"}, seen)
@@ -181,6 +236,42 @@ class HookTest(unittest.TestCase):
         self.assertIn(".aaagent/attachments/x.js", context)
         self.assertIn("Read tool", context)
         self.assertIn("the user's file", context)
+
+    def test_two_silent_fetches_share_one_deadline(self):
+        start = time.time()
+        result = self.run_hook("'/Users/hanul/one.jpg' and '/Users/hanul/two.png' describe",
+                               AAAGENT_VSCODE=1, AAAGENT_FETCH_TIMEOUT="0.5")
+        elapsed = time.time() - start
+        context = self.context(result)
+        self.assertLess(elapsed, 0.9, "the fetches share one deadline instead of one each")
+        self.assertIn("/Users/hanul/one.jpg", context)
+        self.assertIn("/Users/hanul/two.png", context)
+        self.assertEqual(context.count("cannot open it"), 2)
+        self.assertEqual(list((self.project / ".aaagent" / "fetch").iterdir()), [],
+                         "nothing is left behind after a shared timeout")
+
+    def test_the_extension_answers_every_path_in_prompt_order(self):
+        seen = {}
+        thread = self.answer_all(
+            2, lambda path: {"ok": True, "rel": f".aaagent/attachments/{Path(path).name}"}, seen)
+        try:
+            result = self.run_hook("'/Users/hanul/one.jpg' and '/Users/hanul/two.js' explain",
+                                   AAAGENT_VSCODE=1, AAAGENT_FETCH_TIMEOUT=5)
+        finally:
+            thread.join()
+        context = self.context(result)
+        self.assertNotIn("error", seen, seen.get("error"))
+        # Requests are written at once, so the fake extension sees them in any order; the
+        # paragraphs below still keep the prompt order.
+        self.assertEqual(sorted(seen["paths"]),
+                         ["/Users/hanul/one.jpg", "/Users/hanul/two.js"])
+        self.assertIn(".aaagent/attachments/one.jpg", context)
+        self.assertIn(".aaagent/attachments/two.js", context)
+        self.assertNotIn("cannot open it", context)
+        self.assertLess(context.index("attachments/one.jpg"), context.index("attachments/two.js"),
+                        "the paragraphs keep the prompt order")
+        self.assertEqual(list((self.project / ".aaagent" / "fetch").iterdir()), [],
+                         "both request and result files are cleaned up")
 
     def test_a_path_that_is_not_a_local_file_is_silent(self):
         seen = {}

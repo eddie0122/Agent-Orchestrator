@@ -12,6 +12,7 @@ It never blocks the chat: every failure is ignored and it exits 0.
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -22,6 +23,9 @@ from pathlib import Path
 
 EXTENSIONS = ("png", "jpg", "jpeg", "gif", "webp")
 IMAGE_END = re.compile(r"\.(?:" + "|".join(EXTENSIONS) + r")$", re.IGNORECASE)
+# Claude Code kills this hook after 30 s (`lib/aaagent/session.py`), so every fetch of one
+# run shares one deadline well below that, even when `AAAGENT_FETCH_TIMEOUT` asks for more.
+FETCH_TIMEOUT_MAX = 25.0
 # Any file with an extension is worth copying; a bare directory (`/usr/bin`) is not.
 FILE_END = re.compile(r"\.[A-Za-z0-9]{1,10}$")
 # A Windows drive path: `c:/x` or `C:\\x`. Its backslashes are separators, not escapes.
@@ -131,43 +135,74 @@ def _write_json(path: Path, value: dict) -> None:
     os.replace(tmp, path)
 
 
-def _fetch_from_extension(project: Path, path: str) -> dict:
-    """Ask the VSCode extension to copy the user's file; wait for its answer."""
-    folder = project / ".aaagent" / "fetch"
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-    except OSError as err:
-        return {"ok": False, "error": str(err)}
-    name = uuid.uuid4().hex
-    request = folder / f"{name}.request.json"
-    result = folder / f"{name}.result.json"
-    try:
-        _write_json(request, {"path": path, "created": time.time()})
-    except OSError as err:
-        return {"ok": False, "error": str(err)}
+def _fetch_timeout() -> float:
+    """How long all fetches of one hook run may take.
+
+    `AAAGENT_FETCH_TIMEOUT` (default 15 s, a bad value falls back to it), clamped to
+    `FETCH_TIMEOUT_MAX` so the hook always answers before Claude Code's 30 s limit
+    (`lib/aaagent/session.py`) kills it and drops its output.
+    """
     try:
         timeout = float(os.environ.get("AAAGENT_FETCH_TIMEOUT", "15"))
     except ValueError:
         timeout = 15.0
-    deadline = time.time() + timeout
-    answer = None
-    while True:
+    if not math.isfinite(timeout):
+        timeout = 15.0
+    return max(0.0, min(timeout, FETCH_TIMEOUT_MAX))
+
+
+def _no_answer() -> dict:
+    return {"ok": False, "error": "the VSCode extension did not answer"}
+
+
+def _fetch_all(project: Path, paths: list[str]) -> list[dict]:
+    """Ask the VSCode extension to copy each of `paths`; all of them share one deadline.
+
+    The extension handles each request file on its own, so all requests are written at once
+    and polled together. Answers come back in the order of `paths`, with the no-answer dict
+    for the ones that stay unanswered.
+    """
+    folder = project / ".aaagent" / "fetch"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as err:
+        return [{"ok": False, "error": str(err)} for _ in paths]
+    answers: list[dict | None] = [None] * len(paths)
+    written: list[tuple[Path, Path]] = []
+    pending: dict[int, Path] = {}
+    for index, path in enumerate(paths):
+        name = uuid.uuid4().hex
+        request = folder / f"{name}.request.json"
+        result = folder / f"{name}.result.json"
         try:
-            answer = json.loads(result.read_text())
-            break
-        except (OSError, json.JSONDecodeError):
-            pass
-        if time.time() >= deadline:
-            break
-        time.sleep(0.1)
-    for leftover in (request, result):
-        try:
-            leftover.unlink()
-        except OSError:
-            pass
-    if not isinstance(answer, dict):
-        return {"ok": False, "error": "the VSCode extension did not answer"}
-    return answer
+            _write_json(request, {"path": path, "created": time.time()})
+        except OSError as err:
+            answers[index] = {"ok": False, "error": str(err)}
+            continue
+        written.append((request, result))
+        pending[index] = result
+    try:
+        deadline = time.time() + _fetch_timeout()
+        while pending:
+            for index, result in list(pending.items()):
+                try:
+                    answer = json.loads(result.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                answers[index] = answer if isinstance(answer, dict) else _no_answer()
+                del pending[index]
+            if not pending or time.time() >= deadline:
+                break
+            time.sleep(0.1)
+    finally:
+        # Never leave request files behind, also for the paths still unanswered.
+        for request, result in written:
+            for leftover in (request, result):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+    return [answer if answer is not None else _no_answer() for answer in answers]
 
 
 def _success_text(path: str, rel: str, project: Path) -> str:
@@ -204,19 +239,18 @@ def main() -> int:
         return 0
 
     bridge = os.environ.get("AAAGENT_VSCODE") == "1"
+    answers: list[dict | None] = _fetch_all(project, paths) if bridge else [None] * len(paths)
     paragraphs = []
-    for path in paths:
+    for path, answer in zip(paths, answers):
         image = bool(IMAGE_END.search(path))
-        if bridge:
-            answer = _fetch_from_extension(project, path)
-            if answer.get("missing"):
-                # The path is not a file on the user's computer either: nothing to report.
-                continue
-        else:
+        if answer is None:
+            # Without the bridge only images and Windows paths are worth mentioning.
             if not (image or _is_drive(path)):
-                # Without the bridge only images and Windows paths are worth mentioning.
                 continue
             answer = {"ok": False, "error": "not on this server"}
+        elif answer.get("missing"):
+            # The path is not a file on the user's computer either: nothing to report.
+            continue
         if answer.get("ok") and answer.get("rel"):
             paragraphs.append(_success_text(path, str(answer["rel"]), project))
         else:
