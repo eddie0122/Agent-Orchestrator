@@ -121,6 +121,30 @@ class FlowTest(unittest.TestCase):
         with self.assertRaises(FlowError):
             self.run_dispatch(task)
 
+    def test_plan_mentioning_the_marker_is_written(self):
+        task = tasks.create(self.project, "mentions the marker")
+        self.assertFalse(tasks.plan_is_written(task), "an untouched template is not a plan")
+
+        marker = "<!-- " + "TEMPLATE"
+        task.plan.write_text(PLAN + f"\nThe template starts with `{marker}: replace this file`.\n")
+        self.assertTrue(tasks.plan_is_written(task), "the marker is only mentioned in the body")
+
+        task.plan.write_text("---\ntask: x\nworker:\n---\n\n\n")
+        self.assertFalse(tasks.plan_is_written(task), "frontmatter without a body is not a plan")
+
+    def test_plan_problem_reviews_do_not_count_toward_the_fallback(self):
+        task = self.new_task()
+        self.run_dispatch(task)                         # round 1 on worker1
+        task.review(1).write_text(review("plan_problem", 1))
+        self.run_dispatch(task)                         # round 2: a fix round on worker1
+        self.assertIn(DS, task.report(2).read_text())
+
+        task.review(2).write_text(review("changes_requested", 2))
+        code, out = self.run_dispatch(task)             # round 3: one real rejection, no fallback
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("switching worker", out)
+        self.assertIn(DS, task.report(3).read_text())
+
     def test_review_required_before_next_round(self):
         task = self.new_task()
         self.run_dispatch(task)

@@ -15,7 +15,8 @@ Questions, explanations and investigations that need no file change: answer dire
    The worker is a weaker model that has not seen this conversation, so the plan must stand on its own:
    - Goal, and the context you found: exact file paths, the functions involved, short excerpts of existing code, conventions to follow, relevant log or error lines.
    - Concrete changes per file and ordered steps.
-   - Exact validation commands (tests, lint, build) and what passing looks like.
+   - Interfaces other tasks or callers rely on, and pitfalls a weaker model is likely to hit (races, missing timeouts, edge cases, stale tests). The plan template has sections for both.
+   - Exact validation commands (tests, lint, build) and what passing looks like, ending with the full test suite command.
    - "Done when" criteria you will check in review, and what is out of scope.
    Split large requests into several small tasks. Each task must leave the project working.
    - Tasks that touch disjoint files can run in parallel: give each plan a `files:` list covering everything it may change (code, tests, docs), make sure the lists do not overlap, and dispatch each one with its own background `aaagent dispatch`.
@@ -60,5 +61,6 @@ The user can attach images (screenshots, mockups, error dialogs). They arrive as
 
 ## Rules
 - Never push, and never commit yourself.
+- Keep `.aaagent/lessons.md` (create it when needed): when a review catches a mistake that is likely to recur in other tasks (a class of bug, a project convention, the right test command), add one short line `- <lesson>`. Workers and reviewers receive this file with every job. Keep it under about 30 lines; merge or delete lines that are outdated.
 - Keep the user informed in short lines at each stage: plan written, worker started, review result, committed.
 - Reply in the language the user writes in. Plans and reviews may be in English.

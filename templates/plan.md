@@ -18,8 +18,14 @@ What you found: relevant files and how they work, logs and error messages, conve
 # Steps
 1. ...
 
+# Interfaces
+Names, signatures, file formats or CLI output that other tasks or callers rely on and that must not change (or exactly how they change). Write "None." when nothing applies.
+
+# Pitfalls
+What a less careful implementer is likely to get wrong here: races, missing timeouts, edge cases, stale tests, conventions. Write "None." when nothing applies.
+
 # Validation
-Commands the worker must run, and what passing looks like:
+Commands the worker must run, and what passing looks like. Always include the project's full test suite command last:
 - `...`
 
 # Done when

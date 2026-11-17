@@ -79,6 +79,8 @@ def status_data(project: Path, cfg: Config) -> dict:
         attention = None
         if status == "failed":
             attention = "failed"
+        elif status == "plan_problem":
+            attention = "plan problem"
         elif blocked and "max_review_rounds" in blocked:
             attention = "review limit reached"
         job = state.get("current_job")
@@ -303,7 +305,11 @@ def transitions(prev: dict | None, new: dict | None) -> list[dict]:
             commit = f" ({t['commit'][:7]})" if t.get("commit") else ""
             out.append({"level": "info", "task": t["id"], "message": f"{label} committed{commit}"})
         elif t.get("attention") and t["attention"] != old.get("attention"):
-            why = "stopped after both workers failed" if t["attention"] == "failed" else "reached the review round limit"
+            why = {
+                "failed": "stopped after both workers failed",
+                "review limit reached": "reached the review round limit",
+                "plan problem": "needs a plan revision (the reviewer found a problem in the plan)",
+            }.get(t["attention"], "reached the review round limit")
             out.append({"level": "warning", "task": t["id"],
                         "message": f"{label} {why}; the planner is waiting for you in the chat"})
         elif t["status"] == "approved" and old["status"] != "approved":

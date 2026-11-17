@@ -189,6 +189,57 @@ class ReviewJobTest(unittest.TestCase):
         self.assertNotIn("--session", reviewer_calls[0], "the first review starts a fresh session")
         self.assertIn("--session", reviewer_calls[1], "the second review continues it")
 
+    # -- 3b. a plan problem stops the chain until the plan is revised ---------
+
+    def test_plan_problem_stops_until_the_plan_is_revised(self):
+        os.environ["FAKE_OC_REVIEW"] = "plan_problem,approved"
+        self.config(REVIEWER_CFG)
+        task = self.new_task()
+        code, out = self.run_dispatch(task)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(task.verdict(1), "plan_problem")
+        self.assertEqual(task.load()["status"], "plan_problem")
+        self.assertFalse(task.report(2).exists())
+        self.assertIn("revise", out.lower())
+
+        with self.assertRaises(FlowError) as ctx:
+            self.run_dispatch(task)
+        self.assertIn("plan.md", str(ctx.exception))
+        self.assertFalse(task.report(2).exists())
+
+        task.plan.write_text(task.plan.read_text() + "\n# Revised\nAlso fine.\n")
+        code, out = self.run_dispatch(task)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(task.report(2).is_file())
+        self.assertEqual(task.verdict(2), "approved")
+        state = task.load()
+        self.assertEqual(state["status"], "approved")
+        self.assertEqual(state["worker"], "worker1")
+
+    def test_plan_problem_does_not_switch_to_the_fallback_worker(self):
+        os.environ["FAKE_OC_REVIEW"] = "plan_problem,approved"
+        self.config(REVIEWER_CFG + '[flow]\nfallback_after_failed_reviews = 1\n')
+        task = self.new_task()
+        code, out = self.run_dispatch(task)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(task.load()["status"], "plan_problem")
+
+        task.plan.write_text(task.plan.read_text() + "\n# Revised\nAlso fine.\n")
+        code, out = self.run_dispatch(task)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("switching worker", out, "the plan was at fault, not the worker")
+        self.assertEqual(task.load()["worker"], "worker1")
+        self.assertEqual(task.verdict(2), "approved")
+
+    def test_status_shows_plan_problem_attention(self):
+        os.environ["FAKE_OC_REVIEW"] = "plan_problem,approved"
+        self.config(REVIEWER_CFG)
+        task = self.new_task()
+        self.run_dispatch(task)
+        data = status.status_data(self.project, Config.load(self.project))
+        entry = next(t for t in data["tasks"] if t["id"] == task.id)
+        self.assertEqual(entry["attention"], "plan problem")
+
     # -- 4. the round limit stops the chain -----------------------------------
 
     def test_round_limit_stops_the_chain(self):
