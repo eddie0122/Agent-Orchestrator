@@ -27,6 +27,20 @@ function sh(cwd, cmd, args) {
       GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", AAAGENT_PROJECT: "" } });
 }
 
+/**
+ * The CLI reads the developer's user config (~/.config/aaagent/config.toml) unless
+ * AAAGENT_USER_CONFIG says otherwise. Point it at a file that does not exist so the
+ * default workers apply, and restore the previous value when the test finishes.
+ */
+function isolateUserConfig(t, tmp) {
+  const old = process.env.AAAGENT_USER_CONFIG;
+  process.env.AAAGENT_USER_CONFIG = path.join(tmp, "none.toml");
+  t.after(() => {
+    if (old === undefined) delete process.env.AAAGENT_USER_CONFIG;
+    else process.env.AAAGENT_USER_CONFIG = old;
+  });
+}
+
 const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms));
 
 /** A timestamp the way `sessions.py` writes it: `%Y-%m-%dT%H:%M:%S%z`. */
@@ -59,6 +73,7 @@ test("manifest: every command in a menu is declared, and every declared command 
 test("activate() against a real project", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aaagent-ext-"));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  isolateUserConfig(t, tmp);
   const project = path.join(tmp, "proj");
   fs.mkdirSync(project);
   sh(project, "git", ["init", "-q"]);
@@ -220,13 +235,10 @@ test("activate() against a real project", async (t) => {
 
   // Select Model: the planner from the list, saved to the user config, applied to the open chat.
   const userConfig = path.join(tmp, "user-config.toml");
-  const oldUserConfig = process.env.AAAGENT_USER_CONFIG;
   const oldOpencode = process.env.AAAGENT_OPENCODE_BIN;
   process.env.AAAGENT_USER_CONFIG = userConfig;
   process.env.AAAGENT_OPENCODE_BIN = path.join(REPO, "tests", "fake_opencode.py");
   t.after(() => {
-    if (oldUserConfig === undefined) delete process.env.AAAGENT_USER_CONFIG;
-    else process.env.AAAGENT_USER_CONFIG = oldUserConfig;
     if (oldOpencode === undefined) delete process.env.AAAGENT_OPENCODE_BIN;
     else process.env.AAAGENT_OPENCODE_BIN = oldOpencode;
   });
@@ -598,6 +610,7 @@ test("activate() against a real project", async (t) => {
 test("not a git repository and missing CLI show the right welcome state", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aaagent-ext-"));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  isolateUserConfig(t, tmp);
   const rec = stub._record;
   delete require.cache[require.resolve("../extension")];
   const ext = require("../extension");
@@ -618,6 +631,7 @@ test("not a git repository and missing CLI show the right welcome state", async 
 test("the new-chat marker starts a fresh chat with its prompt", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "aaagent-ext-"));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  isolateUserConfig(t, tmp);
   const project = fs.realpathSync(fs.mkdtempSync(path.join(tmp, "proj-")));
   sh(project, "git", ["init", "-q"]);
   fs.writeFileSync(path.join(project, "README.md"), "hi\n");
