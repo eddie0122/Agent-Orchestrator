@@ -19,6 +19,7 @@ Chat with Claude as the planner; a reviewer (the planner or any model) checks ea
 - **Change Reviewer…** (Reviewer view title): choose who reviews each round: the planner (the chat) or any Claude/opencode model, from a list or typed, for all projects or just this one.
 - **Change Reviewer Thinking Level…**/**Show Reviewer Output**/**Stop Reviewer** (Reviewer view, while a model reviews): its reasoning effort or model variant, its terminal, and stopping it.
 - **Add Worker…** (Workers view title): pick or type a model for a new worker; it gets its own terminal like the others.
+- **Kill aaagent…** (Workers view title, Sessions view `…` menu): after a confirmation, kills every aaagent process of this project — the chat, workers, reviewer, running jobs and dispatches (`aaagent kill`) — and closes their terminals.
 - **Remove Worker…** and **Use as Default Worker** (right-click a worker): remove a worker after a confirmation (its config and terminal go, its tasks keep their history) or make it the default implementer.
 - **Select Model…**/**Select Thinking Level…** (Workers view `…` menu, or the command palette): change the planner's, the reviewer's or a worker's model/thinking level, from a list or typed, for all projects or just this one.
 - **Send Selection to Chat** (editor right-click): adds an `@file#L10-20` reference to the chat input.

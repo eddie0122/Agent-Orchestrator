@@ -143,6 +143,20 @@ class Terminals {
     return true;
   }
 
+  /** Close the chat and every worker/reviewer terminal (after `aaagent kill`). Returns how many closed. */
+  async closeAll() {
+    let closed = 0;
+    if (await this.closeChat()) closed += 1;
+    for (const t of [...vscode.window.terminals]) {
+      if (t.name === CHAT_NAME || !t.name.startsWith("aaagent: ")) continue;
+      if (t.exitStatus !== undefined || closing.has(t)) continue;
+      closing.add(t);
+      t.dispose();
+      closed += 1;
+    }
+    return closed;
+  }
+
   /** Close the current chat and open a fresh one (a running worker job keeps going). */
   async newChat(project, firstPrompt) {
     await this.closeChat();
