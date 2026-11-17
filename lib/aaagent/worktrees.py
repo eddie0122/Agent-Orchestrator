@@ -11,8 +11,10 @@ into it before each job (`sync_into`) and the job's report or review is copied b
 all worktrees of a repository, so those copies never show up in git status there either.
 
 `links` entries that exist in the project are symlinked into the worktree (`.venv` and the
-like); `setup` is a shell command run once in the new worktree. Committing a worktree task is
-not supported yet.
+like); `setup` is a shell command run once in the new worktree. The commit job commits in the
+worktree on `aaagent/<task>`; `integrate` then applies those commits to the checked-out branch
+(a fast-forward, or a cherry-pick when other tasks committed meanwhile) and `remove` drops the
+worktree and its branch.
 """
 
 from __future__ import annotations
@@ -46,6 +48,11 @@ def settings(cfg) -> dict:
         "links": [str(entry) for entry in links if str(entry).strip()],
         "setup": str(section.get("setup") or ""),
     }
+
+
+def link_entries(cfg) -> list[str]:
+    """The `[parallel] links` entries, normalised (no trailing `/`)."""
+    return [entry.rstrip("/") for entry in settings(cfg)["links"] if entry.rstrip("/")]
 
 
 def enabled(project: Path, cfg) -> bool:
@@ -166,6 +173,17 @@ def sync_into(project: Path, task, worktree: Path) -> None:
         source = task.path / name
         if source.is_file():
             shutil.copy2(source, target / name)
+    # A review the main folder renamed (review-N.invalid.md) or dropped must not come back
+    # from the worktree copy on the next `sync_back`.
+    for stale in [*target.glob("report-*.md"), *target.glob("review-*.md")]:
+        if not (task.path / stale.name).is_file():
+            stale.unlink(missing_ok=True)
+    lessons = tasks.agent_dir(project) / "lessons.md"
+    if lessons.is_file():
+        # The worker prompt points at .aaagent/lessons.md; it must exist in the worktree too.
+        destination = tasks.agent_dir(worktree) / "lessons.md"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(lessons, destination)
     attachments = tasks.agent_dir(project) / "attachments"
     if attachments.is_dir():
         shutil.copytree(attachments, tasks.agent_dir(worktree) / "attachments",
@@ -180,3 +198,78 @@ def sync_back(project: Path, task, worktree: Path, name: str) -> bool:
     task.path.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, task.path / name)
     return True
+
+
+# -- applying a finished task to the project's branch -------------------------
+
+def branch_commits(project: Path, task) -> list[str]:
+    """Commits on the task branch since its base_commit, oldest first ([] when none or unknown)."""
+    state = task.load()
+    base = state.get("base_commit")
+    branch = state.get("task_branch") or branch_for(task)
+    if not base:
+        return []
+    proc = _git(project, "rev-list", "--reverse", f"{base}..{branch}", check=False)
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def integrate(project: Path, task) -> str:
+    """Apply the task branch's commits to the project's checked-out branch; the new HEAD.
+
+    A fast-forward when HEAD is still the task's base commit (the normal case: the project's
+    checkout did not move while the task worked), otherwise a cherry-pick of the branch's
+    commits, so tasks that committed meanwhile are kept. A conflict is aborted so the checkout
+    is left exactly as it was; the caller keeps the worktree and the branch for a retry.
+    """
+    state = task.load()
+    base = state.get("base_commit")
+    branch = state.get("task_branch") or branch_for(task)
+    commits = branch_commits(project, task)
+    if not commits:
+        raise tasks.FlowError(f"branch {branch} has no commits to apply")
+    if not base:
+        raise tasks.FlowError(
+            f"task {task.id} has no recorded base commit, so {branch} cannot be applied")
+    try:
+        if gitutil.head(project) == base:
+            _git(project, "merge", "--ff-only", branch)
+        else:
+            _git(project, "cherry-pick", f"{base}..{branch}")
+    except tasks.FlowError:
+        # Never leave the checkout mid-cherry-pick (it would block every later git command).
+        _git(project, "cherry-pick", "--abort", check=False)
+        raise
+    new_head = gitutil.head(project)
+    if not new_head:
+        raise tasks.FlowError(f"applying {branch} did not leave a commit checked out")
+    return new_head
+
+
+def remove(project: Path, task) -> list[str]:
+    """Remove the worktree and delete the task branch; never raises.
+
+    Returns warning lines for whatever could not be removed.
+    """
+    state = task.load()
+    path = state.get("worktree")
+    branch = state.get("task_branch") or branch_for(task)
+    warnings: list[str] = []
+
+    def attempt(args: tuple[str, ...], what: str) -> None:
+        try:
+            proc = _git(project, *args, check=False)
+        except tasks.FlowError as exc:
+            warnings.append(f"could not remove {what}: {exc}")
+            return
+        if proc.returncode != 0:
+            detail = _tail(proc.stderr) or _tail(proc.stdout) or f"exited {proc.returncode}"
+            warnings.append(f"could not remove {what}: {detail}")
+
+    if path:
+        attempt(("worktree", "remove", "--force", str(path)), f"the worktree {path}")
+    attempt(("worktree", "prune"), "stale worktree entries")
+    if branch:
+        attempt(("branch", "-D", branch), f"the branch {branch}")
+    return warnings

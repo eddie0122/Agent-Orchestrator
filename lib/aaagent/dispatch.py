@@ -98,6 +98,11 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
         trailer = cfg.data.get("git", {}).get("commit_trailer", "")
         values["trailer"] = f"\n   - End the body with this trailer line: {trailer}" if trailer else ""
     text = _fill((PROMPTS / f"worker-{step.phase}.md").read_text(), values)
+    if step.phase == "commit" and state.get("worktree"):
+        links = worktrees.link_entries(cfg)
+        if links:
+            text += ("\nNever stage these paths: they are links to the main project: "
+                     + ", ".join(links) + ".\n")
     if retry and step.phase in ("implement", "fix"):
         text += ("\nNOTE: a previous attempt at this round by another worker failed part-way. "
                  "Its partial changes may be in the working tree; check `git status` and "
@@ -111,6 +116,11 @@ def _enqueue(project: Path, task: Task, step: Step, cfg: Config, retry_of: str |
     state = task.load()
     workdir = worktrees.workdir(project, task)
     own_tree = str(workdir) != str(project)
+    recorded = state.get("worktree")
+    if recorded and not own_tree:
+        raise FlowError(
+            f"task {task.id}'s worktree {recorded} is missing. Abandon the task "
+            f"(`aaagent abandon {task.id}`) and plan it again.")
     if own_tree:
         worktrees.sync_into(project, task, workdir)
     backend = cfg.worker_backend(step.worker)
@@ -313,6 +323,54 @@ def _checkpoint(project: Path, task: Task, cfg: Config) -> int:
     return 0
 
 
+def _merge_worktree(project: Path, task: Task, cfg: Config,
+                    who: str | None, mins: float | None) -> int:
+    """Apply a worktree task's commit to the checked-out branch; the exit code for dispatch.
+
+    On failure nothing is half-applied: the checkout is left as it was, and the task keeps its
+    worktree and branch so a later dispatch retries only the merge.
+    """
+    state = task.load()
+    branch = state.get("task_branch") or worktrees.branch_for(task)
+    worktree = state.get("worktree")
+    where = task.rel(Path(worktree)) if worktree else "-"
+    with tasks.active_lock(project):
+        try:
+            new_head = worktrees.integrate(project, task)
+        except FlowError as exc:
+            error = str(exc)
+            task.update(current_job=None, status="failed", merge_failed=True)
+            task.log_event("merge failed", error=error)
+            print(f"✗ could not apply {task.id}'s commit to the branch: {error}")
+            print(f"The commit stays on branch {branch} (worktree {where}). Resolve the cause "
+                  f"(for example commit or stash your own changes in the way), then run "
+                  f"`aaagent dispatch {task.id}` to retry the merge, or abandon the task.")
+            return 1
+        commits = worktrees.branch_commits(project, task)
+        task.update(current_job=None, status="committed", commit=new_head, merge_failed=None)
+        task.log_event("committed", **({"worker": who} if who else {}), commit=new_head)
+        tasks.release_active(project, task)
+    # Everything that touches the checkout (on_idle may run the integration check) runs
+    # after the active-task lock is released.
+    warnings = worktrees.remove(project, task)
+    task.update(worktree=None)
+    if who and mins is not None:
+        print(f"✓ committed by {who} in {mins:.1f} min:")
+    else:
+        print("✓ merged:")
+    listing = gitutil.git(project, "log", f"--format=%h %s", "-n", str(max(len(commits), 1)),
+                          check=False)
+    for line in listing.splitlines():
+        if line.strip():
+            print("  " + line.strip())
+    for warning in warnings:
+        print(f"  ! {warning}")
+    print(f"Task {task.id} is complete. Tell the user what was done.")
+    for line in branching.on_idle(project, cfg):
+        print(line, flush=True)
+    return 0
+
+
 def changed_outside_scope(project: Path, task: Task, state: dict) -> list[str]:
     """Changed files that no active task declares and that were not dirty before this task.
 
@@ -323,8 +381,12 @@ def changed_outside_scope(project: Path, task: Task, state: dict) -> list[str]:
         return []
     workdir = worktrees.workdir(project, task)
     if str(workdir) != str(project):
+        # `links` are symlinks to the main project (`.venv` and the like): a trailing-slash
+        # gitignore pattern does not match a symlink, so they show up as untracked here.
+        links = worktrees.link_entries(Config.load(project))
         return [path for path in gitutil.dirty_paths(workdir)
-                if not tasks.in_scope(path, task.scope())]
+                if not tasks.in_scope(path, task.scope())
+                and not any(path == entry or path.startswith(entry + "/") for entry in links)]
     scopes = [other.scope() for other in [task, *_other_active_tasks(project, task)]]
     preexisting = state.get("preexisting_dirty") or []
     return [path for path in gitutil.dirty_paths(project)
@@ -370,9 +432,10 @@ def dispatch(project: Path, ref: str, worker_override: str | None = None, force:
         if step.note:
             note = f" ({step.note})"
         if step.phase == "commit" and task.load().get("worktree"):
-            raise FlowError(
-                f"task {task.id} works in its own worktree; committing worktree tasks is not "
-                f"supported yet (set [parallel] isolation = \"shared\" for now)")
+            if worktrees.branch_commits(project, task):
+                # Already committed on its branch (a retry after a failed merge): only the
+                # merge is left, no second commit job.
+                return _merge_worktree(project, task, cfg, None, None)
         if step.phase == "commit" and gitutil.no_git(project):
             return _checkpoint(project, task, cfg)
         print(f"{task.id}: {step.phase} round {step.round} → {step.worker} "
@@ -484,7 +547,7 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
     if not error and phase == "review" and task.verdict(rnd) not in tasks.VERDICTS:
         error = (f"reviewer finished without writing {task.rel(task.review(rnd))} "
                  "with a valid verdict")
-    new_head = gitutil.head(project)
+    new_head = gitutil.head(Path(job["cwd"]) if job.get("cwd") else project)
     if not error and phase == "commit" and new_head == job.get("pre_head"):
         error = "worker finished without creating a commit"
     mins = (result.get("finished", time.time()) - result.get("started", time.time())) / 60
@@ -524,6 +587,10 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         return None
 
     if phase == "commit":
+        if job.get("cwd"):
+            # A worktree task committed on its own branch: apply it to the checkout instead.
+            _merge_worktree(project, task, cfg, who, mins)
+            return None
         task.update(current_job=None, status="committed", commit=new_head)
         task.log_event("committed", worker=who, commit=new_head)
         tasks.release_active(project, task)
@@ -602,13 +669,26 @@ def abandon(project: Path, ref: str) -> str:
     task = tasks.find(project, ref)
     if task.load().get("status") == "running":
         raise FlowError(f"task {task.id} has a job running; wait for it (`aaagent wait {task.id}`) first.")
+    state = task.load()
+    worktree = state.get("worktree")
+    branch = state.get("task_branch") or worktrees.branch_for(task)
     task.update(status="abandoned")
     task.log_event("abandoned")
     tasks.release_active(project, task)
-    left = gitutil.dirty_paths(project)
+    if worktree:
+        path = Path(worktree)
+        # Keep the worktree: it may hold work the user still wants, so only name it.
+        left = gitutil.dirty_paths(path) if path.is_dir() else []
+    else:
+        left = gitutil.dirty_paths(project)
     text = f"task {task.id} abandoned."
+    if worktree:
+        text += (f"\nits worktree stays at {task.rel(Path(worktree))} on branch {branch}; remove "
+                 f"both when you no longer need them: git worktree remove --force {worktree} && "
+                 f"git branch -D {branch}")
     if left:
-        text += f"\nuncommitted changes left in the working tree: {', '.join(left)}"
+        where = "the worktree" if worktree else "the working tree"
+        text += f"\nuncommitted changes left in {where}: {', '.join(left)}"
     lines = branching.on_idle(project, Config.load(project))
     if lines:
         text += "\n" + "\n".join(lines)

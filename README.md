@@ -247,6 +247,8 @@ files: lib/aaagent/health.py, tests/test_health.py, docs/
 - Commits never run at the same time: a task waits while another task is committing, so the shared git index is never touched by two workers at once.
 - Your own uncommitted changes are still kept out of the commits; they are refreshed when the task is first dispatched.
 
+With `[parallel] isolation = "worktree"`, each task also gets its own git worktree (`.aaagent/worktrees/<task>`, branch `aaagent/<task>`): its implement, fix and review jobs run there, so the tasks' tests never see each other's half-written code. aaagent copies the plan, reports and reviews in and out. After approval the commit job commits in the worktree, and aaagent applies the commit to the session branch (fast-forward, or cherry-pick when other tasks were committed meanwhile), then removes the worktree and its branch. If that fails, for example because your own uncommitted changes are in the way, the task stops with its worktree kept, and the next `aaagent dispatch` retries only the merge. `[parallel] links` (a virtualenv, `node_modules`, `.env`) are linked into each new worktree, and `[parallel] setup` (for example `npm ci`) runs once in it. Worktrees need git and `track_agent_dir = false`; otherwise tasks use the shared tree.
+
 ### Branches and pull requests
 
 By default tasks commit on the branch that is checked out. `[git] branch_mode` changes that:
