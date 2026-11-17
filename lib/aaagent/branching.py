@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -41,6 +42,8 @@ GH_TIMEOUT_SECONDS = 60
 # it may run when `timeout_minutes` is missing or invalid.
 INTEGRATION_TAIL = 30
 INTEGRATION_TIMEOUT_MINUTES = 20
+# A timed-out check gets SIGTERM, then SIGKILL this many seconds later.
+INTEGRATION_KILL_GRACE = 5
 
 
 # -- files ---------------------------------------------------------------------
@@ -283,29 +286,47 @@ def _tail(output: str | bytes | None) -> list[str]:
     return [line.rstrip() for line in text.splitlines()][-INTEGRATION_TAIL:]
 
 
+def _kill_group(pid: int, sig: int) -> None:
+    """Signal an integration command's process group; a group that is already gone is fine."""
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        pass
+
+
 def run_integration(project: Path, cfg: Config) -> dict:
     """Run `[integration] command` in the project; the result to record on the batch.
 
-    The command runs without a terminal and times out. A failing command or an OSError is a
-    result, never an exception.
+    The command runs without a terminal, in its own process group, and times out. On a timeout
+    the whole group is killed, so a test runner it started (or `cmd1 && cmd2`, or background
+    jobs) does not keep running as an orphan. A failing command or an OSError is a result,
+    never an exception.
     """
     cmd = integration_command(cfg)
     result = {"head": gitutil.head(project), "command": cmd, "ok": False, "code": None,
               "timed_out": False, "tail": [], "at": tasks.now()}
     try:
-        proc = subprocess.run(cmd, shell=True, cwd=project, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, timeout=_integration_timeout_minutes(cfg) * 60)
-    except subprocess.TimeoutExpired as exc:
-        result["timed_out"] = True
-        result["tail"] = _tail(exc.stdout)
-        return result
+        proc = subprocess.Popen(cmd, shell=True, cwd=project, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, start_new_session=True)
     except OSError as exc:
         result["tail"] = [str(exc)]
         return result
+    try:
+        output, _ = proc.communicate(timeout=_integration_timeout_minutes(cfg) * 60)
+    except subprocess.TimeoutExpired as exc:
+        result["timed_out"] = True
+        _kill_group(proc.pid, signal.SIGTERM)
+        try:
+            output, _ = proc.communicate(timeout=INTEGRATION_KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc.pid, signal.SIGKILL)
+            output, _ = proc.communicate()
+        result["tail"] = _tail(output or exc.stdout)
+        return result
     result["code"] = proc.returncode
     result["ok"] = proc.returncode == 0
-    result["tail"] = _tail(proc.stdout)
+    result["tail"] = _tail(output)
     return result
 
 
