@@ -350,8 +350,20 @@ class Step:
 
 
 def plan_is_written(task: Task) -> bool:
+    """Whether plan.md has been written: its body must not start with the template line.
+
+    Only the line the template puts right after the frontmatter counts, so a plan that
+    mentions the marker further down is still a real plan.
+    """
     text = task.plan.read_text() if task.plan.is_file() else ""
-    return bool(text.strip()) and "<!-- TEMPLATE" not in text
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        for i, line in enumerate(lines[1:], 1):
+            if line.strip() == "---":
+                lines = lines[i + 1:]
+                break
+    first = next((line.strip() for line in lines if line.strip()), "")
+    return bool(first) and not first.startswith("<!-- TEMPLATE")
 
 
 def plan_digest(task: Task) -> str:
@@ -441,7 +453,8 @@ def next_step(task: Task, cfg: Config, worker_override: str | None = None, force
         return Step("fix", reports + 1, worker_override, switched=worker_override != current)
 
     since = int(state.get("worker_since_round", 1))
-    rejected_in_a_row = reviews - since + 1
+    rejected_in_a_row = sum(1 for n in range(since, reviews + 1)
+                            if task.verdict(n) == "changes_requested")
     alt = cfg.alternate(current)
     if alt and rejected_in_a_row >= cfg.fallback_after_failed_reviews:
         return Step("fix", reports + 1, alt, switched=True,
