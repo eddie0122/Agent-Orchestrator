@@ -70,6 +70,9 @@ job_timeout_minutes = 30
 model = "planner"
 # Thinking level: claude --effort for a Claude model, the opencode variant otherwise. Empty = default.
 thinking = ""
+# How many reviews the reviewer runs at the same time (1–8). Raise it when several tasks run in
+# parallel, so their reviews do not wait for each other.
+parallel = 1
 # backend = "opencode" | "claude"   # optional; inferred from the model like workers
 
 [git]
