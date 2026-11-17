@@ -57,6 +57,23 @@ With a reviewer model, `aaagent dispatch <task>` runs implement → review → f
 
 The chat keeps `.aaagent/lessons.md`: one line per mistake reviewers caught that is likely to recur, project conventions, the right test command. aaagent appends this file to every implement, fix and review prompt (up to 6000 characters), so workers and reviewers learn from earlier tasks. Edit it by hand too; delete it to turn the feature off.
 
+### Integration check
+
+Each task is reviewed on its own. To catch problems that only show when the tasks of a branch are
+combined, set a command that checks the whole project:
+
+```toml
+[integration]
+command = "python3 -m unittest discover -s tests -q"
+timeout_minutes = 20
+```
+
+aaagent runs it after the last task on the branch is committed. When it fails, the chat is told not
+to open the pull request and plans a fix task instead; the check runs again after that task.
+`aaagent pr` and `aaagent branch-done` also run it when it has not passed for the current commit, and
+refuse while it fails. Empty (the default) turns the check off. It runs only with a session branch
+(`branch_mode` `branch`, `pr` or `pr-auto`).
+
 ## Install
 
 ```bash
