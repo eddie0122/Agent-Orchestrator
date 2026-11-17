@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from .config import ROOT, Config
 AGENT_DIR = ".aaagent"
 TEMPLATES = ROOT / "templates"
 FINAL_STATUSES = {"committed", "abandoned"}
+VERDICTS = ("approved", "changes_requested", "plan_problem")
 GLOB_CHARS = "*?["
 
 
@@ -352,6 +354,18 @@ def plan_is_written(task: Task) -> bool:
     return bool(text.strip()) and "<!-- TEMPLATE" not in text
 
 
+def plan_digest(task: Task) -> str:
+    """sha256 of plan.md, to notice that the planner revised it."""
+    return hashlib.sha256(task.plan.read_bytes()).hexdigest() if task.plan.is_file() else ""
+
+
+def _round_limit_error(task: Task, reports: int, cfg: Config) -> FlowError:
+    return FlowError(
+        f"{reports} rounds without approval (max_review_rounds = {cfg.max_review_rounds}). "
+        f"Stop and ask the user how to proceed. If they want another round, run "
+        f"`aaagent dispatch {task.id} --force`; to drop the task, `aaagent abandon {task.id}`.")
+
+
 def next_step(task: Task, cfg: Config, worker_override: str | None = None, force: bool = False) -> Step:
     """Decide what `aaagent dispatch` should do next, or raise FlowError explaining why not."""
     state = task.load()
@@ -385,7 +399,8 @@ def next_step(task: Task, cfg: Config, worker_override: str | None = None, force
             return Step("review", reports, reviewer)
         raise FlowError(
             f"report-{reports}.md has no review yet. Review the work and write "
-            f"{task.rel(task.review(reports))} (verdict: approved or changes_requested).")
+            f"{task.rel(task.review(reports))} (verdict: approved, changes_requested or "
+            f"plan_problem).")
 
     verdict = task.verdict(reviews)
     current = state.get("worker")
@@ -397,16 +412,29 @@ def next_step(task: Task, cfg: Config, worker_override: str | None = None, force
         cfg.worker_model(worker)
         return Step("commit", reports, worker)
 
-    if verdict != "changes_requested":
+    if verdict not in ("changes_requested", "plan_problem"):
         raise FlowError(
             f"{task.rel(task.review(reviews))} must start with frontmatter "
-            f"`verdict: approved` or `verdict: changes_requested` (found: {verdict!r}).")
+            f"`verdict: approved`, `verdict: changes_requested` or `verdict: plan_problem` "
+            f"(found: {verdict!r}).")
+
+    if verdict == "plan_problem":
+        if state.get("plan_problem_digest") and state["plan_problem_digest"] == plan_digest(task):
+            raise FlowError(
+                f"{task.rel(task.review(reviews))} says the plan has a problem. Revise "
+                f"{task.rel(task.plan)} (widen `files:` if the fix needs other files), then run "
+                f"`aaagent dispatch {task.id}` again; the next round fixes the work against the "
+                f"revised plan.")
+        if reports >= cfg.max_review_rounds and not force:
+            raise _round_limit_error(task, reports, cfg)
+        # No fallback switch: the plan was at fault, not the worker.
+        worker = worker_override or current
+        cfg.worker_model(worker)
+        return Step("fix", reports + 1, worker,
+                    switched=bool(worker_override and worker_override != current))
 
     if reports >= cfg.max_review_rounds and not force:
-        raise FlowError(
-            f"{reports} rounds without approval (max_review_rounds = {cfg.max_review_rounds}). "
-            f"Stop and ask the user how to proceed. If they want another round, run "
-            f"`aaagent dispatch {task.id} --force`; to drop the task, `aaagent abandon {task.id}`.")
+        raise _round_limit_error(task, reports, cfg)
 
     if worker_override:
         cfg.worker_model(worker_override)

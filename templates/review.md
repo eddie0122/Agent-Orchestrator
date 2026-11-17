@@ -1,5 +1,5 @@
 ---
-verdict: changes_requested     # approved | changes_requested
+verdict: changes_requested     # approved | changes_requested | plan_problem
 round: N
 ---
 

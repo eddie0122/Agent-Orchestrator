@@ -22,7 +22,7 @@ verdict: approved
 round: {round}
 ---
 
-Use `verdict: approved` when the done criteria are met and validation passes, otherwise `verdict: changes_requested`. Request changes only for real problems: bugs, missing requirements, failing checks, scope creep. Style preferences go under optional suggestions and never block approval. Then these sections:
+Use `verdict: approved` when the done criteria are met and validation passes, otherwise `verdict: changes_requested`. Request changes only for real problems: bugs, missing requirements, failing checks, scope creep. Style preferences go under optional suggestions and never block approval. Use `verdict: plan_problem` instead when the work cannot be approved because the plan itself is wrong: it asks for something impossible or contradictory, or its `files:` scope or Out of scope rule forbids the only correct fix (a report with `status: blocked` that explains a real plan defect is the typical case). Then "Required changes" must say exactly what the planner has to change in the plan; do not ask the worker for workarounds that break the plan's scope. Then these sections:
 
 ## Assessment
 (what you checked, the validation commands you ran and their results)

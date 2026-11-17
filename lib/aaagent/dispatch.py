@@ -409,7 +409,7 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
     error = result.get("error") if result.get("status") != "ok" else None
     if not error and phase in ("implement", "fix") and not task.report(rnd).is_file():
         error = f"worker finished without writing {task.rel(task.report(rnd))}"
-    if not error and phase == "review" and task.verdict(rnd) not in ("approved", "changes_requested"):
+    if not error and phase == "review" and task.verdict(rnd) not in tasks.VERDICTS:
         error = (f"reviewer finished without writing {task.rel(task.review(rnd))} "
                  "with a valid verdict")
     new_head = gitutil.head(project)
@@ -435,8 +435,8 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
             task.log_event(f"review round {rnd} handed to the planner", worker=who)
             print(f"The reviewer could not review round {rnd}. Review it yourself: read the report, "
                   f"inspect `aaagent diff {task.id}`, write {task.rel(task.review(rnd))} with "
-                  f"`verdict: approved` or `verdict: changes_requested`, and run "
-                  f"`aaagent dispatch {task.id}`.")
+                  f"`verdict: approved`, `verdict: changes_requested` or `verdict: plan_problem`, "
+                  f"and run `aaagent dispatch {task.id}`.")
             return None
         alt = cfg.alternate(who)
         if alt and not job.get("retry_of"):
@@ -468,7 +468,9 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
 
     if phase == "review":
         verdict = task.verdict(rnd)
-        task.update(current_job=None, status=verdict, review_failed_round=None)
+        task.update(current_job=None, status=verdict, review_failed_round=None,
+                    plan_problem_digest=(tasks.plan_digest(task)
+                                         if verdict == "plan_problem" else None))
         task.log_event(f"review round {rnd}: {verdict}", worker=who)
         print(f"✓ review round {rnd} by {who} ({cfg.worker_label(who)}) in {mins:.1f} min: "
               f"{verdict.replace('_', ' ')}")
@@ -478,6 +480,11 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
                   f"over `aaagent diff {task.id}`, then run `aaagent dispatch {task.id}` to commit. "
                   f"To overrule the approval, overwrite the review file with "
                   f"`verdict: changes_requested` and your required changes, then dispatch.")
+        elif verdict == "plan_problem":
+            print(f"Next: the reviewer found a problem in the plan (round {rnd}). Read "
+                  f"{task.rel(task.review(rnd))}, revise {task.rel(task.plan)} (widen `files:` if "
+                  f"needed, ask the user if the goal itself changes), then run "
+                  f"`aaagent dispatch {task.id}` for a fix round against the revised plan.")
         return None
 
     report = task.report(rnd)
@@ -498,8 +505,8 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
               f"(`aaagent dispatch {task.id}` continues if this command was interrupted).")
     else:
         print(f"Next: read the report, inspect `aaagent diff {task.id}`, re-run the validation, then write "
-              f"{task.rel(task.review(rnd))} with `verdict: approved` or `verdict: changes_requested`, "
-              f"and run `aaagent dispatch {task.id}`.")
+              f"{task.rel(task.review(rnd))} with `verdict: approved`, `verdict: changes_requested` or "
+              f"`verdict: plan_problem`, and run `aaagent dispatch {task.id}`.")
     return None
 
 

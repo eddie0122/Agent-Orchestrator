@@ -156,6 +156,13 @@ class SummaryTest(unittest.TestCase):
         warning = status.transitions(before, {"tasks": [task(status="failed", attention="failed")]})
         self.assertIn("the planner is waiting for you in the chat", warning[0]["message"])
 
+    def test_transitions_say_a_task_needs_a_plan_revision(self):
+        before = {"tasks": [task(status="plan_problem")]}
+        after = {"tasks": [task(status="plan_problem", attention="plan problem")]}
+        ev = status.transitions(before, after)
+        self.assertEqual(ev[0]["level"], "warning")
+        self.assertIn("plan revision", ev[0]["message"])
+
 
 class SessionSummaryTest(unittest.TestCase):
     NOW = datetime(2026, 11, 13, 12, 0, 0, tzinfo=timezone.utc)
