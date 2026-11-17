@@ -1,6 +1,9 @@
 """The optional `[integration]` check: at the end of a branch and before finishing it."""
 
+import os
+import shlex
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -91,6 +94,37 @@ class IntegrationGateTest(FlowCase):
 
         self.assertIn("timed out", out)
         self.assertIn("Do not open a pull request", out)
+
+    def test_timeout_kills_child_processes(self):
+        self.write_mode("pr")
+        pidfile = Path(self.tmp.name) / "child.pid"
+        self.write_integration(f"sleep 30 & echo $! > {shlex.quote(str(pidfile))}; wait",
+                              timeout_minutes=0.01)
+
+        started = time.monotonic()
+        task, out = self.one_commit()
+        elapsed = time.monotonic() - started
+
+        self.assertIn("timed out", out)
+        self.assertLess(elapsed, 20, "a timed-out check must not wait for its children")
+        self.assertTrue(pidfile.is_file(), "the command should have recorded its child's pid")
+        pid = int(pidfile.read_text().strip())
+
+        def dead():
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            try:
+                fields = Path(f"/proc/{pid}/stat").read_text().split()
+            except OSError:
+                return True
+            return len(fields) > 2 and fields[2] == "Z"
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not dead():
+            time.sleep(0.1)
+        self.assertTrue(dead(), f"child process {pid} is still running after the timeout")
 
     def test_no_command_is_unchanged(self):
         self.write_mode("pr")

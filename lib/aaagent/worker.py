@@ -23,6 +23,8 @@ from .backends import BOLD, DIM, GREEN, RED, RESET, color_enabled, paint
 from .config import REVIEWER, Config, infer_backend
 
 POLL_SECONDS = 1.0
+# How often an idle daemon looks whether aaagent's own code changed (it then restarts itself).
+RELOAD_CHECK_SECONDS = 5.0
 # The most review jobs one daemon runs at once ([reviewer] parallel).
 MAX_PARALLEL = 8
 # One colour per worker, picked by its position in the configured worker list.
@@ -359,8 +361,70 @@ def _stopped_result(job: dict, worker: str) -> dict:
             "started": time.time(), "finished": time.time(), "log": job["log"]}
 
 
+# -- restarting after a code update -----------------------------------------
+
+def code_fingerprint() -> float:
+    """The newest modification time of aaagent's Python files (0.0 when none can be read)."""
+    newest = 0.0
+    for path in Path(__file__).resolve().parent.glob("*.py"):
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def _code_imports() -> bool:
+    """Whether aaagent's current code imports cleanly: it may be half-written while it changes."""
+    pythonpath = str(Path(__file__).resolve().parents[1])
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        pythonpath += os.pathsep + existing
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", "import aaagent.cli, aaagent.worker"],
+            env={**os.environ, "PYTHONPATH": pythonpath},
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def _restart_if_code_changed(started_with: float, tag: str, last_check: list) -> None:
+    """Re-exec the daemon when aaagent's code is newer than `started_with` and imports cleanly.
+
+    `last_check` holds the monotonic time of the last check in element 0, so the files are
+    looked at at most once every RELOAD_CHECK_SECONDS, and the newest fingerprint that failed
+    the import check in element 1, so a half-written update is reported once. Call this only
+    while idle.
+    """
+    now = time.monotonic()
+    if now - last_check[0] < RELOAD_CHECK_SECONDS:
+        return
+    last_check[0] = now
+    fingerprint = code_fingerprint()
+    if fingerprint <= started_with:
+        return
+    if len(last_check) < 2:
+        last_check.append(None)
+    if last_check[1] == fingerprint:
+        return  # this version was already found broken while it was being written
+    if not _code_imports():
+        last_check[1] = fingerprint
+        print(f"{tag} aaagent's code changed but does not import cleanly yet; "
+              "staying on the running version", flush=True)
+        return
+    last_check[1] = None
+    print(f"{tag} aaagent was updated; restarting with the new code", flush=True)
+    try:
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    except OSError as exc:
+        print(f"{tag} could not restart: {exc}", flush=True)
+
+
 def _serve_pool(project: Path, worker: str, cfg: Config, tag: str, n: int,
-                once: bool, quiet_wait: bool) -> int:
+                once: bool, quiet_wait: bool, started_with: float,
+                last_check: list) -> int:
     """The daemon loop for a queue with several slots: up to `n` jobs run at the same time."""
     running: dict[str, tuple[dict, Path, threading.Thread]] = {}
     stopping = threading.Event()
@@ -392,6 +456,7 @@ def _serve_pool(project: Path, worker: str, cfg: Config, tag: str, n: int,
             if not running:
                 if once:
                     return 0
+                _restart_if_code_changed(started_with, tag, last_check)
                 if not waiting_shown and not quiet_wait:
                     print(f"{tag} waiting for a plan…", flush=True)
                 waiting_shown = True
@@ -442,15 +507,19 @@ def serve(project: Path, worker: str, once: bool = False, quiet_wait: bool = Fal
     n = slots(cfg, worker)
     print(f"{tag} {model}" + (f" ({n} at a time)" if n > 1 else ""), flush=True)
     waiting_shown = False
+    started_with = code_fingerprint()
+    last_check = [time.monotonic(), None]
     job = claimed_path = None
     try:
         if n > 1:
-            return _serve_pool(project, worker, cfg, tag, n, once, quiet_wait)
+            return _serve_pool(project, worker, cfg, tag, n, once, quiet_wait,
+                               started_with, last_check)
         while True:
             claimed = claim(project, worker)
             if not claimed:
                 if once:
                     return 0
+                _restart_if_code_changed(started_with, tag, last_check)
                 if not waiting_shown and not quiet_wait:
                     print(f"{tag} waiting for a plan…", flush=True)
                 waiting_shown = True
