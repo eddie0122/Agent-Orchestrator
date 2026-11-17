@@ -1,10 +1,10 @@
 "use strict";
-// The extension side of the local image bridge.
+// The extension side of the local file bridge.
 //
 // Over Remote-SSH the extension host runs on the server, but `vscode.workspace.fs` can still
 // read the user's own disk through the `vscode-local` URI scheme. Claude Code's
 // `UserPromptSubmit` hook (`claude/hooks/local_images.py`) writes a request into
-// `<project>/.aaagent/fetch/` for an image a prompt mentions; this module reads the request,
+// `<project>/.aaagent/fetch/` for a file a prompt mentions; this module reads the request,
 // copies the file into `.aaagent/attachments/` and writes the result back. The hook waits for
 // the answer and tells Claude where the copy is.
 
@@ -13,7 +13,7 @@ const os = require("os");
 const path = require("path");
 const vscode = require("vscode");
 
-const { saveAttachment } = require("./attach");
+const { saveFile } = require("./attach");
 const model = require("./model");
 
 const REQUEST_SUFFIX = ".request.json";
@@ -21,7 +21,8 @@ const STALE_SECONDS = 60;
 
 /** The client's disk in a remote window, this machine's own disk in a local one. */
 function localUri(p) {
-  return vscode.Uri.from({ scheme: vscode.env.remoteName ? "vscode-local" : "file", path: p });
+  return vscode.Uri.from({ scheme: vscode.env.remoteName ? "vscode-local" : "file",
+    path: model.localUriPath(p) });
 }
 
 /** `~/x` with the user's home. A remote window cannot know the client's home directory. */
@@ -37,13 +38,21 @@ function expandHome(p) {
 async function readLocalFile(p) {
   const target = expandHome(p);
   const uri = localUri(target);
-  const name = path.basename(target);
+  const name = path.posix.basename(model.localUriPath(target));
   const stat = await vscode.workspace.fs.stat(uri);
-  if (stat.size > model.MAX_IMAGE_BYTES) {
+  if (stat.size > model.MAX_FILE_BYTES) {
     const mb = (stat.size / (1024 * 1024)).toFixed(1);
-    throw new Error(`${name} is ${mb} MB; the limit is ${model.MAX_IMAGE_BYTES / (1024 * 1024)} MB`);
+    throw new Error(`${name} is ${mb} MB; the limit is ${model.MAX_FILE_BYTES / (1024 * 1024)} MB`);
   }
   return Buffer.from(await vscode.workspace.fs.readFile(uri));
+}
+
+/** Whether a read failed because there is no such file on the user's computer. */
+function isMissing(err) {
+  if (!err) return false;
+  const code = String(err.code || "");
+  if (code === "FileNotFound" || code === "ENOENT") return true;
+  return String(err.name || "").includes("EntryNotFound");
 }
 
 function writeAtomic(target, value) {
@@ -82,10 +91,12 @@ class LocalFetcher {
       if (created > 0 && Date.now() / 1000 - created > STALE_SECONDS) return null;
       if (!requested) throw new Error("the request has no path");
       const data = await this.readLocal(requested);
-      const saved = saveAttachment(this.project, path.basename(requested), data);
+      const saved = saveFile(this.project, path.posix.basename(model.localUriPath(requested)), data);
       answer = { ok: true, rel: saved.rel };
     } catch (err) {
-      answer = { ok: false, error: (err && err.message) || String(err) };
+      const error = (err && err.message) || String(err);
+      // A path that is not a local file at all: the hook stays quiet about it.
+      answer = isMissing(err) ? { ok: false, missing: true, error } : { ok: false, error };
     }
 
     try {
@@ -95,7 +106,7 @@ class LocalFetcher {
     }
     if (answer.ok) {
       if (this.onSaved) this.onSaved(answer.rel, requested);
-    } else if (this.onFailed) {
+    } else if (!answer.missing && this.onFailed) {
       this.onFailed(requested, answer.error);
     }
     return answer;

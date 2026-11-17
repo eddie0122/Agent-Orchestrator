@@ -249,6 +249,9 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
     if job.get("cwd"):
         # The Claude guard hook decides what a worker may edit from AAAGENT_PROJECT.
         env["AAAGENT_PROJECT"] = str(workdir)
+    # opencode trusts $PWD over the real cwd, so a worktree job would work in the
+    # directory aaagent dispatch was started in.
+    env["PWD"] = str(workdir)
 
     log_path = Path(job["log"])
     log_path.parent.mkdir(parents=True, exist_ok=True)

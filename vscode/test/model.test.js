@@ -583,3 +583,32 @@ test("isImagePath accepts the image extensions in any case", () => {
   assert.strictEqual(model.isImagePath("a/b"), false);
   assert.strictEqual(model.isImagePath(".png"), false);
 });
+
+test("fileAttachmentName keeps the original extension, lowercased", () => {
+  const date = new Date(2026, 2, 4, 5, 6, 7); // local time
+  assert.strictEqual(model.fileAttachmentName("refresh-pages.js", date), "20260304-050607-refresh-pages.js");
+  assert.strictEqual(model.fileAttachmentName("C:\\Users\\a\\Notes.TXT", date), "20260304-050607-Notes.txt");
+  assert.strictEqual(model.fileAttachmentName("a b.cfg", date), "20260304-050607-a-b.cfg");
+  assert.strictEqual(model.fileAttachmentName("a.tar.gz", date), "20260304-050607-a.tar.gz");
+  assert.strictEqual(model.fileAttachmentName("스크린샷.js", date), "20260304-050607-file.js");
+  assert.strictEqual(model.fileAttachmentName("", date), "20260304-050607-file");
+  assert.strictEqual(model.fileAttachmentName("Makefile", date), "20260304-050607-Makefile");
+  assert.strictEqual(model.fileAttachmentName("weird.$$$", date), "20260304-050607-weird");
+  assert.strictEqual(model.fileAttachmentName(`${"x".repeat(60)}.py`, date),
+    `20260304-050607-${"x".repeat(40)}.py`);
+});
+
+test("fileAttachmentName does not change attachmentName", () => {
+  const date = new Date(2026, 2, 4, 5, 6, 7);
+  assert.strictEqual(model.attachmentName("refresh-pages.js", "png", date), "20260304-050607-refresh-pages.png");
+});
+
+test("localUriPath makes a URI path out of a Windows path and leaves POSIX alone", () => {
+  assert.strictEqual(model.localUriPath("C:\\Users\\a\\b.js"), "/C:/Users/a/b.js");
+  assert.strictEqual(model.localUriPath("c:/Users/a/b.js"), "/c:/Users/a/b.js");
+  assert.strictEqual(model.localUriPath("/c:/Users/a/b.js"), "/c:/Users/a/b.js");
+  assert.strictEqual(model.localUriPath("/Users/a/b.js"), "/Users/a/b.js");
+  assert.strictEqual(model.localUriPath("~/b.js"), "~/b.js");
+  assert.strictEqual(model.localUriPath(""), "");
+  assert.strictEqual(model.MAX_FILE_BYTES, model.MAX_IMAGE_BYTES);
+});

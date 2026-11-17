@@ -12,6 +12,7 @@ Env:
   FAKE_OC_NOREVIEW  comma-separated models that exit 0 without writing the review
   FAKE_OC_REVIEW_SLEEP  seconds a review job sleeps before writing the review (default 0)
   FAKE_OC_ARGS_LOG  file to append each invocation's argv (JSON) to
+  FAKE_OC_ENV_LOG   file to append each invocation's PWD and real cwd (JSON) to
 """
 
 import json
@@ -60,6 +61,10 @@ def main():
     if os.environ.get("FAKE_OC_ARGS_LOG"):
         with open(os.environ["FAKE_OC_ARGS_LOG"], "a") as fh:
             fh.write(json.dumps(args) + "\n")
+    if os.environ.get("FAKE_OC_ENV_LOG"):
+        with open(os.environ["FAKE_OC_ENV_LOG"], "a") as fh:
+            fh.write(json.dumps({"pwd": os.environ.get("PWD"),
+                                 "cwd": os.getcwd()}) + "\n")
     if args and args[0] == "models":
         for name in ("opencode-go/deepseek-v4.1-flash", "opencode-go/glm-5.3-flash",
                      "opencode-go/kimi-k3"):

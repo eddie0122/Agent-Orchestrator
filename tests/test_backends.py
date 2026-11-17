@@ -10,6 +10,7 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
@@ -41,6 +42,7 @@ class BackendTest(unittest.TestCase):
         self.project = Path(self.tmp.name) / "proj"
         self.project.mkdir()
         self.args_log = Path(self.tmp.name) / "args.jsonl"
+        self.env_log = Path(self.tmp.name) / "env.jsonl"
         self.claude_args_log = Path(self.tmp.name) / "claude-args.jsonl"
         self.env_backup = dict(os.environ)
         os.environ.update({
@@ -48,6 +50,7 @@ class BackendTest(unittest.TestCase):
             "AAAGENT_CLAUDE_BIN": str(FAKE_CLAUDE),
             "AAAGENT_USER_CONFIG": str(Path(self.tmp.name) / "none.toml"),
             "FAKE_OC_ARGS_LOG": str(self.args_log),
+            "FAKE_OC_ENV_LOG": str(self.env_log),
             "FAKE_OC_FAIL": "", "FAKE_OC_NOREPORT": "",
             "FAKE_CLAUDE_ARGS_LOG": str(self.claude_args_log),
             "FAKE_CLAUDE_FAIL": "", "FAKE_CLAUDE_NOREPORT": "",
@@ -107,6 +110,12 @@ class BackendTest(unittest.TestCase):
         if not self.claude_args_log.exists():
             return []
         return [json.loads(line) for line in self.claude_args_log.read_text().splitlines()]
+
+    def fake_envs(self) -> list[dict]:
+        """The PWD and real cwd each fake opencode run saw."""
+        if not self.env_log.exists():
+            return []
+        return [json.loads(line) for line in self.env_log.read_text().splitlines()]
 
     def run_dispatch(self, task, **kw) -> tuple[int, str]:
         buf = io.StringIO()
@@ -209,6 +218,31 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(result["session"], events[0]["session_id"])
         self.assertEqual(result["tokens"], {"input": 100, "output": 10})
         self.assertEqual(result["backend"], "claude")
+
+    def test_run_job_passes_the_job_directory_as_pwd(self):
+        cfg = Config.load(self.project)
+        wt = self.project / "wt"
+        wt.mkdir()
+        job = self.job(cwd=str(wt))
+        # The parent (aaagent dispatch) was started in the main checkout: PWD says so.
+        with mock.patch.dict(os.environ, {"PWD": str(self.project)}):
+            result = worker.run_job(self.project, job, cfg)
+        self.assertEqual(result["status"], "ok", result.get("error"))
+        seen = self.fake_envs()
+        self.assertEqual(len(seen), 1, seen)
+        self.assertEqual(os.path.realpath(seen[0]["pwd"]), os.path.realpath(wt))
+        self.assertEqual(os.path.realpath(seen[0]["cwd"]), os.path.realpath(wt))
+
+    def test_run_job_without_cwd_passes_the_project_as_pwd(self):
+        cfg = Config.load(self.project)
+        job = self.job()
+        with mock.patch.dict(os.environ, {"PWD": str(self.tmp.name)}):
+            result = worker.run_job(self.project, job, cfg)
+        self.assertEqual(result["status"], "ok", result.get("error"))
+        seen = self.fake_envs()
+        self.assertEqual(len(seen), 1, seen)
+        self.assertEqual(os.path.realpath(seen[0]["pwd"]), os.path.realpath(self.project))
+        self.assertEqual(os.path.realpath(seen[0]["cwd"]), os.path.realpath(self.project))
 
     # -- 5. the whole flow on claude -----------------------------------------
 

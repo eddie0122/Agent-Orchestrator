@@ -147,14 +147,15 @@ function activate(context) {
     }
   }
 
-  // The chat hook asks us to copy an image that a prompt mentions from the user's computer.
+  // The chat hook asks us to copy a file that a prompt mentions from the user's computer.
   function watchFetches(project) {
     const local = new LocalFetcher({
       project,
       onSaved: (rel) => vscode.window.setStatusBarMessage(
         `aaagent: copied ${path.basename(rel)} from your computer`, 8000),
       onFailed: (from, message) => vscode.window.showWarningMessage(
-        `aaagent could not copy ${path.basename(from)} from your computer: ${message}`, "Attach Image…")
+        `aaagent could not copy ${path.basename(model.localUriPath(from))} from your computer: ${message}`,
+        ...(model.isImagePath(from) ? ["Attach Image…"] : []))
         .then((pick) => { if (pick) vscode.commands.executeCommand("aaagent.attachImage"); }),
     });
     fetcher = local;
