@@ -94,6 +94,7 @@ def status_data(project: Path, cfg: Config) -> dict:
             "next": nxt, "blocked": blocked, "attention": attention,
             "commit": state.get("commit"), "created": state.get("created"),
             "session": state.get("chat_session"),
+            "worktree": state.get("worktree"),
             "updated": task.state_file.stat().st_mtime if task.state_file.exists() else None,
             "path": str(task.path), "files": files, "scope": task.scope(),
         })

@@ -8,7 +8,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-from . import backends, branching, gitutil, tasks, worker
+from . import backends, branching, gitutil, tasks, worker, worktrees
 from .config import REVIEWER, ROOT, Config
 from .tasks import FlowError, Step, Task
 
@@ -109,6 +109,10 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
 
 def _enqueue(project: Path, task: Task, step: Step, cfg: Config, retry_of: str | None = None) -> dict:
     state = task.load()
+    workdir = worktrees.workdir(project, task)
+    own_tree = str(workdir) != str(project)
+    if own_tree:
+        worktrees.sync_into(project, task, workdir)
     backend = cfg.worker_backend(step.worker)
     # Review jobs keep their own session under the reviewer's name; every other phase
     # keeps one per worker.
@@ -122,17 +126,22 @@ def _enqueue(project: Path, task: Task, step: Step, cfg: Config, retry_of: str |
     else:
         agent = cfg.implement_agent
     job_id = worker.new_job_id()
-    job = worker.enqueue(project, {
+    data = {
         "id": job_id, "task": task.id, "phase": step.phase, "round": step.round,
         "worker": step.worker, "model": cfg.worker_model(step.worker),
         "thinking": cfg.worker_thinking(step.worker), "agent": agent, "backend": backend,
         "session": session, "prompt": build_prompt(task, step, cfg, retry=retry_of is not None),
         "timeout": cfg.job_timeout_seconds, "retry_of": retry_of,
-        "pre_head": gitutil.head(project),
+        "pre_head": gitutil.head(workdir),
         "log": str(task.logs / f"r{step.round}-{step.phase}-{step.worker}-{job_id}.jsonl"),
-    })
-    changes = {"status": "running", "current_job": {
-        k: job[k] for k in ("id", "phase", "round", "worker", "retry_of", "pre_head", "log")}}
+    }
+    if own_tree:
+        data["cwd"] = str(workdir)
+    job = worker.enqueue(project, data)
+    current = {k: job[k] for k in ("id", "phase", "round", "worker", "retry_of", "pre_head", "log")}
+    if own_tree:
+        current["cwd"] = job["cwd"]
+    changes = {"status": "running", "current_job": current}
     if step.phase != "review":
         changes["worker"] = step.worker
         if step.phase == "implement" or step.switched:
@@ -156,6 +165,17 @@ def _other_active_tasks(project: Path, task: Task) -> list[Task]:
     return others
 
 
+def _start_worktree(project: Path, cfg: Config, task: Task) -> None:
+    """Create the task's own worktree and record it as the start of its diff window."""
+    base = gitutil.head(project)
+    path = worktrees.create(project, cfg, task, base)
+    branch = worktrees.branch_for(task)
+    task.update(base_commit=base, preexisting_dirty=[], started=tasks.now(),
+                worktree=str(path), task_branch=branch)
+    task.log_event("worktree created", path=str(path), branch=branch)
+    print(f"{task.id}: own worktree {task.rel(path)} on branch {branch}", flush=True)
+
+
 def refresh_base(project: Path, task: Task) -> None:
     """Start the diff window at the first dispatch, not at planning time.
 
@@ -163,12 +183,22 @@ def refresh_base(project: Path, task: Task) -> None:
     files as its own preexisting changes. Files that belong to another active task are not
     preexisting for this one either.
 
-    In No Git mode nothing else records the changes made outside aaagent, so they get a
-    checkpoint of their own before the task's window opens.
+    With `[parallel] isolation = "worktree"` the task gets its own worktree instead, and its
+    tree is clean at the start by definition. Otherwise, in No Git mode, nothing else records
+    the changes made outside aaagent, so they get a checkpoint of their own before the
+    task's window opens.
     """
     state = task.load()
     if task.latest_report() or state.get("started"):
         return
+    cfg = Config.load(project)
+    if worktrees.enabled(project, cfg):
+        _start_worktree(project, cfg, task)
+        return
+    reason = worktrees.why_disabled(project, cfg)
+    if reason:
+        print(f"note: [parallel] isolation = worktree is ignored ({reason}); the task works in "
+              f"the shared tree", flush=True)
     other_scopes = [other.scope() for other in _other_active_tasks(project, task)]
     nogit = gitutil.no_git(project)
     with tasks.active_lock(project) if nogit else nullcontext():
@@ -284,9 +314,17 @@ def _checkpoint(project: Path, task: Task, cfg: Config) -> int:
 
 
 def changed_outside_scope(project: Path, task: Task, state: dict) -> list[str]:
-    """Changed files that no active task declares and that were not dirty before this task."""
+    """Changed files that no active task declares and that were not dirty before this task.
+
+    A task with its own worktree is alone there: every dirty file outside its declared files
+    belongs to it, and no other task's scope or earlier change can explain it away.
+    """
     if task.scope() is None:
         return []
+    workdir = worktrees.workdir(project, task)
+    if str(workdir) != str(project):
+        return [path for path in gitutil.dirty_paths(workdir)
+                if not tasks.in_scope(path, task.scope())]
     scopes = [other.scope() for other in [task, *_other_active_tasks(project, task)]]
     preexisting = state.get("preexisting_dirty") or []
     return [path for path in gitutil.dirty_paths(project)
@@ -313,7 +351,12 @@ def dispatch(project: Path, ref: str, worker_override: str | None = None, force:
                 raise
     if line:
         print(line, flush=True)
-    refresh_base(project, task)
+    try:
+        refresh_base(project, task)
+    except BaseException:
+        if first:
+            tasks.release_active(project, task)
+        raise
     plan_worker = tasks.frontmatter(task.plan).get("worker") or None
     if step.phase == "implement" and not worker_override and not plan_worker:
         chosen, why = pick_free_worker(project, cfg, step.worker, task.id)
@@ -326,6 +369,10 @@ def dispatch(project: Path, ref: str, worker_override: str | None = None, force:
         note = f" ({step.reason}; switching worker)" if step.reason else ""
         if step.note:
             note = f" ({step.note})"
+        if step.phase == "commit" and task.load().get("worktree"):
+            raise FlowError(
+                f"task {task.id} works in its own worktree; committing worktree tasks is not "
+                f"supported yet (set [parallel] isolation = \"shared\" for now)")
         if step.phase == "commit" and gitutil.no_git(project):
             return _checkpoint(project, task, cfg)
         print(f"{task.id}: {step.phase} round {step.round} → {step.worker} "
@@ -423,6 +470,14 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
     if res_file.is_file():
         res_file.replace(task.logs / f"{job['id']}.result.json")
 
+    workdir = worktrees.workdir(project, task)
+    if str(workdir) != str(project) and phase in ("implement", "fix", "review"):
+        # The job wrote its report or review inside the worktree: bring it back before the
+        # checks below look for it in the main task folder.
+        cwd = Path(job["cwd"]) if job.get("cwd") else workdir
+        worktrees.sync_back(project, task, cwd,
+                            f"review-{rnd}.md" if phase == "review" else f"report-{rnd}.md")
+
     error = result.get("error") if result.get("status") != "ok" else None
     if not error and phase in ("implement", "fix") and not task.report(rnd).is_file():
         error = f"worker finished without writing {task.rel(task.report(rnd))}"
@@ -516,7 +571,7 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         task.log_event(f"{phase} round {rnd} {message}")
         print(f"warning: {message}")
     print("  changes since task start:")
-    print(gitutil.diff_stat(project, state.get("base_commit"), task.pathspecs()))
+    print(gitutil.diff_stat(workdir, state.get("base_commit"), task.pathspecs()))
     if cfg.reviewer_worker:
         print(f"Next: the reviewer ({cfg.worker_label(REVIEWER)}) reviews round {rnd} "
               f"(`aaagent dispatch {task.id}` continues if this command was interrupted).")

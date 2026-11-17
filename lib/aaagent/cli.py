@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from . import (__version__, attach, backends, branching, dispatch, gitutil, models, session,
-               sessions, status, tasks, tui, worker)
+               sessions, status, tasks, tui, worker, worktrees)
 from .config import (BRANCH_MODES, ROOT, USER_CONFIG, Config, migrate_legacy_workers,
                      project_config_path, set_toml_value, user_config_path)
 from .tasks import FlowError
@@ -486,8 +486,9 @@ def cmd_diff(args) -> int:
     else:
         base = state.get("base_commit")
         paths = task.pathspecs()
-        text = (gitutil.diff_stat(project, base, paths) if args.stat
-                else gitutil.full_diff(project, base, paths))
+        workdir = worktrees.workdir(project, task)
+        text = (gitutil.diff_stat(workdir, base, paths) if args.stat
+                else gitutil.full_diff(workdir, base, paths))
     print(text if text.strip() else "(no changes)")
     return 0
 

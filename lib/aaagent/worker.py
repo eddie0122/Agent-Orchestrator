@@ -171,6 +171,12 @@ def describe(event: dict, project: Path) -> str | None:
 def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
     backend = job.get("backend") or infer_backend(job["model"])
     cmd = backends.command(job, cfg)
+    # A task with its own worktree runs the backend there; its job dict names the directory.
+    workdir = Path(job["cwd"]) if job.get("cwd") else project
+    env = gitutil.git_env(project)
+    if job.get("cwd"):
+        # The Claude guard hook decides what a worker may edit from AAAGENT_PROJECT.
+        env["AAAGENT_PROJECT"] = str(workdir)
 
     log_path = Path(job["log"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,9 +185,9 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
     timed_out = threading.Event()
 
     with log_path.open("w") as log, open(log_path.with_suffix(".stderr"), "w") as err_log:
-        proc = subprocess.Popen(cmd, cwd=project, stdout=subprocess.PIPE, stderr=err_log,
+        proc = subprocess.Popen(cmd, cwd=workdir, stdout=subprocess.PIPE, stderr=err_log,
                                 stdin=subprocess.DEVNULL, text=True, start_new_session=True,
-                                env=gitutil.git_env(project))
+                                env=env)
 
         def kill():
             timed_out.set()
@@ -210,7 +216,7 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
                     errors.append(seen["error"])
                 tokens["input"] += seen["input"]
                 tokens["output"] += seen["output"]
-                line = backends.describe(backend, event, project)
+                line = backends.describe(backend, event, workdir)
                 if line:
                     print(line, file=out, flush=True)
             code = proc.wait()
