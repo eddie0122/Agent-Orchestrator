@@ -23,6 +23,8 @@ from .backends import BOLD, DIM, GREEN, RED, RESET, color_enabled, paint
 from .config import REVIEWER, Config, infer_backend
 
 POLL_SECONDS = 1.0
+# The most review jobs one daemon runs at once ([reviewer] parallel).
+MAX_PARALLEL = 8
 # One colour per worker, picked by its position in the configured worker list.
 COLOR_PALETTE = ["\033[36m", "\033[35m", "\033[33m", "\033[34m", "\033[32m", "\033[91m"]
 # The reviewer is not a slot in that list: it keeps a fixed bright yellow.
@@ -37,6 +39,20 @@ def worker_color(cfg: Config, name: str) -> str:
     if name in names:
         return COLOR_PALETTE[names.index(name) % len(COLOR_PALETTE)]
     return COLOR_PALETTE[0]
+
+
+def slots(cfg: Config, worker: str) -> int:
+    """How many jobs this queue runs at once: [reviewer] parallel for the reviewer (1..MAX_PARALLEL,
+    default 1; invalid values count as 1), always 1 for workers."""
+    if worker != REVIEWER:
+        return 1
+    section = cfg.data.get("reviewer", {})
+    raw = section.get("parallel", 1) if isinstance(section, dict) else 1
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return min(max(n, 1), MAX_PARALLEL)
 
 
 # -- paths ------------------------------------------------------------------
@@ -163,6 +179,60 @@ def claim(project: Path, worker: str) -> tuple[dict, Path] | None:
 
 # -- running one job -------------------------------------------------------
 
+# Backends currently running, so a stopping daemon can kill all of them: job id -> process.
+_procs: dict[str, subprocess.Popen] = {}
+_procs_lock = threading.Lock()
+# Serializes the event lines of concurrent jobs onto stdout.
+_out_lock = threading.Lock()
+
+
+def _register_proc(job_id: str, proc: subprocess.Popen) -> None:
+    with _procs_lock:
+        _procs[job_id] = proc
+
+
+def _unregister_proc(job_id: str) -> None:
+    with _procs_lock:
+        _procs.pop(job_id, None)
+
+
+def _kill_all() -> None:
+    """SIGTERM the process group of every backend still running."""
+    with _procs_lock:
+        procs = list(_procs.values())
+    for proc in procs:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+class _Prefixed:
+    """A file-like view of `out` that prefixes every line with `prefix`.
+
+    Used when several jobs run at once, so their event lines stay readable. Only `write` and
+    `flush` are needed: `print(..., file=...)` uses nothing else.
+    """
+
+    def __init__(self, out, prefix: str):
+        self.out = out
+        self.prefix = prefix
+        self._at_start = True
+
+    def write(self, text: str) -> int:
+        with _out_lock:
+            for line in text.splitlines(keepends=True):
+                if self._at_start and line.strip("\n"):
+                    self.out.write(self.prefix)
+                self.out.write(line)
+                self._at_start = line.endswith("\n")
+        return len(text)
+
+    def flush(self) -> None:
+        with _out_lock:
+            self.out.flush()
+
+
 def describe(event: dict, project: Path) -> str | None:
     """One readable line for a JSON event from `opencode run --format json`."""
     return backends.describe("opencode", event, project)
@@ -171,6 +241,12 @@ def describe(event: dict, project: Path) -> str | None:
 def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
     backend = job.get("backend") or infer_backend(job["model"])
     cmd = backends.command(job, cfg)
+    # A task with its own worktree runs the backend there; its job dict names the directory.
+    workdir = Path(job["cwd"]) if job.get("cwd") else project
+    env = gitutil.git_env(project)
+    if job.get("cwd"):
+        # The Claude guard hook decides what a worker may edit from AAAGENT_PROJECT.
+        env["AAAGENT_PROJECT"] = str(workdir)
 
     log_path = Path(job["log"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,9 +255,10 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
     timed_out = threading.Event()
 
     with log_path.open("w") as log, open(log_path.with_suffix(".stderr"), "w") as err_log:
-        proc = subprocess.Popen(cmd, cwd=project, stdout=subprocess.PIPE, stderr=err_log,
+        proc = subprocess.Popen(cmd, cwd=workdir, stdout=subprocess.PIPE, stderr=err_log,
                                 stdin=subprocess.DEVNULL, text=True, start_new_session=True,
-                                env=gitutil.git_env(project))
+                                env=env)
+        _register_proc(job["id"], proc)
 
         def kill():
             timed_out.set()
@@ -210,7 +287,7 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
                     errors.append(seen["error"])
                 tokens["input"] += seen["input"]
                 tokens["output"] += seen["output"]
-                line = backends.describe(backend, event, project)
+                line = backends.describe(backend, event, workdir)
                 if line:
                     print(line, file=out, flush=True)
             code = proc.wait()
@@ -222,6 +299,7 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
             raise
         finally:
             timer.cancel()
+            _unregister_proc(job["id"])
 
     if timed_out.is_set():
         status, error = "timeout", f"killed after {job.get('timeout', cfg.job_timeout_seconds) / 60:.0f} minutes"
@@ -238,6 +316,108 @@ def run_job(project: Path, job: dict, cfg: Config, out=sys.stdout) -> dict:
 
 
 # -- daemon -----------------------------------------------------------------
+
+def _run_claimed(project: Path, cfg: Config, worker: str, job: dict, claimed_path: Path,
+                 tag: str, out=None, stopping: threading.Event | None = None,
+                 result_lock: threading.Lock | None = None) -> dict | None:
+    """Run one claimed job: its event lines, its result file, its done line.
+
+    Returns the result, or None when the daemon stopped the job first: with `stopping` set the
+    stop handler owns the result file and the claimed file, so the helper writes neither.
+    """
+    out = sys.stdout if out is None else out
+    if stopping is not None and stopping.is_set():
+        return None  # the daemon stopped before this job's backend even started
+    print(f"{tag} {paint(BOLD, job['phase'])} {job['task']} round {job['round']}"
+          f"  ({time.strftime('%H:%M:%S')})", file=out, flush=True)
+    try:
+        result = run_job(project, job, cfg, out=out)
+    except Exception as exc:  # noqa: BLE001 - report any launch failure to the waiter
+        result = {"id": job["id"], "task": job["task"], "phase": job["phase"],
+                  "round": job["round"], "worker": worker, "model": job["model"],
+                  "status": "error", "error": f"could not run {job.get('backend') or 'opencode'}: {exc}",
+                  "session": job.get("session"), "started": time.time(),
+                  "finished": time.time(), "log": job["log"]}
+    lock = result_lock if result_lock is not None else threading.Lock()
+    with lock:
+        if stopping is not None and stopping.is_set():
+            return None
+        write_json(result_path(project, job["id"]), result)
+        claimed_path.unlink(missing_ok=True)
+    mins = (result["finished"] - result["started"]) / 60
+    mark = paint(GREEN, "done") if result["status"] == "ok" else paint(RED, result["status"])
+    print(f"{tag} {mark} in {mins:.1f} min"
+          + (f": {result['error']}" if result.get("error") else ""), file=out, flush=True)
+    return result
+
+
+def _stopped_result(job: dict, worker: str) -> dict:
+    """The result of a job the daemon killed while it was running."""
+    return {"id": job["id"], "task": job["task"], "phase": job["phase"], "round": job["round"],
+            "worker": worker, "model": job["model"], "status": "error",
+            "error": "worker was stopped during the job", "session": job.get("session"),
+            "started": time.time(), "finished": time.time(), "log": job["log"]}
+
+
+def _serve_pool(project: Path, worker: str, cfg: Config, tag: str, n: int,
+                once: bool, quiet_wait: bool) -> int:
+    """The daemon loop for a queue with several slots: up to `n` jobs run at the same time."""
+    running: dict[str, tuple[dict, Path, threading.Thread]] = {}
+    stopping = threading.Event()
+    result_lock = threading.Lock()
+    waiting_shown = False
+
+    def start(job: dict, claimed_path: Path) -> None:
+        prefix = f"  [{str(job.get('task') or '').split('-', 1)[0]}] "
+        thread = threading.Thread(
+            target=_run_claimed,
+            args=(project, cfg, worker, job, claimed_path, tag),
+            kwargs={"out": _Prefixed(sys.stdout, prefix), "stopping": stopping,
+                    "result_lock": result_lock},
+            name=f"{worker}-{job['id']}", daemon=True)
+        running[job["id"]] = (job, claimed_path, thread)
+        thread.start()
+
+    try:
+        while True:
+            for job_id, (_, _, thread) in list(running.items()):
+                if not thread.is_alive():
+                    thread.join()  # already finished: collect it
+                    del running[job_id]
+            while len(running) < n:
+                claimed = claim(project, worker)
+                if not claimed:
+                    break
+                start(*claimed)
+            if not running:
+                if once:
+                    return 0
+                if not waiting_shown and not quiet_wait:
+                    print(f"{tag} waiting for a plan…", flush=True)
+                waiting_shown = True
+            else:
+                waiting_shown = False
+            # A short sleep: a finished job frees its slot promptly.
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        stopping.set()
+        _kill_all()
+        with result_lock:
+            for job, claimed_path, _ in list(running.values()):
+                if result_path(project, job["id"]).exists():
+                    continue  # the thread finished just before the stop: keep its result
+                write_json(result_path(project, job["id"]), _stopped_result(job, worker))
+                claimed_path.unlink(missing_ok=True)
+        deadline = time.time() + 5
+        for _, _, thread in running.values():
+            try:
+                thread.join(timeout=max(0.0, deadline - time.time()))
+            except RuntimeError:  # never started: the interrupt came between claim and start
+                pass
+        _kill_all()  # a thread that launched its backend just after the first kill
+        print(f"\n{tag} stopped.", flush=True)
+        return 0
+
 
 def serve(project: Path, worker: str, once: bool = False, quiet_wait: bool = False) -> int:
     cfg = Config.load(project)
@@ -259,10 +439,13 @@ def serve(project: Path, worker: str, once: bool = False, quiet_wait: bool = Fal
         stale.rename(stale.with_name(stale.name.replace(".running.json", ".json")))
 
     tag = paint(BOLD + worker_color(cfg, worker), f"[{worker}]")
-    print(f"{tag} {model}", flush=True)
+    n = slots(cfg, worker)
+    print(f"{tag} {model}" + (f" ({n} at a time)" if n > 1 else ""), flush=True)
     waiting_shown = False
     job = claimed_path = None
     try:
+        if n > 1:
+            return _serve_pool(project, worker, cfg, tag, n, once, quiet_wait)
         while True:
             claimed = claim(project, worker)
             if not claimed:
@@ -275,30 +458,11 @@ def serve(project: Path, worker: str, once: bool = False, quiet_wait: bool = Fal
                 continue
             waiting_shown = False
             job, claimed_path = claimed
-            print(f"{tag} {paint(BOLD, job['phase'])} {job['task']} round {job['round']}"
-                  f"  ({time.strftime('%H:%M:%S')})", flush=True)
-            try:
-                result = run_job(project, job, cfg)
-            except Exception as exc:  # noqa: BLE001 - report any launch failure to the waiter
-                result = {"id": job["id"], "task": job["task"], "phase": job["phase"],
-                          "round": job["round"], "worker": worker, "model": job["model"],
-                          "status": "error", "error": f"could not run {job.get('backend') or 'opencode'}: {exc}",
-                          "session": job.get("session"), "started": time.time(),
-                          "finished": time.time(), "log": job["log"]}
-            write_json(result_path(project, job["id"]), result)
-            claimed_path.unlink(missing_ok=True)
+            _run_claimed(project, cfg, worker, job, claimed_path, tag)
             job = claimed_path = None
-            mins = (result["finished"] - result["started"]) / 60
-            mark = paint(GREEN, "done") if result["status"] == "ok" else paint(RED, result["status"])
-            print(f"{tag} {mark} in {mins:.1f} min" + (f": {result['error']}" if result.get("error") else ""),
-                  flush=True)
     except KeyboardInterrupt:
         if job is not None:
-            write_json(result_path(project, job["id"]), {
-                "id": job["id"], "task": job["task"], "phase": job["phase"], "round": job["round"],
-                "worker": worker, "model": job["model"], "status": "error",
-                "error": "worker was stopped during the job", "session": job.get("session"),
-                "started": time.time(), "finished": time.time(), "log": job["log"]})
+            write_json(result_path(project, job["id"]), _stopped_result(job, worker))
             claimed_path.unlink(missing_ok=True)
         print(f"\n{tag} stopped.")
         return 0

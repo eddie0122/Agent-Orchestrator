@@ -37,6 +37,11 @@ DEFAULT_PREFIX = "feat"
 PUSH_TIMEOUT_SECONDS = 120
 GH_TIMEOUT_SECONDS = 60
 
+# The optional integration check (`[integration]`): how much output is kept, and how long
+# it may run when `timeout_minutes` is missing or invalid.
+INTEGRATION_TAIL = 30
+INTEGRATION_TIMEOUT_MINUTES = 20
+
 
 # -- files ---------------------------------------------------------------------
 
@@ -249,6 +254,120 @@ def _close_record(project: Path, batch: dict, commits: list[str]) -> tuple[Path,
     return path, record
 
 
+# -- the integration check -----------------------------------------------------
+
+def integration_command(cfg: Config) -> str:
+    """`[integration] command`, stripped; "" = no check."""
+    section = cfg.data.get("integration")
+    if not isinstance(section, dict):
+        return ""
+    return str(section.get("command") or "").strip()
+
+
+def _integration_timeout_minutes(cfg: Config) -> float:
+    """`[integration] timeout_minutes` (int or float); the default when missing or invalid."""
+    section = cfg.data.get("integration")
+    value = section.get("timeout_minutes") if isinstance(section, dict) else None
+    try:
+        minutes = float(value)
+    except (TypeError, ValueError):
+        return float(INTEGRATION_TIMEOUT_MINUTES)
+    return minutes if minutes > 0 else float(INTEGRATION_TIMEOUT_MINUTES)
+
+
+def _tail(output: str | bytes | None) -> list[str]:
+    """The last INTEGRATION_TAIL lines of a command's output."""
+    if not output:
+        return []
+    text = output.decode(errors="replace") if isinstance(output, bytes) else str(output)
+    return [line.rstrip() for line in text.splitlines()][-INTEGRATION_TAIL:]
+
+
+def run_integration(project: Path, cfg: Config) -> dict:
+    """Run `[integration] command` in the project; the result to record on the batch.
+
+    The command runs without a terminal and times out. A failing command or an OSError is a
+    result, never an exception.
+    """
+    cmd = integration_command(cfg)
+    result = {"head": gitutil.head(project), "command": cmd, "ok": False, "code": None,
+              "timed_out": False, "tail": [], "at": tasks.now()}
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=project, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=_integration_timeout_minutes(cfg) * 60)
+    except subprocess.TimeoutExpired as exc:
+        result["timed_out"] = True
+        result["tail"] = _tail(exc.stdout)
+        return result
+    except OSError as exc:
+        result["tail"] = [str(exc)]
+        return result
+    result["code"] = proc.returncode
+    result["ok"] = proc.returncode == 0
+    result["tail"] = _tail(proc.stdout)
+    return result
+
+
+def _record_integration(project: Path, result: dict) -> None:
+    """Store the result on the open batch, if it is still open. Call outside the lock."""
+    with tasks.active_lock(project):
+        batch = open_batch(project)
+        if not batch:
+            return
+        batch["integration"] = result
+        _save_json(batch_file(project), batch)
+
+
+def _integration_reason(cfg: Config, result: dict) -> str:
+    """`(exit N)` or `(timed out after N min)` for the lines and the FlowError."""
+    if result.get("timed_out"):
+        return f"(timed out after {_integration_timeout_minutes(cfg):g} min)"
+    return f"(exit {result.get('code')})"
+
+
+def integration_lines(cfg: Config, result: dict) -> list[str]:
+    """The lines describing an integration result."""
+    cmd = integration_command(cfg)
+    if result.get("ok"):
+        return [f"Integration check passed: `{cmd}`"]
+    lines = [f"Integration check FAILED: `{cmd}` {_integration_reason(cfg, result)}",
+             "Last lines of its output:"]
+    lines.extend(f"  {line}" for line in result.get("tail") or [])
+    return lines
+
+
+def _integration_gate(project: Path, cfg: Config) -> None:
+    """Refuse to finish while the check fails for the current commit; FlowError otherwise.
+
+    A result recorded for the current HEAD and command is reused; anything else runs the
+    check now, outside the lock, and records it. The batch stays open on failure.
+    """
+    cmd = integration_command(cfg)
+    if not cmd:
+        return
+    with tasks.active_lock(project):
+        batch = open_batch(project)
+        if not batch or tasks.active_tasks(project):
+            return  # finish reports the real problem instead
+        commits = _commits_since(project, str(batch.get("start_head") or ""))
+        stored = batch.get("integration")
+        head = gitutil.head(project)
+    if not commits:
+        return
+    if (isinstance(stored, dict) and stored.get("head") == head
+            and str(stored.get("command", cmd)) == cmd):
+        result = stored
+    else:
+        result = run_integration(project, cfg)
+        _record_integration(project, result)
+    if not result.get("ok"):
+        raise tasks.FlowError(
+            f"the integration check failed at the current commit: `{cmd}` "
+            f"{_integration_reason(cfg, result)}. Fix it with another task first, or set "
+            f"[integration] command = \"\" to skip the check.")
+
+
 def on_idle(project: Path, cfg: Config) -> list[str]:
     """Called after a commit or an abandon; the lines to print.
 
@@ -275,7 +394,18 @@ def on_idle(project: Path, cfg: Config) -> list[str]:
     if commits:
         lines = [f"All tasks on branch {branch} are done "
                  f"({len(commits)} commit(s) since {base})."]
-        if mode == "pr":
+        result = None
+        if integration_command(cfg):
+            result = run_integration(project, cfg)
+            _record_integration(project, result)
+            lines += integration_lines(cfg, result)
+        if result is not None and not result.get("ok"):
+            lines.append(
+                "Do not open a pull request or finish the branch yet. Plan a fix task for "
+                "this failure (it joins this branch, and the check runs again after it is "
+                "committed). If the failure looks unrelated to the work on this branch, tell "
+                "the user and ask how to proceed.")
+        elif mode == "pr":
             lines.append(
                 f"Ask the user whether to open a pull request into {base} now. Yes → run "
                 f"`aaagent pr` (it pushes, opens the pull request and switches back to {base}). "
@@ -313,6 +443,7 @@ def finish(project: Path, cfg: Config, push: bool) -> list[str]:
     if cfg.branch_mode == "none":
         raise tasks.FlowError("this project runs without git (branch_mode = none): there is no "
                               "branch or pull request")
+    _integration_gate(project, cfg)
     with tasks.active_lock(project):
         batch = open_batch(project)
         if not batch:

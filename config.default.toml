@@ -70,6 +70,9 @@ job_timeout_minutes = 30
 model = "planner"
 # Thinking level: claude --effort for a Claude model, the opencode variant otherwise. Empty = default.
 thinking = ""
+# How many reviews the reviewer runs at the same time (1–8). Raise it when several tasks run in
+# parallel, so their reviews do not wait for each other.
+parallel = 1
 # backend = "opencode" | "claude"   # optional; inferred from the model like workers
 
 [git]
@@ -82,3 +85,27 @@ track_agent_dir = false
 # new branch.
 # "none" = No Git (aaagent keeps its own history in .aaagent/shadow.git)
 branch_mode = "current"
+
+[integration]
+# Shell command run in the project after the last task of a branch is committed, and again before
+# `aaagent pr` / `aaagent branch-done` when it has not passed for the current commit. A failure
+# stops the pull request; the planner plans a fix task instead. Empty = no check.
+# Example: command = "python3 -m unittest discover -s tests -q"
+command = ""
+timeout_minutes = 20
+
+[parallel]
+# How tasks that run at the same time share the project.
+# "shared"   = every task works in the project's own working tree; tasks that run at the same
+#              time must declare disjoint `files:`.
+# "worktree" = each task gets its own git worktree and branch (aaagent/<task>) under `dir`, so its
+#              tests run in isolation; its commit is applied to the project's branch afterwards.
+#              Needs git (not No Git) and [git] track_agent_dir = false; otherwise "shared" is used.
+isolation = "shared"
+# Where the worktrees go. A relative path is relative to the project.
+dir = ".aaagent/worktrees"
+# Untracked folders or files the project needs to run (a virtualenv, node_modules, .env), linked
+# into each new worktree when they exist in the project.
+links = []
+# Shell command run once in each new worktree, e.g. "npm ci". Empty = none.
+setup = ""

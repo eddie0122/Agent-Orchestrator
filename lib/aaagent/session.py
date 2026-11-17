@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import attach, branching, dispatch, gitutil, sessions, tasks, worker
+from . import attach, branching, dispatch, gitutil, sessions, tasks, worker, worktrees
 from .backends import find_claude
 from .config import REVIEWER, ROOT, Config, project_config_path, set_toml_value
 
@@ -63,6 +63,8 @@ def orchestrator_prompt(cfg: Config, project: Path | None = None) -> str:
             text += (ROOT / "prompts" / "orchestrator-no-git.md").read_text()
         else:
             text += open_branch_section(cfg, project)
+            if worktrees.enabled(project, cfg):
+                text += (ROOT / "prompts" / "orchestrator-worktree.md").read_text()
     return text
 
 

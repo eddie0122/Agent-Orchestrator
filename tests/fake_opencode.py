@@ -10,6 +10,7 @@ Env:
   FAKE_OC_NOREPORT  comma-separated models that exit 0 without writing the report
   FAKE_OC_REVIEW    comma-separated verdicts for review jobs, by round (default "approved")
   FAKE_OC_NOREVIEW  comma-separated models that exit 0 without writing the review
+  FAKE_OC_REVIEW_SLEEP  seconds a review job sleeps before writing the review (default 0)
   FAKE_OC_ARGS_LOG  file to append each invocation's argv (JSON) to
 """
 
@@ -98,6 +99,9 @@ def main():
     if agent == "aaagent-reviewer":
         if model in os.environ.get("FAKE_OC_NOREVIEW", "").split(","):
             return 0
+        delay = float(os.environ.get("FAKE_OC_REVIEW_SLEEP") or 0)
+        if delay > 0:
+            time.sleep(delay)
         review_file = re.search(r"Write your review to: (\S+)", prompt).group(1)
         rnd = int(re.search(r"review-(\d+)\.md", review_file).group(1))
         verdicts = os.environ.get("FAKE_OC_REVIEW", "").split(",")

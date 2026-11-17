@@ -57,6 +57,23 @@ With a reviewer model, `aaagent dispatch <task>` runs implement → review → f
 
 The chat keeps `.aaagent/lessons.md`: one line per mistake reviewers caught that is likely to recur, project conventions, the right test command. aaagent appends this file to every implement, fix and review prompt (up to 6000 characters), so workers and reviewers learn from earlier tasks. Edit it by hand too; delete it to turn the feature off.
 
+### Integration check
+
+Each task is reviewed on its own. To catch problems that only show when the tasks of a branch are
+combined, set a command that checks the whole project:
+
+```toml
+[integration]
+command = "python3 -m unittest discover -s tests -q"
+timeout_minutes = 20
+```
+
+aaagent runs it after the last task on the branch is committed. When it fails, the chat is told not
+to open the pull request and plans a fix task instead; the check runs again after that task.
+`aaagent pr` and `aaagent branch-done` also run it when it has not passed for the current commit, and
+refuse while it fails. Empty (the default) turns the check off. It runs only with a session branch
+(`branch_mode` `branch`, `pr` or `pr-auto`).
+
 ## Install
 
 ```bash
@@ -229,6 +246,8 @@ files: lib/aaagent/health.py, tests/test_health.py, docs/
 - `aaagent diff`, the review prompt and the commit job only look at the task's declared files, and a round that changes files outside them is reported as a warning (the reviewer decides what to do).
 - Commits never run at the same time: a task waits while another task is committing, so the shared git index is never touched by two workers at once.
 - Your own uncommitted changes are still kept out of the commits; they are refreshed when the task is first dispatched.
+
+With `[parallel] isolation = "worktree"`, each task also gets its own git worktree (`.aaagent/worktrees/<task>`, branch `aaagent/<task>`): its implement, fix and review jobs run there, so the tasks' tests never see each other's half-written code. aaagent copies the plan, reports and reviews in and out. After approval the commit job commits in the worktree, and aaagent applies the commit to the session branch (fast-forward, or cherry-pick when other tasks were committed meanwhile), then removes the worktree and its branch. If that fails, for example because your own uncommitted changes are in the way, the task stops with its worktree kept, and the next `aaagent dispatch` retries only the merge. `[parallel] links` (a virtualenv, `node_modules`, `.env`) are linked into each new worktree, and `[parallel] setup` (for example `npm ci`) runs once in it. Worktrees need git and `track_agent_dir = false`; otherwise tasks use the shared tree.
 
 ### Branches and pull requests
 
