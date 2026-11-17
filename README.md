@@ -3,15 +3,18 @@
 Chat with Claude Opus in your terminal. Opus plans and reviews; cheaper opencode workers implement, fix, and commit.
 
 ```
-you ──chat──► Opus (Claude Code, Pro subscription)
+you ──chat──► Opus (Claude Code, Pro subscription): the planner
                  │ 1. investigates, writes  .aaagent/tasks/001-x/plan.md
-                 │ 2. aaagent dispatch 001  ──►  worker1 implements  → report-1.md
-                 │ 3. reviews diff + tests, writes review-1.md (approved / changes_requested)
-                 │ 4. aaagent dispatch 001  ──►  worker fixes → report-2.md … (repeat 3–4)
-                 │ 5. aaagent dispatch 001  ──►  worker commits (only after "approved")
+                 │ 2. aaagent dispatch 001
+                 │      ├─► worker implements          → report-1.md
+                 │      ├─► reviewer reviews           → review-1.md  (approved / changes_requested / plan_problem)
+                 │      └─► worker fixes → reviewer …  (repeats until approved or 3 rounds)
+                 │ 3. checks the result, aaagent dispatch 001 ──► worker commits
                  ▼
               tells you what changed and the commit hash
 ```
+
+Without a reviewer model the planner writes each review itself and dispatches every round (see Who reviews).
 
 Workers (OpenCode Go subscription) are generic slots: `worker1`, `worker2`, `worker3`, … — any number of them, each running any model. You add and remove them with `aaagent workers add|remove`. The starting set:
 
@@ -44,6 +47,7 @@ By default the planner reviews every round itself: you run `aaagent dispatch` fo
 model = "sonnet"          # a Claude model name runs on headless Claude Code
 # model = "opencode-go/glm-5.3-flash"   # an opencode id (provider/model) runs on opencode
 # thinking = "high"       # claude --effort, or the opencode model variant
+# parallel = 2            # reviews at the same time (1–8), useful with parallel tasks
 # model = "planner"       # the default: the chat (the planner) reviews each round itself
 ```
 
@@ -52,6 +56,17 @@ The reviewer is a role of its own, with its own model, thinking level, queue, da
 `aaagent reviewer sonnet` sets it (add `--project` to write this project's config only), `aaagent reviewer opencode-go/glm-5.3-flash --thinking high` sets model and level, `aaagent reviewer worker2` copies worker2's model and thinking into `[reviewer]` (a snapshot: changing worker2 later does not change the reviewer), `aaagent reviewer planner` gives the job back to the chat, and `aaagent reviewer` shows the current one. `aaagent model reviewer <model>` and `aaagent thinking reviewer <level>` work too. In the dashboard press `v`, in VSCode run **Change Reviewer…** in the Reviewer view (a typed model id sets it directly). An old `[flow] reviewer = "<worker>"` is still honoured until you set the reviewer again, which clears that key in the written file.
 
 With a reviewer model, `aaagent dispatch <task>` runs implement → review → fix → review … and returns when the reviewer approved, when the review round limit is reached, or when a job failed. A reviewer that finds the plan itself wrong writes `verdict: plan_problem`: the loop stops, the chat revises `plan.md`, and the next dispatch runs a fix round against the revised plan (it refuses until the plan has changed). The reviewer job cannot change any file but its `review-N.md`. The commit still needs one more `aaagent dispatch` by the planner, which is the final gate: it can overrule the approval by rewriting the review. If the reviewer fails (or writes no valid verdict) it is retried once on the reviewer itself; if that fails too, the round comes back to the chat to review itself.
+
+With `[reviewer] parallel = N` (1–8, default 1) the reviewer daemon runs up to N reviews at the same time, so the reviews of several parallel tasks do not wait for each other; its output lines are prefixed with the task number. Workers always run one job at a time.
+
+### What workers and reviewers are told
+
+- **Check the plan against the code first.** A worker reads the plan, then every file and symbol it names, and records in its report where the plan and the code disagree.
+- **Run the full test suite at the end**, not only the plan's own commands, and fix what its change broke. If the same check still fails after three different attempts, it stops and reports `status: partial`.
+- **Report status** is `done` (implemented, validation passes), `partial` (part of it; the failing check and the attempts are named) or `blocked` (it could not proceed; the plan is wrong).
+- **Plan template sections:** Goal, Context, Changes, Steps, Interfaces, Pitfalls, Validation (the full suite last), Done when, Out of scope.
+- **The reviewer does not trust the report.** It re-runs the plan's validation and the full test suite itself, checks every "Done when" criterion, and looks for bugs and scope creep. From round 2 on it stays consistent: it only repeats items still unaddressed, failures introduced since the last round, or serious bugs it missed before.
+- **`plan_problem`** is for a plan that is itself wrong — impossible or contradictory, or its `files:`/Out of scope rule forbids the only correct fix. The reviewer then says exactly what the planner must change instead of asking the worker for a workaround.
 
 ### Project lessons
 
@@ -212,9 +227,9 @@ Opus runs these itself. They are also useful for you:
 | `aaagent workers add [<model>]` | add the next free worker slot (pick from a list on a terminal) |
 | `aaagent workers remove <name>` | remove a worker (not while it has queued or running jobs) |
 | `aaagent workers default\|fallback <name>` | choose the default implementer and the fallback |
-| `aaagent dispatch <task> [--worker worker2] [--force]` | run the next phase (implement / fix / commit) and wait |
+| `aaagent dispatch <task> [--worker worker2] [--force]` | run the next phase (implement / fix / commit; with a reviewer model the whole implement → review → fix loop) and wait |
 | `aaagent wait <task>` | reattach to a running job |
-| `aaagent abandon <task>` | drop a task (its uncommitted changes stay) |
+| `aaagent abandon <task>` | drop a task (its uncommitted changes stay; a worktree task keeps its worktree) |
 | `aaagent stop` | stop this project's workers |
 | `aaagent model [<target> [<model>]]` | show, list (`--list`), pick or set the planner, reviewer and worker models |
 | `aaagent thinking [<target> [<level>]]` | show, list (`--list`), pick or set the planner, reviewer and worker thinking levels |
@@ -301,9 +316,10 @@ Code enforces these; they are not just prompt instructions:
 - **Implementing workers cannot commit.** `aaagent-worker` denies `git commit/push/reset/rebase/clean/stash/checkout/switch`, `sudo`, destructive `docker` commands, files outside the project, `.env` files, and edits to plans and reviews.
 - **The commit step happens only after approval.** `aaagent dispatch` sends a commit job only when the latest review says `verdict: approved`. The `aaagent-committer` agent cannot edit files and can only run git status/diff/log/add/commit; `--amend` and `add -A`/`add .` are denied.
 - **Nothing is pushed until you say yes.** Only `aaagent pr` pushes a branch to `origin` and opens its pull request; `aaagent branch-done` finishes the branch without touching the network, and nothing else does either. Everything else is up to you.
-- **Parallel tasks only with disjoint `files:`.** Several tasks may be active in one working tree, but only when every plan declares the files it may change and those lists do not overlap; anything else keeps the working tree to one task.
+- **Parallel tasks only with disjoint `files:`.** Several tasks may be active in one working tree, but only when every plan declares the files it may change and those lists do not overlap; anything else keeps the working tree to one task. With `[parallel] isolation = "worktree"` each task also gets its own git worktree, and its commit is applied to the branch only after approval.
 - **Your own uncommitted changes stay out of the commit.** Files that were already modified when a task started are listed and excluded from its commit.
-- **Escalation:** a failed implement/fix job is retried once on the fallback worker; a failed review is retried once on the reviewer itself, then the round goes back to the planner. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you.
+- **Integration check before a pull request.** With `[integration] command` set, `aaagent pr` and `aaagent branch-done` refuse while it fails for the current commit.
+- **Escalation:** a failed implement/fix job is retried once on the fallback worker; a failed review is retried once on the reviewer itself, then the round goes back to the planner. After 2 rejected reviews in a row the task moves to the fallback worker. After 3 rounds without approval Opus stops and asks you. A reviewer that finds the plan itself wrong (`plan_problem`) stops the loop instead: the planner revises `plan.md`, the next dispatch is a fix round on the same worker, and plan_problem rounds do not count toward the fallback worker.
 
 These are permission rules, not a sandbox. Workers run as your user, so treat this like giving a junior developer a shell on the machine.
 
@@ -327,6 +343,7 @@ model = "opencode-go/kimi-k3"
 [reviewer]
 model = "planner"                 # or a Claude model name / opencode id for a reviewer job
 thinking = ""                     # claude --effort or the opencode variant; empty = default
+parallel = 1                      # reviews at the same time (1–8); raise it for parallel tasks
 
 [flow]
 default_worker = "worker1"
@@ -338,6 +355,15 @@ job_timeout_minutes = 30
 [git]
 commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@example.invalid>"
 branch_mode = "current"           # current = the checked-out branch; branch = a branch per chat session; pr = that + push and pull request when you say yes; pr-auto = that without asking, then the chat restarts; none = No Git, aaagent keeps its own history in .aaagent/shadow.git
+
+[parallel]
+isolation = "shared"              # "worktree" = each task in its own git worktree
+links = []                        # e.g. [".venv", "node_modules"] linked into each worktree
+setup = ""                        # e.g. "npm ci", run once in each new worktree
+
+[integration]
+command = ""                      # e.g. "python3 -m unittest discover -s tests -q"
+timeout_minutes = 20
 ```
 
 `opencode models` lists the model ids you can use. `aaagent workers add|remove` edits the worker list for you; a new worker gets its own pane the next time you run `aaagent`.
@@ -346,11 +372,15 @@ branch_mode = "current"           # current = the checked-out branch; branch = a
 
 ```
 .aaagent/                       (listed in .git/info/exclude, never committed)
+  config.toml       this project's config overrides
+  lessons.md        project lessons, appended to implement, fix and review prompts
   tasks/003-add-shout-function/
     plan.md  report-1.md  review-1.md  state.json
     logs/    raw worker transcripts (jsonl) and job results
   queue/<worker>/   pending and running jobs
+  results/          finished job results
   workers/          worker pids and logs
+  worktrees/        per-task git worktrees ([parallel] isolation = "worktree")
   attachments/      images from `aaagent attach`
   fetch/            image copy requests between the chat and VSCode
   shadow.git/       aaagent's own git history in No Git mode
@@ -359,13 +389,14 @@ branch_mode = "current"           # current = the checked-out branch; branch = a
   batches/          every finished branch, with its commits and pull request
   chat.json         the last chat's session id, for `aaagent -c`
   sessions.json     the chat sessions and the tasks each one created
+  new-chat-pending.json  a pr-auto pull request is open; the chat restarts
   chat-pane         the tmux pane of the chat, for `aaagent attach`
 ```
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests      # uses a fake opencode; no quota spent
+python3 -m unittest discover -s tests -q   # fake opencode, claude and gh; no quota spent
 node --test vscode/test/                   # extension logic + activate() against a stub vscode
 python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<version>.vsix
 ```
@@ -373,6 +404,9 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | path | role |
 |---|---|
 | `lib/aaagent/cli.py` | commands |
+| `lib/aaagent/config.py` | config loading: defaults, user config, project config |
+| `lib/aaagent/models.py` | model and thinking-level changes for `aaagent model` / `aaagent thinking` |
+| `lib/aaagent/attach.py` | `aaagent attach`: copy images and mention them in the chat |
 | `lib/aaagent/session.py` | launches Claude and the workers (tmux or background), chat restore |
 | `lib/aaagent/sessions.py` | the chat sessions: history, and which session created each task |
 | `lib/aaagent/tui.py` | the terminal dashboard (`aaagent ui`) |
@@ -381,11 +415,16 @@ python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<vers
 | `lib/aaagent/backends.py` | worker backends: opencode and headless Claude Code |
 | `lib/aaagent/dispatch.py` | queues phases, waits, falls back, checks results |
 | `lib/aaagent/tasks.py` | task files and the rules for the next phase |
+| `lib/aaagent/worktrees.py` | per-task git worktrees: create, sync files, merge, remove |
+| `lib/aaagent/branching.py` | session branches, pull requests, integration check |
+| `lib/aaagent/gitutil.py` | git helpers, No Git shadow repository |
 | `vscode/extension.js` | VSCode extension: commands, refresh, notifications |
 | `vscode/src/` | tree views, terminals, diff view, and the pure UI logic (`model.js`) |
-| `prompts/` | Opus system-prompt addition and worker prompts |
+| `prompts/` | `orchestrator.md` with its conditional additions (`orchestrator-worker-review.md`, `orchestrator-no-git.md`, `orchestrator-worktree.md`) and the four worker prompts (`worker-implement.md`, `worker-fix.md`, `worker-review.md`, `worker-commit.md`) |
 | `opencode/agents/` | worker agent definitions and permissions |
 | `claude/hooks/guard_edit.py` | blocks Opus edits outside `.aaagent/` |
 | `claude/hooks/guard_worker.py` | keeps Claude workers away from secrets and the planner's files |
 | `claude/hooks/record_session.py` | records the chat's session id for `aaagent -c` |
 | `claude/hooks/local_images.py` | copies images from the user's computer that a prompt mentions (VSCode) |
+| `claude/hooks/chat_stop.py` | Stop hook: replaces the chat after `aaagent pr` in pr-auto mode |
+| `claude/hooks/chat_restart.py` | restarts the tmux chat, run detached by chat_stop |
