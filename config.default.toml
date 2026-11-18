@@ -94,6 +94,19 @@ branch_mode = "current"
 command = ""
 timeout_minutes = 20
 
+[check]
+# Command aaagent runs itself in the task's tree after every implement/fix round, before the
+# review. "" = the [integration] command. Both empty = no check.
+command = ""
+# Set to false to turn the check off even when a command is set.
+enabled = true
+# What a failing check does. "review" = the review runs as usual and the reviewer sees the
+# result. "fix" = no review job: aaagent writes review-N.md with changes_requested and the
+# output, so the next round is a fix (use it when the suite is green on the base branch).
+on_fail = "review"
+# 0 = [integration] timeout_minutes.
+timeout_minutes = 0
+
 [parallel]
 # How tasks that run at the same time share the project.
 # "shared"   = every task works in the project's own working tree; tasks that run at the same

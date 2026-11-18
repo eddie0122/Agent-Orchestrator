@@ -89,6 +89,28 @@ to open the pull request and plans a fix task instead; the check runs again afte
 refuse while it fails. Empty (the default) turns the check off. It runs only with a session branch
 (`branch_mode` `branch`, `pr` or `pr-auto`).
 
+### Check after each round
+
+The reviewer is told to run the tests itself, which costs it time on every round. A deterministic
+check does it instead, right after each implement or fix round and before the review:
+
+```toml
+[check]
+command = "python3 -m unittest discover -s tests -q"   # "" = the [integration] command
+enabled = true
+on_fail = "review"                                     # or "fix"
+timeout_minutes = 0                                    # 0 = the [integration] timeout
+```
+
+aaagent runs the command in the task's own tree, saves the result to
+`.aaagent/tasks/<task>/check-N.md` and passes it to the reviewer. With `on_fail = "fix"` a
+failing check rejects the round at once (aaagent writes `review-N.md` itself with
+`changes_requested`) and the next round is a fix, without spending a review job; a report with
+`status: blocked` always goes to a reviewer. With the default `on_fail = "review"` the review
+runs as usual and only warns the planner when an approved round's check failed. On empty
+commands (the default) dispatch behaves exactly as before. When several tasks share one working
+tree the check is skipped, because it would see their changes too.
+
 ## Install
 
 ```bash
@@ -368,6 +390,12 @@ setup = ""                        # e.g. "npm ci", run once in each new worktree
 [integration]
 command = ""                      # e.g. "python3 -m unittest discover -s tests -q"
 timeout_minutes = 20
+
+[check]
+command = ""                      # after every implement/fix round; "" = the [integration] command
+enabled = true                    # false = off even when a command is set
+on_fail = "review"                # "fix" = reject the round without a review job
+timeout_minutes = 0               # 0 = the [integration] timeout
 ```
 
 `opencode models` lists the model ids you can use. `aaagent workers add|remove` edits the worker list for you; a new worker gets its own pane the next time you run `aaagent`.

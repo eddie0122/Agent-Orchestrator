@@ -294,26 +294,25 @@ def _kill_group(pid: int, sig: int) -> None:
         pass
 
 
-def run_integration(project: Path, cfg: Config) -> dict:
-    """Run `[integration] command` in the project; the result to record on the batch.
+def run_command(cwd: Path, cmd: str, timeout_minutes: float) -> dict:
+    """Run a shell command in `cwd`; the result to record.
 
     The command runs without a terminal, in its own process group, and times out. On a timeout
     the whole group is killed, so a test runner it started (or `cmd1 && cmd2`, or background
     jobs) does not keep running as an orphan. A failing command or an OSError is a result,
     never an exception.
     """
-    cmd = integration_command(cfg)
-    result = {"head": gitutil.head(project), "command": cmd, "ok": False, "code": None,
+    result = {"head": gitutil.head(cwd), "command": cmd, "ok": False, "code": None,
               "timed_out": False, "tail": [], "at": tasks.now()}
     try:
-        proc = subprocess.Popen(cmd, shell=True, cwd=project, stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen(cmd, shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, start_new_session=True)
     except OSError as exc:
         result["tail"] = [str(exc)]
         return result
     try:
-        output, _ = proc.communicate(timeout=_integration_timeout_minutes(cfg) * 60)
+        output, _ = proc.communicate(timeout=timeout_minutes * 60)
     except subprocess.TimeoutExpired as exc:
         result["timed_out"] = True
         _kill_group(proc.pid, signal.SIGTERM)
@@ -328,6 +327,11 @@ def run_integration(project: Path, cfg: Config) -> dict:
     result["ok"] = proc.returncode == 0
     result["tail"] = _tail(output)
     return result
+
+
+def run_integration(project: Path, cfg: Config) -> dict:
+    """Run `[integration] command` in the project; the result to record on the batch."""
+    return run_command(project, integration_command(cfg), _integration_timeout_minutes(cfg))
 
 
 def _record_integration(project: Path, result: dict) -> None:

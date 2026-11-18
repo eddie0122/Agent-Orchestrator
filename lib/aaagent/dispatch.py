@@ -109,6 +109,8 @@ def build_prompt(task: Task, step: Step, cfg: Config, retry: bool = False) -> st
                  "`git diff` and build on them rather than starting over.\n")
     if step.phase in ("implement", "fix", "review"):
         text += lessons_note(task.project)
+    if step.phase == "review":
+        text += check_note(task, step.round)
     return text
 
 
@@ -173,6 +175,100 @@ def _other_active_tasks(project: Path, task: Task) -> list[Task]:
         except FlowError:
             continue
     return others
+
+
+def check_settings(cfg: Config) -> tuple[str, str, float]:
+    """`[check]`: (command, on_fail, timeout_minutes).
+
+    `command` falls back to `[integration] command`, so one setting can serve both gates.
+    `on_fail` is "fix" only when it is exactly that value; a missing or non-dict section means
+    the defaults (the integration command, "review", the integration timeout).
+    """
+    section = cfg.data.get("check")
+    section = section if isinstance(section, dict) else {}
+    enabled = section.get("enabled", True)
+    if enabled is False or str(enabled).strip().lower() in ("false", "0", "no", "off"):
+        command = ""
+    else:
+        command = (str(section.get("command") or "").strip()
+                   or branching.integration_command(cfg))
+    on_fail = "fix" if str(section.get("on_fail") or "").strip() == "fix" else "review"
+    try:
+        minutes = float(section.get("timeout_minutes"))
+    except (TypeError, ValueError):
+        minutes = 0.0
+    timeout = minutes if minutes > 0 else branching._integration_timeout_minutes(cfg)
+    return command, on_fail, timeout
+
+
+def check_file(task: Task, rnd: int) -> Path:
+    """The automatic check's result file for a round."""
+    return task.path / f"check-{rnd}.md"
+
+
+def _check_rejects(report_status: str, on_fail: str) -> bool:
+    """Whether a failed check rejects the round at once.
+
+    A blocked report still gets a reviewer (it may say `plan_problem`), and `on_fail = "review"`
+    never skips the review.
+    """
+    return on_fail == "fix" and report_status in ("done", "partial")
+
+
+def _write_check(task: Task, rnd: int, result: dict,
+                 timeout_minutes: float | None = None) -> None:
+    """Write `check-<rnd>.md`: the command, how it ended, and the bounded output tail."""
+    if result.get("timed_out"):
+        ending = (f"Timed out after {timeout_minutes:g} min."
+                  if timeout_minutes else "Timed out.")
+    else:
+        ending = f"Exit code: {result.get('code')}"
+    lines = ["---", f"ok: {'true' if result.get('ok') else 'false'}", f"round: {rnd}", "---",
+             f"Command: `{result.get('command') or ''}`", ending, "Output tail:", "", "```"]
+    lines += [str(line) for line in result.get("tail") or []]
+    lines += ["```", ""]
+    path = check_file(task, rnd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines))
+
+
+def check_note(task: Task, rnd: int) -> str:
+    """The automatic check's result for a review prompt, or "" when there is none."""
+    path = check_file(task, rnd)
+    if not path.is_file():
+        return ""
+    text = path.read_text(errors="replace")
+    command, ending = "", "exit ?"
+    for line in text.splitlines():
+        if line.startswith("Command: `") and line.endswith("`"):
+            command = line[len("Command: `"):-1]
+        elif line.startswith("Exit code: "):
+            ending = "exit " + line[len("Exit code: "):].strip()
+        elif line.startswith("Timed out"):
+            ending = "timed out"
+    status = "PASSED" if tasks.frontmatter(path).get("ok") == "true" else "FAILED"
+    return ("\nAUTOMATIC CHECK: aaagent ran `" + command + "` itself after this round: "
+            f"{status} ({ending}). Output: `{task.rel(path)}`. Do not approve while it fails "
+            "because of this change; a failure that also happens without the change is "
+            "pre-existing (say so in the review).\n")
+
+
+def _write_failed_check_review(task: Task, rnd: int, cmd: str, result: dict) -> None:
+    """Write `review-<rnd>.md` rejecting a round whose automatic check failed."""
+    if result.get("timed_out"):
+        ending = "timed out"
+    else:
+        ending = f"exit {result.get('code')}"
+    lines = ["---", "verdict: changes_requested", f"round: {rnd}", "---",
+             "## Assessment", "Automatic check failed; no reviewer ran.", "",
+             "## Required changes", f"1. Make `{cmd}` pass ({ending}). Output tail:", "",
+             "```"]
+    lines += [str(line) for line in result.get("tail") or []]
+    lines += ["```", "",
+              "A failure that also happens without this task's change is not yours: say so in "
+              "the report.", "",
+              "## Optional suggestions", "None.", ""]
+    task.review(rnd).write_text("\n".join(lines))
 
 
 def _start_worktree(project: Path, cfg: Config, task: Task) -> None:
@@ -621,6 +717,11 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
               f"{verdict.replace('_', ' ')}")
         print(f"  review: {task.rel(task.review(rnd))}")
         if verdict == "approved":
+            recorded = task.load().get("check") or {}
+            if recorded.get("round") == rnd and recorded.get("ok") is False:
+                print(f"  ! the automatic check failed for this round: "
+                      f"{task.rel(check_file(task, rnd))}; overrule the approval unless the "
+                      f"failure is pre-existing.")
             print(f"Next: the reviewer approved round {rnd}. Read the review and the report, look "
                   f"over `aaagent diff {task.id}`, then run `aaagent dispatch {task.id}` to commit. "
                   f"To overrule the approval, overwrite the review file with "
@@ -645,13 +746,56 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
         print(f"warning: {message}")
     print("  changes since task start:")
     print(gitutil.diff_stat(workdir, state.get("base_commit"), task.pathspecs()))
+    # The check runs after the diff stat above, so files it creates are not listed as the
+    # task's changes. It runs outside the active-task lock (like the integration check).
+    cmd, on_fail, timeout = check_settings(cfg)
+    check = None
+    if cmd:
+        if str(workdir) == str(project) and _other_active_tasks(project, task):
+            print("note: check skipped: other tasks are changing the shared tree")
+            task.update(check={"round": rnd, "skipped": "shared tree busy"})
+        else:
+            print(f"running check: {cmd}", flush=True)
+            check_result = branching.run_command(workdir, cmd, timeout)
+            _write_check(task, rnd, check_result, timeout)
+            if str(workdir) != str(project):
+                # The review job runs in the worktree, where sync_into copied the task folder:
+                # put the check file at the same relative path there too.
+                target = tasks.tasks_dir(workdir) / task.id
+                target.mkdir(parents=True, exist_ok=True)
+                (target / f"check-{rnd}.md").write_text(
+                    check_file(task, rnd).read_text())
+            check = {"round": rnd, "ok": check_result["ok"], "code": check_result["code"],
+                     "timed_out": check_result["timed_out"]}
+            task.update(check=check)
+            task.log_event(f"check round {rnd}: "
+                           + ("passed" if check_result["ok"] else "failed"))
+            if check_result["ok"]:
+                print("✓ check passed")
+            elif check_result["timed_out"]:
+                print("✗ check failed (timed out)")
+            else:
+                print(f"✗ check failed (exit {check_result['code']})")
+            print(f"  check: {task.rel(check_file(task, rnd))}")
+            if not check_result["ok"] and _check_rejects(report_status, on_fail):
+                _write_failed_check_review(task, rnd, cmd, check_result)
+                task.update(current_job=None, status="changes_requested")
+                task.log_event(f"check round {rnd} rejected the round")
+                print(f"Next: the check failed, so round {rnd} is rejected without a review; "
+                      f"`aaagent dispatch {task.id}` starts a fix round.")
+                return None
     if cfg.reviewer_worker:
         print(f"Next: the reviewer ({cfg.worker_label(REVIEWER)}) reviews round {rnd} "
               f"(`aaagent dispatch {task.id}` continues if this command was interrupted).")
     else:
+        extra = ""
+        if check and check.get("ok") is not None:
+            extra = (f" The automatic check for this round "
+                     f"{'passed' if check['ok'] else 'FAILED'} "
+                     f"({task.rel(check_file(task, rnd))}).")
         print(f"Next: read the report, inspect `aaagent diff {task.id}`, re-run the validation, then write "
               f"{task.rel(task.review(rnd))} with `verdict: approved`, `verdict: changes_requested` or "
-              f"`verdict: plan_problem`, and run `aaagent dispatch {task.id}`.")
+              f"`verdict: plan_problem`, and run `aaagent dispatch {task.id}`.{extra}")
     return None
 
 
