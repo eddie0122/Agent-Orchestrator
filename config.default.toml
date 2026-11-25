@@ -78,6 +78,10 @@ parallel = 1
 [git]
 # false = .aaagent/ is listed in .git/info/exclude and never committed.
 track_agent_dir = false
+# true = aaagent commits an approved task itself (plain git add + git commit), using the
+# `## Commit message` section of the worker's report. false, or a report without one, means a
+# worker job commits instead (the fallback).
+direct_commit = true
 # Where tasks commit: "current" = the checked-out branch; "branch" = a new branch per batch of
 # tasks (feat/…, fix/…); "pr" = like "branch", then push it and open a pull request (gh) when
 # the last task of the batch is committed; "pr-auto" = like "pr", but the planner opens the

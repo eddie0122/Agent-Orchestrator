@@ -30,3 +30,9 @@ Use `status: done` when everything in the plan is implemented and validation pas
 (every command you ran and its result, with the key output lines)
 ## Deviations and assumptions
 ## Open questions
+## Commit message
+
+The `## Commit message` section is the message for the whole task, which aaagent uses to commit
+it: the first line is the subject in conventional-commit style `type(scope): summary`, imperative
+mood, at most 72 characters; then an empty line; then a few short `- ` bullets saying what changed
+and why. Plain text, no code fence.
