@@ -12,12 +12,40 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
+os.environ.setdefault("AAAGENT_POLL_SECONDS", "0.05")
 
 from aaagent import worker  # noqa: E402
 
 
 def completed(returncode: int) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess([], returncode)
+
+
+class PollSecondsTest(unittest.TestCase):
+    def test_unset_uses_poll_seconds(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(worker.poll_seconds(), worker.POLL_SECONDS)
+
+    def test_explicit_default_is_honoured(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(worker.poll_seconds(2.5), 2.5)
+
+    def test_valid_value_overrides_both_defaults(self):
+        with mock.patch.dict(os.environ, {"AAAGENT_POLL_SECONDS": "0.05"}):
+            self.assertEqual(worker.poll_seconds(), 0.05)
+            self.assertEqual(worker.poll_seconds(10.0), 0.05)
+
+    def test_invalid_values_fall_back_to_the_default(self):
+        for raw in ("", "soon", "0", "-1"):
+            with self.subTest(raw=raw), \
+                    mock.patch.dict(os.environ, {"AAAGENT_POLL_SECONDS": raw}):
+                self.assertEqual(worker.poll_seconds(), worker.POLL_SECONDS)
+                self.assertEqual(worker.poll_seconds(0.7), 0.7)
+
+    def test_poll_seconds_is_read_at_call_time(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(worker, "POLL_SECONDS", 0.01):
+            self.assertEqual(worker.poll_seconds(), 0.01)
 
 
 class FingerprintTest(unittest.TestCase):

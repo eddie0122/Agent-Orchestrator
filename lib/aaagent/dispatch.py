@@ -382,7 +382,7 @@ def enqueue_commit(project: Path, task: Task, step: Step, cfg: Config,
             printed = True
         if deadline is not None and time.monotonic() >= deadline:
             return None
-        sleep(1)
+        sleep(worker.poll_seconds(1.0))
 
 
 def _checkpoint(project: Path, task: Task, cfg: Config) -> int:
@@ -603,7 +603,7 @@ def wait(project: Path, ref: str) -> int:
             if result is not None:
                 break
             if not _job_present(project, job):
-                time.sleep(0.5)
+                time.sleep(min(0.5, worker.poll_seconds()))
                 result = _result_or_none(project, job["id"])
                 if result is None:
                     result = {"status": "error", "error": "job disappeared from the queue",
@@ -614,7 +614,7 @@ def wait(project: Path, ref: str) -> int:
             if time.time() - last_beat >= HEARTBEAT_SECONDS:
                 print(f"  … still working ({(time.time() - started) / 60:.0f} min)", flush=True)
                 last_beat = time.time()
-            time.sleep(1)
+            time.sleep(worker.poll_seconds(1.0))
         retry = _finalize(project, task, cfg, job, result)
         if retry is None:
             return 0 if task.load().get("status") != "failed" else 1

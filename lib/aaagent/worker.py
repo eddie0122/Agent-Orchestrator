@@ -23,6 +23,23 @@ from .backends import BOLD, DIM, GREEN, RED, RESET, color_enabled, paint
 from .config import REVIEWER, Config, infer_backend
 
 POLL_SECONDS = 1.0
+
+
+def poll_seconds(default: float | None = None) -> float:
+    """How long a polling loop sleeps: `default` (POLL_SECONDS when None).
+
+    AAAGENT_POLL_SECONDS, a positive number, overrides it (the tests set it low). Anything
+    else (unset, empty, not a number, 0 or negative) means the default.
+    """
+    fallback = POLL_SECONDS if default is None else default
+    raw = os.environ.get("AAAGENT_POLL_SECONDS", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
+
+
 # How often an idle daemon looks whether aaagent's own code changed (it then restarts itself).
 RELOAD_CHECK_SECONDS = 5.0
 # The most review jobs one daemon runs at once ([reviewer] parallel).
@@ -466,7 +483,7 @@ def _serve_pool(project: Path, worker: str, cfg: Config, tag: str, n: int,
             else:
                 waiting_shown = False
             # A short sleep: a finished job frees its slot promptly.
-            time.sleep(0.2)
+            time.sleep(min(0.2, poll_seconds()))
     except KeyboardInterrupt:
         stopping.set()
         _kill_all()
@@ -526,7 +543,7 @@ def serve(project: Path, worker: str, once: bool = False, quiet_wait: bool = Fal
                 if not waiting_shown and not quiet_wait:
                     print(f"{tag} waiting for a plan…", flush=True)
                 waiting_shown = True
-                time.sleep(POLL_SECONDS)
+                time.sleep(poll_seconds())
                 continue
             waiting_shown = False
             job, claimed_path = claimed

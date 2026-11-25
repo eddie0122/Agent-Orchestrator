@@ -433,6 +433,8 @@ node --test vscode/test/                   # extension logic + activate() agains
 python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<version>.vsix
 ```
 
+`AAAGENT_POLL_SECONDS` shortens the daemon and dispatch polling interval and is meant for tests.
+
 | path | role |
 |---|---|
 | `lib/aaagent/cli.py` | commands |

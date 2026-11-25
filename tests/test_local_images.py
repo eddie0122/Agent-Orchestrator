@@ -14,6 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "claude" / "hooks" / "local_images.py"
+os.environ.setdefault("AAAGENT_POLL_SECONDS", "0.05")
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"png data"
 
