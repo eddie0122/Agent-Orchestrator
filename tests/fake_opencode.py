@@ -13,6 +13,7 @@ Env:
   FAKE_OC_REVIEW_SLEEP  seconds a review job sleeps before writing the review (default 0)
   FAKE_OC_ARGS_LOG  file to append each invocation's argv (JSON) to
   FAKE_OC_ENV_LOG   file to append each invocation's PWD and real cwd (JSON) to
+  FAKE_OC_COMMIT_MSG  `## Commit message` text for the implement/fix report (\n = newline)
 """
 
 import json
@@ -128,8 +129,13 @@ def main():
     if model not in os.environ.get("FAKE_OC_NOREPORT", "").split(","):
         report = re.search(r"Write your report to: (\S+)", prompt).group(1)
         rnd = re.search(r"round: (\d+)", prompt).group(1)
+        extra = ""
+        if "FAKE_OC_COMMIT_MSG" in os.environ:
+            extra = ("\n## Commit message\n"
+                     + os.environ["FAKE_OC_COMMIT_MSG"].replace("\\n", "\n") + "\n")
         with open(report, "w") as fh:
-            fh.write(f"---\ntask: x\nround: {rnd}\nstatus: done\n---\n## Summary\nby {model}\n")
+            fh.write(f"---\ntask: x\nround: {rnd}\nstatus: done\n---\n## Summary\nby {model}\n"
+                     + extra)
     emit({"type": "step_finish", "sessionID": session,
           "part": {"type": "step-finish", "tokens": {"input": 100, "output": 10}}})
     return 0

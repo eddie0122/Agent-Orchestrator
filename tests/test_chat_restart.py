@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "claude" / "hooks" / "chat_stop.py"
 RESTART = ROOT / "claude" / "hooks" / "chat_restart.py"
 sys.path.insert(0, str(ROOT / "lib"))
+os.environ.setdefault("AAAGENT_POLL_SECONDS", "0.05")
 
 from aaagent import session  # noqa: E402
 

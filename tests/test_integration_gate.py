@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "tests"))
+os.environ.setdefault("AAAGENT_POLL_SECONDS", "0.05")
 
 from aaagent import branching  # noqa: E402
 from aaagent.config import Config, project_config_path, set_toml_value  # noqa: E402

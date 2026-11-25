@@ -97,9 +97,17 @@ def ensure_shadow(project: Path) -> None:
         _run(project, ["commit", "-q", "--allow-empty", "-m", "aaagent: starting point"], env)
 
 
-def git(project: Path, *args: str, check: bool = True) -> str:
-    proc = subprocess.run(["git", *args], cwd=project, capture_output=True, text=True,
-                          env=git_env(project))
+def _git_run(project: Path, args, timeout: float | None = None) -> subprocess.CompletedProcess:
+    """Run git with `git_env`, no stdin and an optional timeout; RuntimeError on a timeout."""
+    try:
+        return subprocess.run(["git", *args], cwd=project, capture_output=True, text=True,
+                              env=git_env(project), stdin=subprocess.DEVNULL, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git {' '.join(args)} timed out after {timeout:g} s") from None
+
+
+def git(project: Path, *args: str, check: bool = True, timeout: float | None = None) -> str:
+    proc = _git_run(project, args, timeout)
     if check and proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout
@@ -223,6 +231,55 @@ def checkpoint(project: Path, message: str, pathspecs: list[str] | None = None,
     new = head(project)
     if new is None:
         raise RuntimeError("the checkpoint did not create a commit")
+    return new
+
+
+def commit_paths(workdir: Path, subject: str, body: str, pathspecs: list[str] | None,
+                 exclude: list[str] | tuple[str, ...] = (), timeout: float = 120.0) -> str:
+    """Stage `pathspecs` in `workdir` and commit them as `subject` (+ `body`); the new HEAD.
+
+    Stages like `checkpoint()`: a declared path with no change is dropped (otherwise
+    `git add` fails with "did not match any files"), and `exclude` paths
+    (`preexisting_dirty`, worktree links) are staged and then unstaged again. `.aaagent/` is
+    always unstaged after the add, so it is never committed.
+
+    The project's commit hooks run: no `--no-verify`, no `--allow-empty`.
+
+    Nothing to commit raises RuntimeError("nothing to commit"). A failed or timed-out commit
+    unstages what this function staged, so the index is as it was before, and re-raises.
+    """
+    specs = list(pathspecs) if pathspecs else ["."]
+    if specs != ["."]:
+        specs = [spec for spec in specs
+                 if _git_run(workdir, ["status", "--porcelain", "--", spec],
+                             timeout).stdout.strip()]
+
+    def unstage() -> None:
+        # `.aaagent` is reset too: it is ignored in a normal project (so `git add` skips it),
+        # but with track_agent_dir = true it would otherwise be committed with the task.
+        git(workdir, "reset", "-q", "--", *specs, AGENT_DIR, check=False, timeout=timeout)
+
+    if not specs:
+        raise RuntimeError("nothing to commit")
+    try:
+        git(workdir, "add", "-A", "--", *specs, timeout=timeout)
+        git(workdir, "reset", "-q", "--", AGENT_DIR, check=False, timeout=timeout)
+        if exclude:
+            # A path that is not in the index cannot be unstaged; `git reset` complains.
+            git(workdir, "reset", "-q", "--", *exclude, check=False, timeout=timeout)
+        if _git_run(workdir, ["diff", "--cached", "--quiet"], timeout).returncode == 0:
+            unstage()
+            raise RuntimeError("nothing to commit")
+        args = ["commit", "-q", "-m", subject]
+        if body:
+            args += ["-m", body]
+        git(workdir, *args, timeout=timeout)
+    except RuntimeError:
+        unstage()
+        raise
+    new = head(workdir)
+    if new is None:
+        raise RuntimeError("the commit did not create a commit")
     return new
 
 

@@ -14,6 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
+os.environ.setdefault("AAAGENT_POLL_SECONDS", "0.05")
 
 from aaagent import dispatch, gitutil, session, status, tasks, tui, worker  # noqa: E402
 from aaagent.config import Config  # noqa: E402

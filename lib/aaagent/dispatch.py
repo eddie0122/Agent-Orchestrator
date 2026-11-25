@@ -201,6 +201,55 @@ def check_settings(cfg: Config) -> tuple[str, str, float]:
     return command, on_fail, timeout
 
 
+COMMIT_HEADING = "commit message"
+
+
+def commit_message(task: Task) -> tuple[str, str] | None:
+    """(subject, body) from the latest report's `## Commit message` section, or None."""
+    rnd = task.latest_report()
+    if not rnd:
+        return None
+    try:
+        text = task.report(rnd).read_text(errors="replace")
+    except OSError:
+        return None
+    section: list[str] | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            if section is not None:
+                break
+            if stripped[3:].strip().lower() == COMMIT_HEADING:
+                section = []
+            continue
+        if section is not None and not stripped.startswith("```"):
+            section.append(line)
+    if section is None:
+        return None
+    lines = [line.rstrip() for line in section]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines:
+        return None
+    subject = lines[0].strip().strip("`\"'").strip()
+    if not subject or len(subject) > 100:
+        return None
+    body = "\n".join(lines[1:]).strip()
+    trailer = str(Config.load(task.project).data.get("git", {}).get("commit_trailer", "") or "")
+    trailer = trailer.strip()
+    if trailer:
+        body = f"{body}\n\n{trailer}" if body else trailer
+    return subject, body
+
+
+def direct_commit_enabled(cfg: Config) -> bool:
+    """`[git] direct_commit`: aaagent commits approved tasks itself (the default)."""
+    section = cfg.data.get("git")
+    section = section if isinstance(section, dict) else {}
+    enabled = section.get("direct_commit", True)
+    return not (enabled is False or str(enabled).strip().lower() in ("false", "0", "no", "off"))
+
+
 def check_file(task: Task, rnd: int) -> Path:
     """The automatic check's result file for a round."""
     return task.path / f"check-{rnd}.md"
@@ -382,7 +431,7 @@ def enqueue_commit(project: Path, task: Task, step: Step, cfg: Config,
             printed = True
         if deadline is not None and time.monotonic() >= deadline:
             return None
-        sleep(1)
+        sleep(worker.poll_seconds(1.0))
 
 
 def _checkpoint(project: Path, task: Task, cfg: Config) -> int:
@@ -416,6 +465,92 @@ def _checkpoint(project: Path, task: Task, cfg: Config) -> int:
     print(f"Task {task.id} is complete. Tell the user what was done.")
     for line in branching.on_idle(project, cfg):
         print(line, flush=True)
+    return 0
+
+
+def _record_commit(project: Path, task: Task, cfg: Config, state: dict, who: str,
+                   new_head: str, mins: float | None) -> None:
+    """Record a commit and print its outcome (aaagent's own, or a commit job's)."""
+    task.update(current_job=None, status="committed", commit=new_head)
+    task.log_event("committed", worker=who, commit=new_head)
+    tasks.release_active(project, task)
+    if mins is None:
+        print(f"✓ committed by {who}:")
+    else:
+        print(f"✓ committed by {who} in {mins:.1f} min:")
+    print("  " + gitutil.git(project, "log", "-1", "--format=%h %s", check=False).strip())
+    dirty = gitutil.dirty_paths(project, task.pathspecs())
+    left = [p for p in dirty if p not in (state.get("preexisting_dirty") or [])]
+    if left:
+        print(f"  ! still uncommitted after the commit: {', '.join(left)}")
+    print(f"Task {task.id} is complete. Tell the user what was done.")
+    for line in branching.on_idle(project, cfg):
+        print(line, flush=True)
+
+
+def _direct_commit(project: Path, task: Task, cfg: Config) -> int | None:
+    """Commit an approved task in aaagent itself; None tells dispatch to fall back to a job.
+
+    The message comes from the latest report's `## Commit message` section. Anything that
+    prevents aaagent from committing (the setting is off, no valid message, another task is
+    committing for too long, a git or hook failure, nothing to commit) leaves the task as it
+    is, so the existing commit job runs instead.
+    """
+    if not direct_commit_enabled(cfg):
+        print("note: [git] direct_commit is off; a worker commits", flush=True)
+        return None
+    message = commit_message(task)
+    if message is None:
+        print("note: no commit message in the report; a worker commits", flush=True)
+        return None
+    subject, body = message
+    workdir = worktrees.workdir(project, task)
+    own_tree = str(workdir) != str(project)
+    state = task.load()
+    if state.get("worktree") and not own_tree:
+        # The worktree is gone: let the commit job path raise its "worktree is missing" error
+        # instead of committing in the shared tree.
+        return None
+    if own_tree:
+        exclude = worktrees.link_entries(cfg)
+    else:
+        exclude = list(state.get("preexisting_dirty") or [])
+    pathspecs = task.pathspecs()
+
+    if own_tree:
+        try:
+            gitutil.commit_paths(workdir, subject, body, pathspecs, exclude=exclude)
+        except RuntimeError as exc:
+            print(f"note: aaagent could not commit ({exc}); a worker commits instead", flush=True)
+            task.log_event("direct commit failed", error=str(exc))
+            return None
+        # The worktree has its own index: commit first, then merge (never while a lock is held).
+        return _merge_worktree(project, task, cfg, "aaagent", None)
+
+    deadline = time.monotonic() + 30 * 60
+    printed = False
+    while True:
+        with tasks.active_lock(project):
+            other = _committing_task(project, task)
+            if other is None:
+                try:
+                    new_head = gitutil.commit_paths(project, subject, body, pathspecs,
+                                                    exclude=exclude)
+                except RuntimeError as exc:
+                    print(f"note: aaagent could not commit ({exc}); a worker commits instead",
+                          flush=True)
+                    task.log_event("direct commit failed", error=str(exc))
+                    return None
+                break
+        if not printed:
+            print(f"waiting for {other}'s commit to finish…", flush=True)
+            printed = True
+        if time.monotonic() >= deadline:
+            print("note: another task has been committing for 30 min; a worker commits instead",
+                  flush=True)
+            return None
+        time.sleep(worker.poll_seconds(1.0))
+    _record_commit(project, task, cfg, state, "aaagent", new_head, None)
     return 0
 
 
@@ -453,6 +588,8 @@ def _merge_worktree(project: Path, task: Task, cfg: Config,
     task.update(worktree=None)
     if who and mins is not None:
         print(f"✓ committed by {who} in {mins:.1f} min:")
+    elif who:
+        print(f"✓ committed by {who}:")
     else:
         print("✓ merged:")
     applied = len(commits) - len(skipped)
@@ -540,6 +677,10 @@ def dispatch(project: Path, ref: str, worker_override: str | None = None, force:
                 return _merge_worktree(project, task, cfg, None, None)
         if step.phase == "commit" and gitutil.no_git(project):
             return _checkpoint(project, task, cfg)
+        if step.phase == "commit":
+            code = _direct_commit(project, task, cfg)
+            if code is not None:
+                return code
         print(f"{task.id}: {step.phase} round {step.round} → {step.worker} "
               f"({cfg.worker_label(step.worker)}){note}", flush=True)
         if step.phase == "commit":
@@ -603,7 +744,7 @@ def wait(project: Path, ref: str) -> int:
             if result is not None:
                 break
             if not _job_present(project, job):
-                time.sleep(0.5)
+                time.sleep(min(0.5, worker.poll_seconds()))
                 result = _result_or_none(project, job["id"])
                 if result is None:
                     result = {"status": "error", "error": "job disappeared from the queue",
@@ -614,7 +755,7 @@ def wait(project: Path, ref: str) -> int:
             if time.time() - last_beat >= HEARTBEAT_SECONDS:
                 print(f"  … still working ({(time.time() - started) / 60:.0f} min)", flush=True)
                 last_beat = time.time()
-            time.sleep(1)
+            time.sleep(worker.poll_seconds(1.0))
         retry = _finalize(project, task, cfg, job, result)
         if retry is None:
             return 0 if task.load().get("status") != "failed" else 1
@@ -693,18 +834,7 @@ def _finalize(project: Path, task: Task, cfg: Config, job: dict, result: dict) -
             # A worktree task committed on its own branch: apply it to the checkout instead.
             _merge_worktree(project, task, cfg, who, mins)
             return None
-        task.update(current_job=None, status="committed", commit=new_head)
-        task.log_event("committed", worker=who, commit=new_head)
-        tasks.release_active(project, task)
-        print(f"✓ committed by {who} in {mins:.1f} min:")
-        print("  " + gitutil.git(project, "log", "-1", "--format=%h %s", check=False).strip())
-        dirty = gitutil.dirty_paths(project, task.pathspecs())
-        left = [p for p in dirty if p not in (state.get("preexisting_dirty") or [])]
-        if left:
-            print(f"  ! still uncommitted after the commit: {', '.join(left)}")
-        print(f"Task {task.id} is complete. Tell the user what was done.")
-        for line in branching.on_idle(project, cfg):
-            print(line, flush=True)
+        _record_commit(project, task, cfg, state, who, new_head, mins)
         return None
 
     if phase == "review":

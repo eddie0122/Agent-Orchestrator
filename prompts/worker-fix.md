@@ -11,7 +11,7 @@ Steps:
 1. Read the review completely. If you do not already know this task, read the plan and the earlier reports and reviews first. The code changes from earlier rounds are already in the working tree (`git status`, `git diff`). The plan may have been revised since the last round (always after a `plan_problem` review): re-read the plan before changing code.
 2. Address every numbered item under "Required changes". Optional suggestions are yours to judge; say in the report which ones you applied. If a required change contradicts the plan or cannot be done without changing files outside this task's scope, do not work around it: explain why under "Open questions" and use `status: blocked`.
 3. Stay in scope. Do not undo earlier work the review did not ask you to change.
-4. Run the plan's validation commands again, then the project's full test suite, and fix failures your change caused. If the same check still fails after three different fix attempts, stop changing code and write the report with `status: partial`, the failing output, and what you tried.
+4. While iterating, run only the tests that cover the change: the plan's targeted commands, or one test module or test case. Run the plan's validation commands and the project's full test suite once, after the change is complete, and again only if you had to fix something after that run; fix failures your change caused. The full suite must pass before you write the report. If the same check still fails after three different fix attempts, stop changing code and write the report with `status: partial`, the failing output, and what you tried.
 5. Never run git commit, git push, git stash, git reset, git rebase, git clean, or switch branches.
 6. Do not edit anything inside .aaagent/ except your report file.
 7. Write your report to: {report}
@@ -34,3 +34,9 @@ Use `status: done`, `status: partial` or `status: blocked` as appropriate. Then 
 (every command you ran and its result, with the key output lines)
 ## Deviations and assumptions
 ## Open questions
+## Commit message
+
+The `## Commit message` section is the message for the whole task, which aaagent uses to commit
+it: the first line is the subject in conventional-commit style `type(scope): summary`, imperative
+mood, at most 72 characters; then an empty line; then a few short `- ` bullets saying what changed
+and why. It must describe the whole task, not only this round's fix. Plain text, no code fence.

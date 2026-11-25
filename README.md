@@ -1,6 +1,6 @@
 # aaagent
 
-Chat with Claude Opus in your terminal. Opus plans and reviews; cheaper opencode workers implement, fix, and commit.
+Chat with Claude Opus in your terminal. Opus plans and reviews; cheaper opencode workers implement and fix, and aaagent commits approved tasks itself.
 
 ```
 you ──chat──► Opus (Claude Code, Pro subscription): the planner
@@ -9,7 +9,7 @@ you ──chat──► Opus (Claude Code, Pro subscription): the planner
                  │      ├─► worker implements          → report-1.md
                  │      ├─► reviewer reviews           → review-1.md  (approved / changes_requested / plan_problem)
                  │      └─► worker fixes → reviewer …  (repeats until approved or 3 rounds)
-                 │ 3. checks the result, aaagent dispatch 001 ──► worker commits
+                 │ 3. checks the result, aaagent dispatch 001 ──► commits the task itself
                  ▼
               tells you what changed and the commit hash
 ```
@@ -64,6 +64,7 @@ With `[reviewer] parallel = N` (1–8, default 1) the reviewer daemon runs up to
 - **Check the plan against the code first.** A worker reads the plan, then every file and symbol it names, and records in its report where the plan and the code disagree.
 - **Run the full test suite at the end**, not only the plan's own commands, and fix what its change broke. If the same check still fails after three different attempts, it stops and reports `status: partial`.
 - **Report status** is `done` (implemented, validation passes), `partial` (part of it; the failing check and the attempts are named) or `blocked` (it could not proceed; the plan is wrong).
+- **The report ends with `## Commit message`:** a conventional-commit subject line (`type(scope): summary`, imperative, at most 72 characters), an empty line, then short `- ` bullets saying what changed and why. aaagent uses it to commit the approved task itself; without a valid one a commit job does it instead.
 - **Plan template sections:** Goal, Context, Changes, Steps, Interfaces, Pitfalls, Validation (the full suite last), Done when, Out of scope.
 - **The reviewer does not trust the report.** It re-runs the plan's validation and the full test suite itself, checks every "Done when" criterion, and looks for bugs and scope creep. From round 2 on it stays consistent: it only repeats items still unaddressed, failures introduced since the last round, or serious bugs it missed before.
 - **`plan_problem`** is for a plan that is itself wrong — impossible or contradictory, or its `files:`/Out of scope rule forbids the only correct fix. The reviewer then says exactly what the planner must change instead of asking the worker for a workaround.
@@ -284,11 +285,11 @@ files: lib/aaagent/health.py, tests/test_health.py, docs/
 - Entries are repo-relative. `dir/` means everything below that directory; `*`, `?` and `[` make a glob (`lib/aaagent/*.py`). Absolute paths, `..` and `.aaagent/` are refused.
 - `aaagent dispatch` lets a task start only when no other active task's `files:` overlap its own. Overlapping tasks, or a task without `files:` while another is active, are refused with a message that names the other task. A task without `files:` keeps the old behaviour: it needs the working tree to itself.
 - Disjoint tasks go to different workers when one is free: if the default worker is busy with another task, dispatch picks the first idle worker. Fix rounds stay on the task's own worker.
-- `aaagent diff`, the review prompt and the commit job only look at the task's declared files, and a round that changes files outside them is reported as a warning (the reviewer decides what to do).
+- `aaagent diff`, the review prompt and the commit (aaagent's own, or the fallback job) only look at the task's declared files, and a round that changes files outside them is reported as a warning (the reviewer decides what to do).
 - Commits never run at the same time: a task waits while another task is committing, so the shared git index is never touched by two workers at once.
 - Your own uncommitted changes are still kept out of the commits; they are refreshed when the task is first dispatched.
 
-With `[parallel] isolation = "worktree"`, each task also gets its own git worktree (`.aaagent/worktrees/<task>`, branch `aaagent/<task>`): its implement, fix and review jobs run there, so the tasks' tests never see each other's half-written code. aaagent copies the plan, reports and reviews in and out. After approval the commit job commits in the worktree, and aaagent applies the commit to the session branch (fast-forward, or cherry-pick when other tasks were committed meanwhile), then removes the worktree and its branch. If that fails, for example because your own uncommitted changes are in the way, the task stops with its worktree kept, and the next `aaagent dispatch` retries only the merge. `[parallel] links` (a virtualenv, `node_modules`, `.env`) are linked into each new worktree, and `[parallel] setup` (for example `npm ci`) runs once in it. Worktrees need git and `track_agent_dir = false`; otherwise tasks use the shared tree.
+With `[parallel] isolation = "worktree"`, each task also gets its own git worktree (`.aaagent/worktrees/<task>`, branch `aaagent/<task>`): its implement, fix and review jobs run there, so the tasks' tests never see each other's half-written code. aaagent copies the plan, reports and reviews in and out. After approval aaagent commits in the worktree itself (a commit job only as the fallback), and aaagent applies the commit to the session branch (fast-forward, or cherry-pick when other tasks were committed meanwhile), then removes the worktree and its branch. If that fails, for example because your own uncommitted changes are in the way, the task stops with its worktree kept, and the next `aaagent dispatch` retries only the merge. `[parallel] links` (a virtualenv, `node_modules`, `.env`) are linked into each new worktree, and `[parallel] setup` (for example `npm ci`) runs once in it. Worktrees need git and `track_agent_dir = false`; otherwise tasks use the shared tree.
 
 ### Branches and pull requests
 
@@ -340,7 +341,7 @@ Code enforces these; they are not just prompt instructions:
 
 - **Opus cannot edit project files.** A hook blocks its edit tools outside `.aaagent/`, and `git commit`/`git push` are denied for it.
 - **Implementing workers cannot commit.** `aaagent-worker` denies `git commit/push/reset/rebase/clean/stash/checkout/switch`, `sudo`, destructive `docker` commands, files outside the project, `.env` files, and edits to plans and reviews.
-- **The commit step happens only after approval.** `aaagent dispatch` sends a commit job only when the latest review says `verdict: approved`. The `aaagent-committer` agent cannot edit files and can only run git status/diff/log/add/commit; `--amend` and `add -A`/`add .` are denied.
+- **The commit step happens only after approval.** `aaagent dispatch` commits when the latest review says `verdict: approved`: aaagent itself, with the `## Commit message` from the report, or the `aaagent-committer` job as the fallback (no message, `direct_commit = false`, or git failed). Repo commit hooks run. The `aaagent-committer` agent cannot edit files and can only run git status/diff/log/add/commit; `--amend` and `add -A`/`add .` are denied.
 - **Nothing is pushed until you say yes.** Only `aaagent pr` pushes a branch to `origin` and opens its pull request; `aaagent branch-done` finishes the branch without touching the network, and nothing else does either. Everything else is up to you.
 - **Parallel tasks only with disjoint `files:`.** Several tasks may be active in one working tree, but only when every plan declares the files it may change and those lists do not overlap; anything else keeps the working tree to one task. With `[parallel] isolation = "worktree"` each task also gets its own git worktree, and its commit is applied to the branch only after approval.
 - **Your own uncommitted changes stay out of the commit.** Files that were already modified when a task started are listed and excluded from its commit.
@@ -380,6 +381,7 @@ job_timeout_minutes = 30
 
 [git]
 commit_trailer = ""               # e.g. "Co-Authored-By: aaagent <noreply@example.invalid>"
+direct_commit = true              # aaagent commits approved tasks itself with the report's `## Commit message`; false = a worker commit job
 branch_mode = "current"           # current = the checked-out branch; branch = a branch per chat session; pr = that + push and pull request when you say yes; pr-auto = that without asking, then the chat restarts; none = No Git, aaagent keeps its own history in .aaagent/shadow.git
 
 [parallel]
@@ -432,6 +434,8 @@ python3 -m unittest discover -s tests -q   # fake opencode, claude and gh; no qu
 node --test vscode/test/                   # extension logic + activate() against a stub vscode
 python3 vscode/build_vsix.py               # → vscode/dist/local.aaagent-<version>.vsix
 ```
+
+`AAAGENT_POLL_SECONDS` shortens the daemon and dispatch polling interval and is meant for tests.
 
 | path | role |
 |---|---|
